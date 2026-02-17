@@ -1,2 +1,5 @@
 __pycache__
 output.jpg
+*.png
+*.jpg
+test.py
