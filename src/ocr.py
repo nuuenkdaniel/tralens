@@ -14,6 +14,9 @@ class Text_Box:
 class Text_Group:
     def __init__(self, group: list[Text_Box]):
         self.group = group
+    
+    def get(self, index: int):
+        return self.group[index]
 
 class OCR:
     def __init__(self, image_path: str):

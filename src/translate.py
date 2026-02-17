@@ -4,10 +4,10 @@ import re
 import json
 
 class Translate:
-    def __init__(self, ollama_host: str = "127.0.0.1") -> None:
+    def __init__(self, model: str = "gemma3:27b", ollama_host: str = "127.0.0.1") -> None:
         print("Loading TranslateGemma")
         self.client = Client(host=ollama_host)
-        self.client.generate(model="translategemma:27b", prompt="")
+        self.client.generate(model=model, prompt="")
 
     def _sort_group(self, text_group: Text_Group) -> list[Text_Box]:
         group = text_group.group
@@ -33,7 +33,7 @@ class Translate:
             pass
         return []
 
-    def translate_groups(self, groups: list[Text_Group]) -> list[Text_Group]:
+    def translate_groups(self, groups: list[Text_Group], image_path) -> list[Text_Group]:
         translated_groups = []
         for i, group in enumerate(groups):
             sorted_group = self._sort_group(group)
@@ -45,11 +45,12 @@ class Translate:
                 Task:
                 1. Translate each "Line" below individually into English.
                 2. Use the other lines in the group as CONTEXT to determine the correct meaning (e.g., for ambiguous words).
-                3. Do NOT merge the lines. Keep them separate.
-                4. **Handling Line Breaks (<br>):**
+                3. Use the provided image as CONTEXT and error correction
+                4. Do NOT merge the lines. Keep them separate.
+                5. **Handling Line Breaks (<br>):**
                    - If the text is a **paragraph** or **list**, PRESERVE the `<br>` tags in your translation.
                    - If the text is a **bilingual duplicate** (e.g., Japanese <br> English), output ONLY the English translation (remove the break).
-                5. Just translate, do NOT try to explain or give any additional comments
+                6. Just translate, do NOT try to explain or give any additional comments
 
                 Input Text Group:
                 {lines}
@@ -60,8 +61,15 @@ class Translate:
                     {{ "id": 2, "original": "...", "translation": "..." }}
                 ]
                 """
-            response = self.client.generate(model="translategemma:27b", prompt=prompt)
-            translated_json = self._extract_json_lists(response["response"])
+            response = self.client.chat(
+                model="gemma3:4b",
+                messages=[{
+                    "role": "user",
+                    "content": prompt,
+                    "images": [image_path]
+                }]
+            )
+            translated_json = self._extract_json_lists(response["message"]["content"])
 
             translated_group = []
             for i, box in enumerate(sorted_group):
