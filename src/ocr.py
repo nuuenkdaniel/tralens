@@ -186,3 +186,8 @@ class OCR:
         canvas.save(output_path)
         print(f"Visualization saved to {output_path}")
         canvas.show()
+
+if __name__ == "__main__":
+    ocr = OCR("japsigns.jpg")
+    groups = ocr.process_image()
+    ocr.visualize_groups(groups)

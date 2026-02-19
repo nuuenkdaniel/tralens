@@ -1,5 +1,7 @@
 __pycache__
 output.jpg
+*venv*
 *.png
 *.jpg
+*.env
 test.py
