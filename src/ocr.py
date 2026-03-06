@@ -52,6 +52,7 @@ class OCR:
             confidence = text_box.confidence
             bbox = text_box.bbox
             
+            # text_boxes.append(Text_Box(confidence, bbox, text_box.text))
             if confidence and 0.8 <= confidence < 1.0:
                 text_boxes.append(Text_Box(confidence, bbox, text_box.text))
             else:
@@ -59,11 +60,11 @@ class OCR:
                 cropped_enhanced = ImageEnhance.Contrast(cropped).enhance(1.1)
                 prediction_retry = self.surya_predict(cropped_enhanced)
                 old_x1, old_y1, _, _ = padded_bbox
-                
+
                 for new_text_box in prediction_retry[0].text_lines:
                     new_confidence = new_text_box.confidence
                     x1, y1, x2, y2 = new_text_box.bbox
-                    if new_confidence and 0.7 <= new_confidence < 1.0:
+                    if new_confidence and 0.6 <= new_confidence < 1.0:
                         new_bbox = (x1+old_x1, y1+old_y1, x2+old_x1, y2+old_y1)
                         text_boxes.append(Text_Box(new_confidence, new_bbox, new_text_box.text))
 
@@ -188,6 +189,6 @@ class OCR:
         canvas.show()
 
 if __name__ == "__main__":
-    ocr = OCR("japsigns.jpg")
+    ocr = OCR("images/german-road-signs-header.jpg")
     groups = ocr.process_image()
     ocr.visualize_groups(groups)

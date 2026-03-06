@@ -5,3 +5,4 @@ output.jpg
 *.jpg
 *.env
 test.py
+*.pt
