@@ -7,6 +7,7 @@ rrequires-python = "==3.10.*"
 dependencies = [
     "paddleocr[doc-parser]>=3.4.0",
     "paddlepaddle-gpu==3.3.0",
+    "scikit-learn>=1.7.2",
 ]
 
 [[tool.uv.index]]

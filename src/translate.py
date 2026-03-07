@@ -10,7 +10,6 @@ class Translate:
         self.client.generate(model=model, prompt="")
 
     def _sort_group(self, text_group: Text_Group) -> list[Text_Box]:
-        return text_group.group
         group = text_group.group
         total_vertical = 0
         for text_box in group:
@@ -64,7 +63,7 @@ class Translate:
                 ]
                 """
             response = self.client.chat(
-                model="gemma3:4b",
+                model="gemma3:27b",
                 messages=[{
                     "role": "user",
                     "content": prompt,
@@ -81,7 +80,7 @@ class Translate:
                 else:
                     translation = "Failed"
 
-                translated_text_box = Text_Box(box.confidence, box.bbox, translation)
+                translated_text_box = Text_Box(box.confidence, box.poly, translation)
                 translated_group.append(translated_text_box)
 
             translated_groups.append(Text_Group(translated_group))
@@ -90,11 +89,7 @@ class Translate:
 if __name__ == "__main__":
     image = "images/japsigns.jpg"
     ocr = OCR(image)
-    results = ocr.predict()[0]
-    groups = []
-    for box in results:
-        group = [box]
-        groups.append(Text_Group(group))
+    groups = ocr.process_images()[0]
     
     translator = Translate(ollama_host="100.121.133.88") 
     translated = translator.translate_groups(groups, image)
