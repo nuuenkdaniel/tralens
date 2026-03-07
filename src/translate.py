@@ -10,6 +10,7 @@ class Translate:
         self.client.generate(model=model, prompt="")
 
     def _sort_group(self, text_group: Text_Group) -> list[Text_Box]:
+        return text_group.group
         group = text_group.group
         total_vertical = 0
         for text_box in group:
@@ -45,12 +46,13 @@ class Translate:
                 Task:
                 1. Translate each "Line" below individually into English.
                 2. Use the other lines in the group as CONTEXT to determine the correct meaning (e.g., for ambiguous words).
-                3. Use the provided image as CONTEXT and error correction
+                3. Use the provided image as CONTEXT
                 4. Do NOT merge the lines. Keep them separate.
                 5. **Handling Line Breaks (<br>):**
                    - If the text is a **paragraph** or **list**, PRESERVE the `<br>` tags in your translation.
                    - If the text is a **bilingual duplicate** (e.g., Japanese <br> English), output ONLY the English translation (remove the break).
-                6. Just translate, do NOT try to explain or give any additional comments
+                6. Set translation to an empty string if the content is just math or distance markings
+                7. Just translate, do NOT try to explain or give any additional comments
 
                 Input Text Group:
                 {lines}
@@ -84,3 +86,19 @@ class Translate:
 
             translated_groups.append(Text_Group(translated_group))
         return translated_groups
+
+if __name__ == "__main__":
+    image = "images/japsigns.jpg"
+    ocr = OCR(image)
+    results = ocr.predict()[0]
+    groups = []
+    for box in results:
+        group = [box]
+        groups.append(Text_Group(group))
+    
+    translator = Translate(ollama_host="100.121.133.88") 
+    translated = translator.translate_groups(groups, image)
+
+    for tr_group in translated:
+        for text_box in tr_group.group:
+            print(text_box.text)
