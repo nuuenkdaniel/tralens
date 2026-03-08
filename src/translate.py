@@ -4,9 +4,10 @@ import re
 import json
 
 class Translate:
-    def __init__(self, model: str = "gemma3:27b", ollama_host: str = "127.0.0.1") -> None:
-        print("Loading TranslateGemma")
+    def __init__(self, model: str = "qwen3-vl:32b", ollama_host: str = "127.0.0.1") -> None:
+        print(f"Loading {model}")
         self.client = Client(host=ollama_host)
+        self.model = model
         self.client.generate(model=model, prompt="")
 
     def _sort_group(self, text_group: Text_Group) -> list[Text_Box]:
@@ -63,7 +64,7 @@ class Translate:
                 ]
                 """
             response = self.client.chat(
-                model="gemma3:27b",
+                model=self.model,
                 messages=[{
                     "role": "user",
                     "content": prompt,
@@ -87,7 +88,7 @@ class Translate:
         return translated_groups
 
 if __name__ == "__main__":
-    image = "images/japsigns.jpg"
+    image = "images/lmgJZ.jpg"
     ocr = OCR(image)
     groups = ocr.process_images()[0]
     

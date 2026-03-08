@@ -108,7 +108,6 @@ class OCR:
             images_text_groups.append(self._group_boxes(text_boxes))
         return images_text_groups
 
-
     def visualize_groups(self, groups: list[Text_Group], output_path="visualized_groups.png"):
         image = Image.open(self.image_path)
         canvas = image.convert("RGB")
