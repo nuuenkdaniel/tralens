@@ -1,73 +1,56 @@
-from PIL import Image, ImageEnhance, ImageDraw, ImageFont
-from surya.foundation import FoundationPredictor
-from surya.recognition import OCRResult, RecognitionPredictor
-from surya.detection import DetectionPredictor
+from paddleocr import PaddleOCR
 import numpy as np
+from paddlex.inference.models.ts_forecasting.result import visualize
 from sklearn.cluster import DBSCAN
+from PIL import Image, ImageDraw, ImageFont
 
 class Text_Box:
-    def __init__(self, confidence, bbox, text):
+    def __init__(self, confidence, poly, text):
         self.confidence = confidence
-        self.bbox = bbox
+        self.poly = np.array(poly, dtype=np.float32)
         self.text = text
+
+        x1 = int(np.min(self.poly[:, 0]))
+        y1 = int(np.min(self.poly[:, 1]))
+        x2 = int(np.max(self.poly[:, 0]))
+        y2 = int(np.max(self.poly[:, 1]))
+        self.bbox = (x1, y1, x2, y2)
 
 class Text_Group:
     def __init__(self, group: list[Text_Box]):
         self.group = group
-    
+
     def get(self, index: int):
         return self.group[index]
 
 class OCR:
     def __init__(self, image_path: str):
-        self.image = Image.open(image_path)
-
-    @staticmethod
-    def surya_predict(image) -> list[OCRResult]:
-        foundation_predictor = FoundationPredictor()
-        recognition_predictor = RecognitionPredictor(foundation_predictor)
-        detection_predictor = DetectionPredictor()
-        return recognition_predictor([image], det_predictor=detection_predictor, math_mode=False)
-
-    def _crop_bbox(self, bbox):
-        image_w, image_h = self.image.size
-        x1, y1, x2, y2 = map(int, bbox)
-        bbox_w = x2-x1
-        bbox_h = y2-y1
-        pad = int(bbox_w*.08) if bbox_w < bbox_h else int(bbox_h*.08)
-
-        padded_bbox = (
-            max(0, x1-pad),
-            max(0, y1-pad),
-            min(image_w, x2+pad),
-            min(image_h, y2+pad)
+        self.image_path = image_path
+        self.ocr = PaddleOCR(
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=False,
         )
-        return (self.image.crop(padded_bbox), padded_bbox)
 
-    def predict_test_with_retry(self) -> list[Text_Box]:
-        init_prediction = self.surya_predict(self.image)
-        text_boxes = []
+    def predict(self) -> list[list[Text_Box]]:
+        results = self.ocr.predict(self.image_path)
+        images_text_box = []
+        for page in results:
+            res = getattr(page, "res", page)
+            dt_polys = res.get("dt_polys", [])
+            rec_texts = res.get("rec_texts", [])
+            rec_scores = res.get("rec_scores", [])
 
-        for text_box in init_prediction[0].text_lines:
-            confidence = text_box.confidence
-            bbox = text_box.bbox
-            
-            if confidence and 0.8 <= confidence < 1.0:
-                text_boxes.append(Text_Box(confidence, bbox, text_box.text))
-            else:
-                cropped, padded_bbox = self._crop_bbox(bbox)
-                cropped_enhanced = ImageEnhance.Contrast(cropped).enhance(1.1)
-                prediction_retry = self.surya_predict(cropped_enhanced)
-                old_x1, old_y1, _, _ = padded_bbox
-                
-                for new_text_box in prediction_retry[0].text_lines:
-                    new_confidence = new_text_box.confidence
-                    x1, y1, x2, y2 = new_text_box.bbox
-                    if new_confidence and 0.7 <= new_confidence < 1.0:
-                        new_bbox = (x1+old_x1, y1+old_y1, x2+old_x1, y2+old_y1)
-                        text_boxes.append(Text_Box(new_confidence, new_bbox, new_text_box.text))
+            text_boxes = []
+            for i, score in enumerate(rec_scores):
+                if score > 0.5:
+                    polys = dt_polys[i] if i < len(dt_polys) else None
+                    text = rec_texts[i] if i < len(rec_texts) else ""
+                    text_boxes.append(Text_Box(score, polys, text))
+                    print(f"confidence: {score} | {text}")
 
-        return text_boxes
+            images_text_box.append(text_boxes)
+        return images_text_box
 
     def _calc_edge_dist(self, box1: Text_Box, box2: Text_Box):
         b1 = box1.bbox
@@ -118,28 +101,16 @@ class OCR:
 
         return [Text_Group(group) for group in grouped_results.values()]
 
-    def process_image(self):
-        text_boxes = self.predict_test_with_retry()
-        return self._group_boxes(text_boxes)
-
-    # def visualize_groups(self, groups: list[Text_Group], output_path="visualized_groups.png"):
-    #     canvas = self.image.convert("RGB")
-    #     draw = ImageDraw.Draw(canvas)
-    #     for i, tg in enumerate(groups):
-    #         all_x1 = [box.bbox[0] for box in tg.group]
-    #         all_y1 = [box.bbox[1] for box in tg.group]
-    #         all_x2 = [box.bbox[2] for box in tg.group]
-    #         all_y2 = [box.bbox[3] for box in tg.group]
-    #         group_bbox = (min(all_x1), min(all_y1), max(all_x2), max(all_y2))
-    #         for box in tg.group:
-    #             draw.rectangle(box.bbox, outline="red", width=1)
-    #         draw.rectangle(group_bbox, outline="blue", width=3)
-    #         draw.text((group_bbox[0], group_bbox[1] - 10), f"Group {i}", fill="blue")
-    #     canvas.save(output_path)
-    #     canvas.show()
+    def process_images(self):
+        images_text_boxes = self.predict()
+        images_text_groups = []
+        for text_boxes in images_text_boxes:
+            images_text_groups.append(self._group_boxes(text_boxes))
+        return images_text_groups
 
     def visualize_groups(self, groups: list[Text_Group], output_path="visualized_groups.png"):
-        canvas = self.image.convert("RGB")
+        image = Image.open(self.image_path)
+        canvas = image.convert("RGB")
         draw = ImageDraw.Draw(canvas)
         
         # Try to load a readable font (Linux usually has DejaVuSans or LiberationSans)
@@ -188,6 +159,7 @@ class OCR:
         canvas.show()
 
 if __name__ == "__main__":
-    ocr = OCR("japsigns.jpg")
-    groups = ocr.process_image()
-    ocr.visualize_groups(groups)
+    image = "images/japsigns.jpg"
+    ocr = OCR(image)
+    results = ocr.process_images()
+    ocr.visualize_groups(results[0])

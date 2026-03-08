@@ -4,9 +4,10 @@ import re
 import json
 
 class Translate:
-    def __init__(self, model: str = "gemma3:27b", ollama_host: str = "127.0.0.1") -> None:
-        print("Loading TranslateGemma")
+    def __init__(self, model: str = "qwen3-vl:32b", ollama_host: str = "127.0.0.1") -> None:
+        print(f"Loading {model}")
         self.client = Client(host=ollama_host)
+        self.model = model
         self.client.generate(model=model, prompt="")
 
     def _sort_group(self, text_group: Text_Group) -> list[Text_Box]:
@@ -45,12 +46,13 @@ class Translate:
                 Task:
                 1. Translate each "Line" below individually into English.
                 2. Use the other lines in the group as CONTEXT to determine the correct meaning (e.g., for ambiguous words).
-                3. Use the provided image as CONTEXT and error correction
+                3. Use the provided image as CONTEXT
                 4. Do NOT merge the lines. Keep them separate.
                 5. **Handling Line Breaks (<br>):**
                    - If the text is a **paragraph** or **list**, PRESERVE the `<br>` tags in your translation.
                    - If the text is a **bilingual duplicate** (e.g., Japanese <br> English), output ONLY the English translation (remove the break).
-                6. Just translate, do NOT try to explain or give any additional comments
+                6. Set translation to an empty string if the content is just math or distance markings
+                7. Just translate, do NOT try to explain or give any additional comments
 
                 Input Text Group:
                 {lines}
@@ -62,7 +64,7 @@ class Translate:
                 ]
                 """
             response = self.client.chat(
-                model="gemma3:4b",
+                model=self.model,
                 messages=[{
                     "role": "user",
                     "content": prompt,
@@ -79,8 +81,20 @@ class Translate:
                 else:
                     translation = "Failed"
 
-                translated_text_box = Text_Box(box.confidence, box.bbox, translation)
+                translated_text_box = Text_Box(box.confidence, box.poly, translation)
                 translated_group.append(translated_text_box)
 
             translated_groups.append(Text_Group(translated_group))
         return translated_groups
+
+if __name__ == "__main__":
+    image = "images/lmgJZ.jpg"
+    ocr = OCR(image)
+    groups = ocr.process_images()[0]
+    
+    translator = Translate(ollama_host="100.121.133.88") 
+    translated = translator.translate_groups(groups, image)
+
+    for tr_group in translated:
+        for text_box in tr_group.group:
+            print(text_box.text)
