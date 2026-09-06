@@ -81,7 +81,7 @@ class Translate:
                 else:
                     translation = "Failed"
 
-                translated_text_box = Text_Box(box.confidence, box.poly, translation)
+                translated_text_box = Text_Box(box.box_id, box.confidence, box.poly, translation)
                 translated_group.append(translated_text_box)
 
             translated_groups.append(Text_Group(translated_group))

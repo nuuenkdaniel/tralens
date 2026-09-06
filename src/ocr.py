@@ -5,10 +5,12 @@ from sklearn.cluster import DBSCAN
 from PIL import Image, ImageDraw, ImageFont
 
 class Text_Box:
-    def __init__(self, confidence, poly, text):
+    def __init__(self, box_id, confidence, poly, text, review=0):
+        self.box_id = box_id
         self.confidence = confidence
         self.poly = np.array(poly, dtype=np.float32)
         self.text = text
+        self.review = review
 
         x1 = int(np.min(self.poly[:, 0]))
         y1 = int(np.min(self.poly[:, 1]))
@@ -43,11 +45,10 @@ class OCR:
 
             text_boxes = []
             for i, score in enumerate(rec_scores):
-                if score > 0.5:
-                    polys = dt_polys[i] if i < len(dt_polys) else None
-                    text = rec_texts[i] if i < len(rec_texts) else ""
-                    text_boxes.append(Text_Box(score, polys, text))
-                    print(f"confidence: {score} | {text}")
+                polys = dt_polys[i] if i < len(dt_polys) else None
+                text = rec_texts[i] if i < len(rec_texts) else ""
+                text_boxes.append(Text_Box(i, score, polys, text))
+                print(f"confidence: {score} | {text}")
 
             images_text_box.append(text_boxes)
         return images_text_box
@@ -71,7 +72,7 @@ class OCR:
 
         return normalized_dist
 
-    def _group_boxes(self, text_boxes: list[Text_Box]):
+    def _group_boxes_proximity(self, text_boxes: list[Text_Box]):
         if not text_boxes:
             return []
 
@@ -105,7 +106,7 @@ class OCR:
         images_text_boxes = self.predict()
         images_text_groups = []
         for text_boxes in images_text_boxes:
-            images_text_groups.append(self._group_boxes(text_boxes))
+            images_text_groups.append(self._group_boxes_proximity(text_boxes))
         return images_text_groups
 
     def visualize_groups(self, groups: list[Text_Group], output_path="visualized_groups.png"):
@@ -158,8 +159,74 @@ class OCR:
         print(f"Visualization saved to {output_path}")
         canvas.show()
 
+    def visualize_groups_polygon(self, groups: list[Text_Group], output_path="visualized_groups_polygon.png"):
+        """Visualize text groups with PaddleOCR polygons instead of rectangles."""
+        image = Image.open(self.image_path)
+        canvas = image.convert("RGB")
+        draw = ImageDraw.Draw(canvas)
+
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/liberation/LiberationSans-Regular.ttf", 14)
+        except IOError:
+            font = ImageFont.load_default()
+
+        print(f"\n--- Visualizing {len(groups)} Groups as Polygons ---")
+
+        for i, tg in enumerate(groups):
+            if not tg.group:
+                continue
+
+            group_points = np.vstack([box.poly for box in tg.group]).astype(np.float32)
+            points = sorted({tuple(map(float, point)) for point in group_points})
+
+            def cross(origin, first, second):
+                return (
+                    (first[0] - origin[0]) * (second[1] - origin[1])
+                    - (first[1] - origin[1]) * (second[0] - origin[0])
+                )
+
+            lower = []
+            for point in points:
+                while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+                    lower.pop()
+                lower.append(point)
+
+            upper = []
+            for point in reversed(points):
+                while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+                    upper.pop()
+                upper.append(point)
+
+            group_hull = lower[:-1] + upper[:-1]
+            group_polygon = [tuple(map(int, point)) for point in group_hull]
+            draw.polygon(group_polygon, outline="blue", width=3)
+
+            label_x = int(np.min(group_points[:, 0]))
+            label_y = int(np.min(group_points[:, 1])) - 20
+            draw.text((label_x, max(0, label_y)), f"Group {i}", fill="blue", font=font)
+
+            print(f"Group {i}:")
+            for box in tg.group:
+                polygon = [tuple(map(int, point)) for point in box.poly]
+                draw.polygon(polygon, outline="red", width=1)
+
+                label = f"{box.text} ({box.confidence:.2f})"
+                text_x = int(np.min(box.poly[:, 0]))
+                text_y = int(np.min(box.poly[:, 1])) - 15
+                if text_y < 0:
+                    text_y = int(np.max(box.poly[:, 1])) + 5
+
+                left, top, right, bottom = draw.textbbox((text_x, text_y), label, font=font)
+                draw.rectangle((left - 2, top - 2, right + 2, bottom + 2), fill="red")
+                draw.text((text_x, text_y), label, fill="white", font=font)
+                print(f"  - Conf: {box.confidence:.4f} | Text: {box.text}")
+
+        canvas.save(output_path)
+        print(f"Polygon visualization saved to {output_path}")
+        canvas.show()
+
 if __name__ == "__main__":
-    image = "images/japsigns.jpg"
+    image = "images/lmgJZ.jpg"
     ocr = OCR(image)
     results = ocr.process_images()
-    ocr.visualize_groups(results[0])
+    ocr.visualize_groups_polygon(results[0])
