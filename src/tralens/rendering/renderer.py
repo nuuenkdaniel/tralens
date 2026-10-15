@@ -1,5 +1,5 @@
 from PIL import Image, ImageDraw, ImageFont
-from ocr import Text_Group
+from ..ocr.types import Text_Group
 
 def cover_text(image: Image.Image, groups: list[Text_Group], padding=5) -> Image.Image:
     new_image = image.copy().convert("RGB")
@@ -23,19 +23,3 @@ def draw_text(image: Image.Image, groups: list[Text_Group], font_path="/usr/shar
             draw.text((box.bbox[0], box.bbox[1]), text, font=font, fill="black")
 
     return image
-
-from ocr import OCR
-from translate import Translate
-
-if __name__ == "__main__":
-    # image_path = "/home/Danuu/Downloads/japsigns.jpg"
-    image_path = "/home/Danuu/Downloads/lmgJZ.jpg"
-    predictor = OCR(image_path)
-    groups = predictor.process_image()
-
-    translator = Translate("100.121.133.88")
-    translated_groups = translator.translate_groups(groups, image_path)
-
-    image = cover_text(predictor.image, groups, 5)
-    image = draw_text(image, translated_groups)
-    image.show()

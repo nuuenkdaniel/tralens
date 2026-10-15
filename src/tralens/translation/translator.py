@@ -1,5 +1,5 @@
 from ollama import Client
-from ocr import OCR, Text_Group, Text_Box
+from ..ocr.types import Text_Group, Text_Box, OCRStatus
 import re
 import json
 
@@ -37,7 +37,8 @@ class Translate:
     def translate_groups(self, groups: list[Text_Group], image_path) -> list[Text_Group]:
         translated_groups = []
         for i, group in enumerate(groups):
-            sorted_group = self._sort_group(group)
+            sorted_group = [box for box in self._sort_group(group)
+                            if box.status == OCRStatus.ACCEPTED and box.selected_text.strip()]
             if not sorted_group: continue
             lines = "\n".join([f"Line {i+1}: {b.text}" for i, b in enumerate(sorted_group)])
             prompt = f"""
@@ -81,20 +82,10 @@ class Translate:
                 else:
                     translation = "Failed"
 
-                translated_text_box = Text_Box(box.box_id, box.confidence, box.poly, translation)
+                translated_text_box = box.transformed(translation)
                 translated_group.append(translated_text_box)
 
-            translated_groups.append(Text_Group(translated_group))
+            translated_groups.append(Text_Group(
+                translated_group, method=group.method, status=group.status,
+                direction=group.direction, metadata=group.metadata.copy()))
         return translated_groups
-
-if __name__ == "__main__":
-    image = "images/lmgJZ.jpg"
-    ocr = OCR(image)
-    groups = ocr.process_images()[0]
-    
-    translator = Translate(ollama_host="100.121.133.88") 
-    translated = translator.translate_groups(groups, image)
-
-    for tr_group in translated:
-        for text_box in tr_group.group:
-            print(text_box.text)

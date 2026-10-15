@@ -1,21 +1,13 @@
 """Offline grouping tests: no Paddle initialization or external resources."""
-import importlib.util
-import os
 import socket
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 
-# Disable PaddleX's import-time host check without reading environment values.
-os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
-
-SPEC = importlib.util.spec_from_file_location(
-    "tralens_ocr_offline", Path(__file__).resolve().parents[1] / "src" / "ocr.py")
-ocr_module = importlib.util.module_from_spec(SPEC)
 with patch.object(socket.socket, "connect", side_effect=AssertionError("network forbidden")), \
      patch.object(socket, "create_connection", side_effect=AssertionError("network forbidden")):
-    SPEC.loader.exec_module(ocr_module)
+    from tralens.ocr import detection as ocr_module
 OCR = ocr_module.OCR
 
 
@@ -27,7 +19,7 @@ def box(identifier, bounds, text="text", confidence=.99):
 
 class GroupingTests(unittest.TestCase):
     def setUp(self):
-        constructor = patch.object(ocr_module, "PaddleOCR",
+        constructor = patch.object(ocr_module, "create_paddle_ocr",
                                    side_effect=AssertionError("OCR initialization forbidden"))
         constructor.start()
         self.addCleanup(constructor.stop)
@@ -121,7 +113,8 @@ class GroupingTests(unittest.TestCase):
         boxes = [box(0, (10, 10, 20, 90))]
         self.ocr.predict = lambda: [boxes, []]
         self.ocr._group_boxes_proximity = lambda _: self.fail("legacy dispatch")
-        groups = self.ocr.process_images()
+        with patch.object(ocr_module.cv2, "imread", return_value=None):
+            groups = self.ocr.process_images()
         self.assertEqual(groups[0][0].group, boxes)
         self.assertEqual(groups[1], [])
 
@@ -138,10 +131,10 @@ class GroupingTests(unittest.TestCase):
 
 
 class RegionMaskTests(unittest.TestCase):
-    cv2, np = ocr_module.cv2, ocr_module.np
+    cv2, np = ocr_module.cv2, np
 
     def setUp(self):
-        constructor = patch.object(ocr_module, "PaddleOCR",
+        constructor = patch.object(ocr_module, "create_paddle_ocr",
                                    side_effect=AssertionError("OCR initialization forbidden"))
         constructor.start()
         self.addCleanup(constructor.stop)

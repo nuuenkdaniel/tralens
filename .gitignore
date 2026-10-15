@@ -5,3 +5,9 @@ output.jpg
 *.jpg
 *.env
 test.py
+
+# Private/local evaluation originals and generated OCR evidence; never publish.
+/images/
+# Includes non-image license/sample metadata belonging to this local dataset.
+/images/ubunchu-ja-test/
+/test-results/
