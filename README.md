@@ -1453,3 +1453,918 @@ model usability, effective baseline values, detection deltas and runtime cost
 remain for parent execution/assessment. Detection-count changes are not measured
 OCR accuracy or annotated coverage. Six of the seven pages remain one CC BY-NC
 evaluation series.
+
+## Immutable utterance translation previews (Phases 1–2; 3–4 foundation)
+
+`tralens.translation` now exposes `Reading`, `Utterance`, `Style`,
+`TranslationRequest`, `TranslationResult`, `automatic_units`, and
+`PreviewTranslator`. These are preview contracts: no image erasure or rendering.
+Frozen requests/results bind the exact page provenance, member IDs, main reading
+order, raw evidence, selected candidate revision, alternative readings, target vs
+context IDs, languages, glossary and style. Results bind the full request revision.
+Keep the request manifest with each result; changing any bound input invalidates
+reuse. Schema validity does **not** establish semantic translation quality.
+
+`automatic_units(batch, candidates)` accepts the existing automatic OCR dataclasses
+or their saved JSON representation. It snapshots inputs without changing OCR
+statuses or requiring human review. The default reading is the ordered raw main
+text; optional automatic candidates remain explicit alternatives, never silently
+promoted to source truth. Select another reading explicitly with
+`dataclasses.replace(unit, selected_revision=unit.readings[index].revision)`.
+The adapter checks saved raw/candidate evidence consistency. It does not re-open
+private images, rerun OCR, certify pixel provenance or infer source corrections.
+
+Lexical uncertainty, tentative annotations, and generic unverified completeness
+remain visible and permit automated previews. Known ownership, relationship,
+orientation, isolation and blank-main faults produce an explicit `blocked`
+disposition. Context cannot bypass those blocks. One utterance yields one stable
+translation, not a copy distributed over every OCR box. Japanese → English is
+the default; `Style(source_language=..., target_language=...)` is configurable.
+No guessed speakers, genders, plot, or reconstructed source text is requested.
+
+`PreviewTranslator(runtime, model="qwen3.8:latest", max_attempts=1, timeout=60)`
+uses an injected provider-neutral `generate(model=..., payload=..., timeout=...)`
+runtime. Construction performs no load/inference/network. `OllamaRuntime` is a
+lazy standard-library HTTP implementation with explicit origin, no ambient proxy
+or credential lookup, redirects disabled, bounded response size, deterministic
+sampling, bounded output tokens, nonstreaming generation and thinking disabled.
+Generalists receive a schema and must return a complete JSON object with exactly
+one typed outcome per target ID; only explicit abstention permits empty translation.
+Fences, prose, duplicate keys,
+extra/missing/duplicate IDs, nonfinite constants and malformed values fail closed.
+Results distinguish structural blocks, capability failures, invalid output,
+provider errors, timeouts and cancellation; failed results carry no translations.
+At most three attempts share one generation deadline. Cancellation is cooperative
+between calls; a socket timeout cannot guarantee a hard wall-clock deadline or
+stop generation already running on a remote server. Injected runtimes must honor
+timeouts themselves. There is no background retry or provider fallback.
+
+`GENERALIST` supports schema JSON and bounded text context, with images disabled.
+Mode A is utterance text; B adds bounded same-page text; C adds a hash-bound
+page presentation to the same bounded text condition, requiring an explicitly
+image-capable profile and explicitly supplied original image paths.
+Do not infer model image/context capabilities from its name.
+`TRANSLATEGEMMA` uses the parent-verified official **single-user chat prompt**
+from <https://ollama.com/library/translategemma> (Prompt Guide). Its instruction
+ends with `Please translate the following Japanese text into English:` followed
+by **three newline characters**, then the exact selected source text. There is
+one user message, no system message, no JSON instruction, and no custom style or
+context. `/api/chat` applies the installed Ollama Gemma3 user/model turn template;
+no raw turn/control tokens are invented. Native CLI use is simply
+`--profile translategemma --model translategemma:4b` (or `:12b`, `:27b`), without a
+specification file. These three explicit tags are the parent-verified native
+profile scope; a generalist model cannot use this specialist profile, and known
+TranslateGemma tags cannot silently use the arbitrary-schema generalist profile.
+Native specialist mode accepts A only, one utterance, no context/images/custom
+glossary or style conditioning, and wraps one nonempty bounded plaintext response.
+Vision metadata alone does not extend this tested specialist prompt contract.
+
+The explicit name/code registry is Japanese/`ja`, English/`en`, French/`fr`,
+German/`de`, Spanish/`es`, Korean/`ko`, Chinese/`zh`. Names and codes normalize to
+those pairs; unknown names, typo codes and locale strings are rejected. The parent
+verified Japanese→English execution; this registry is not a quality certification
+for other language pairs. Template revision, official source, parent-verification
+provenance and the cited local acquisition/pilot evidence are stored in native
+plans and results. The agent did not fetch those sources or call a model.
+
+Specialist plaintext does not expose uncertainty to the model through unsupported
+extra instructions. Instead, result `execution_metadata_json` explicitly reports
+`primary_reading_only`, `alternatives_supplied_to_model=false`, alternative reading
+revisions, uncertain/unverified source interpretation, lack of context/style
+conditioning, and `honorific_policy_not_enforced`. Full alternatives and raw
+evidence remain bound in the request manifest. A fluent output is not evidence
+that an ambiguous/slang source reading was interpreted correctly. No source
+correction, semantic score or quality gain is inferred from previews.
+No embedded Hugging Face runtime or dependencies are introduced.
+
+The legacy `Translate(...).translate_groups(groups, image_path)` remains an
+accepted-OCR-only compatibility API with lazy construction, injectable chat client,
+strict full-JSON parsing, complete ID matching and no fabricated `Failed` output.
+Its legacy per-box results preserve existing OCR provenance; unresolved/rejected
+boxes cannot become renderable output. It does not consume `image_path` or send
+images. New utterance previews use the immutable API above. An injected legacy
+client controls its own timeout policy.
+
+### Saved-evidence preflight and bounded parent-only Ollama execution
+
+Use a parent-selected existing `automatic-proposals.json` exported by diagnostics.
+For A/B, the tool reads the explicitly supplied evidence file and optional parent
+selection/model/template records, checks saved binding
+consistency, preserves caller selection order (or saved page/proposal order), and creates a **new**
+output directory whose parent must already exist. It refuses overwrites. No model
+runtime is constructed without `--run-local-model`. Input is capped at 16 MiB,
+selection at 20 units, each compact serialized target at 32,768 characters, and context
+at 8,000 compact serialized characters. Explicit `--unit-id` flags or a saved
+`--selection` JSON ID list pin comparisons while preserving their order.
+Errors consume the global attempt budget; every completed batch is appended and
+flushed to `results.jsonl`. `requests.json` retains full immutable request evidence
+and revisions, and `summary.json` records dispositions/attempt counts. Input page
+errors are carried forward; preflight is not a completeness or accuracy claim.
+
+### Ordered compact context and matched A/B/C diagnostics
+
+The model-facing compiler sends only IDs, page positions, selected reading revision,
+source reading alternatives/origins, lexical/structural uncertainty, completeness,
+explicit unknown speaker/gender labels, and style. Full raw geometry, OCR metadata,
+candidate blobs and source provenance remain in `requests.json`, outside the prompt.
+The same compact compiler determines context budget usage; no alternatives are
+silently dropped to fit. Nearby crop-centre distance prioritizes useful same-page
+neighbours, with saved page order breaking ties. Selected neighbours are presented
+in that saved order, including the target at its page position. The saved proposal
+order is explicitly **unverified**, not a claim of definitive manga reading order.
+An optional per-page `translation_page_order` record can supply `unit_ids` as an
+exact proposal permutation and a descriptive `status`; both are bound to requests.
+
+`--selection test-results/translation-parent-v1/selection.json --max-units 7`
+reuses the parent's seven targets in identical order for A, B and C. Do not compare
+the old three-target A run against a different seven-target condition as matched
+evidence. `--model-record test-results/translation-parent-v1/model.json` reads the
+explicit parent-saved identity/capability record, validates model/full-digest
+consistency and records it; it performs no daemon lookup. The observed parent
+digest is `22130167c4c20e20c7b71454612966ca8e8171e9b3cc8ab6ce8aa6cbfec79643`.
+
+Parent matched-seven preflight and bounded B generation (set `MANIFEST` to the
+same saved automatic-proposals evidence used by the parent A trial; fresh outputs):
+
+```sh
+.venv-paddle6/bin/python tools/translation_diagnostics.py \
+  --manifest "$MANIFEST" --output test-results/translation-parent-v1/preflight-B7-v2 \
+  --selection test-results/translation-parent-v1/selection.json --max-units 7 \
+  --model-record test-results/translation-parent-v1/model.json \
+  --mode B --max-context-chars 4000 --max-attempts 0
+
+.venv-paddle6/bin/python tools/translation_diagnostics.py \
+  --manifest "$MANIFEST" --output test-results/translation-parent-v1/qwen-B7-v2 \
+  --selection test-results/translation-parent-v1/selection.json --max-units 7 \
+  --model-record test-results/translation-parent-v1/model.json \
+  --run-local-model --endpoint http://100.121.133.88:11434 \
+  --mode B --max-context-chars 4000 --max-attempts 8 --timeout 90 --preload
+```
+
+Repeat with **new output names** and `--mode A` for the matched A7 control. For C,
+use `--mode C --vision-capable --image-max-side 1536` and all explicit
+`--image 'PAGE_ID=ORIGINAL_PATH'` mappings described below; model-free C preflight
+uses `--max-attempts 0` without live/preload flags. Keep B/C context budgets equal
+to isolate the image condition. Seven one-call batches plus preload are at most
+eight calls; errors count. The parent runs these commands, not the coding agent.
+
+C additionally requires `--vision-capable` and explicit mappings such as
+`--image 'PAGE_ID=/absolute/path/to/original.png'`, one per selected safe page.
+No image path is implicitly opened from OCR metadata. Original file and RGB pixel
+SHA256 must match the saved page; structurally blocked units do not trigger image
+reads or provider calls. Raw-main geometry must be nondegenerate and inside the
+original image. Only a copied RGB presentation is optionally resized, defaulting
+to a 1536-pixel longest side with LANCZOS. `--image-max-side 0` disables resizing
+(4096-pixel maximum side). Original inputs remain byte-identical. Original bytes
+are limited to 32 MiB/40 million pixels; presentations to 8 MiB. The exact PNG,
+transformation/size evidence and original/presentation hashes are saved in the
+new output directory and bound to the request. API execution rechecks the supplied
+presentation hash. Vision capability is a parent assertion; it is also checked
+against `--model-record` when supplied. Images do not relax structural safety.
+
+Runtime `generate` may return text or immutable `Generation(text, response_json)`.
+Ollama returns the latter, preserving load/total/prompt-eval/eval nanosecond durations,
+prompt/eval token counts, completion reason and raw response. Diagnostics retains
+each response (also malformed/incomplete/late responses) in exclusive sidecars,
+with full canonical response SHA256, original/retained byte counts, truncation flag
+and extracted metadata in `results.jsonl`. Default retention is 1 MiB per attempt;
+`--max-response-bytes` accepts 1024..4194304 bytes. Truncated sidecars are explicitly
+`.txt` prefixes, not valid full JSON claims. Preload raw evidence and timings are
+separate. Timeouts without a response record that absence and still spend a call.
+The global attempt bound includes preload and errors. Socket/remote-cancel
+limitations remain unchanged. `semantic_quality_assessed` is always false: schema
+successes and token/timing evidence are not semantic quality scores.
+
+### Optional custom raw specialist encoder
+
+The standard native TranslateGemma chat profile above needs **no template file**.
+For an exceptional parent-verified raw encoder, the same specialist CLI accepts
+an explicit JSON file via `--specialist-template /absolute/path/to/verified.json`
+with these fields:
+
+- `schema_version`: `1`; `encoding`: `literal_substitution_v1`.
+- Exact `model` and full `model_digest` matching the run.
+- Nonempty `verified_by` and `verification_source` recording parent verification.
+- `template`: the verified raw prompt, using `${source_lang_code}`,
+  `${target_lang_code}`, and exactly one `${text}` substitution.
+- `template_sha256`: SHA256 of the exact UTF-8 template string.
+
+Only literal substitution is supported, with no recursive interpretation of source
+text and no execution of Python, Go/Jinja templates, or arbitrary code. If the
+official template cannot be represented by that method, the CLI rejects it;
+the existing injected Python runtime encoder remains the source-level extension.
+Identity, hash and placeholder mismatches fail before model loading. No actual
+custom raw template or model usability is claimed by the synthetic tests. This
+explicit override switches to the separately recorded raw execution path; it does
+not replace the standard installed-template chat path by default.
+
+### Comparable bounded generation controls
+
+Both generalists and specialists accept `--num-ctx` (512..131072, default 8192),
+`--num-predict` (1..8192, default 2048), and `--keep-alive` (integer seconds
+0..3600, default 300). These controls apply to preload and generation and are
+recorded in the plan and result execution metadata. Temperature is fixed at 0.
+`--keep-alive 0` unloads after the request and changes subsequent load costs;
+keep it identical between conditions and do not treat an arbitrary first call as
+proven cold. Tokenizer differences mean equal token budgets are controlled
+settings, not equal text lengths. Generalists retain their own structured source
+and schema prompt; the specialist prompt is never forced onto them.
+
+`--max-output-chars` (1..131072, default 32768) independently bounds accepted
+translation text. Empty, nontext, oversized or truncated specialist outputs fail
+without renderable translations. Malformed response types retain raw diagnostic
+evidence. Raw HTTP response and retention bounds described above also apply.
+Using the same controls still does not make schema/plaintext acceptance a semantic
+quality comparison; ground truth and source ambiguity require independent assessment.
+
+Parent specialist-seven command (set `MANIFEST`, `MODEL_DIGEST` and `MODEL_DETAILS`
+from the parent's verified saved evidence; use a fresh output directory):
+
+```sh
+.venv-paddle6/bin/python tools/translation_diagnostics.py \
+  --manifest "$MANIFEST" --output test-results/translation-gemma4b-A7-parent-v3 \
+  --selection test-results/translation-parent-v1/selection.json --max-units 7 \
+  --profile translategemma --model translategemma:4b \
+  --model-digest "$MODEL_DIGEST" --model-details "$MODEL_DETAILS" \
+  --mode A --num-ctx 8192 --num-predict 2048 --keep-alive 300 \
+  --max-output-chars 32768 --max-attempts 8 --timeout 90 --preload \
+  --run-local-model --endpoint http://100.121.133.88:11434
+```
+
+For model-free preflight, use a fresh output name, `--max-attempts 0`, and omit
+`--run-local-model --preload`. Repeat separately for `:12b` and `:27b` with each
+model's own verified digest/details. At most seven generations plus preload are
+requested; errors spend the budget. Parent comparison against generalist controls
+uses the same explicit numeric settings and target selection, retaining the
+generalist profile/schema prompt. Earlier A7/B7 previews alone established no clear
+semantic quality gain, and are not model-generated ground truth.
+
+Parent model-free preflight (replace only the saved manifest path; use fresh output
+names for each run):
+
+```sh
+.venv-paddle6/bin/python tools/translation_diagnostics.py \
+  --manifest /absolute/path/to/automatic-proposals.json \
+  --output test-results/translation-preflight-A-01 \
+  --mode A --max-units 3 --max-attempts 0
+```
+
+Parent-only bounded live command, after verifying the endpoint, installed model,
+full digest, model/template metadata and selected evidence:
+
+```sh
+.venv-paddle6/bin/python tools/translation_diagnostics.py \
+  --manifest /absolute/path/to/automatic-proposals.json \
+  --output test-results/translation-qwen38-A-01 \
+  --run-local-model --endpoint http://100.121.133.88:11434 \
+  --model qwen3.8:latest --model-digest 22130167c4c2 \
+  --model-details 'parent-reported 27.3B Q4_K_M vision/thinking; verify before execution' \
+  --mode A --max-units 3 --max-attempts 4 --timeout 90 --preload
+```
+
+The digest/details are explicitly recorded as **parent assertions**, not daemon
+verification. Replace the reported short digest with the parent-verified full
+digest when available. Preload is a separate explicit empty generation probe,
+consumes one attempt (including on error), and records wall/load timing separately
+from translation generation. It is a cold-load measurement only if the parent has
+independently established a cold initial state; this tool does not unload models.
+Three one-unit batches plus that probe use at most four calls and no retries.
+For B use a new output directory, `--mode B --max-context-chars 4000` and the same
+explicit `--unit-id` selections from preflight. A larger context is not assumed
+better. Ground truth must be independent of model outputs. TranslateGemma
+4B/12B/27B, Qwen3.8 and smaller-control comparisons remain future parent-verified
+experiments; the historical `qwen3-vl:32b` default is not assumed installed.
+
+Focused offline checks:
+
+```sh
+.venv/bin/python -m unittest tests.translation.test_translator tests.translation.test_previews tests.translation.test_specialist_chat tests.translation.test_hardening tests.tools.test_translation_diagnostics tests.tools.test_translation_conditions -v
+.venv/bin/python -m unittest discover -s tests -t .
+.venv/bin/python -m unittest tests.source_only_check -v
+.venv/bin/python -m compileall -q src/tralens/translation tests/translation tests/tools/test_translation_diagnostics.py tests/tools/test_translation_conditions.py tools/translation_diagnostics.py
+git diff --check
+```
+
+### Final hardening: semantic dispositions and release-readiness
+
+The generalist response contract is now **`typed_unit_disposition_v2`**. Each
+`translations` item requires `id`, `translation`, `disposition`, `reasons`, and
+`source_interpretation`. Disposition is `preview`, `review`, or `abstained`;
+interpretation is `unverified`, `ambiguous`, or `unreadable`. There is no
+`confident`, `accepted`, or quality-score label. Review/abstention needs nonblank
+reasons; abstention requires exactly empty translation, and unreadable sources
+cannot carry translated text. At most 12 model reasons of 512 characters are
+accepted. Full-JSON, duplicate-key, finite-number and exact target-ID checks still
+apply. An older text-only schema response is historical evidence, **not silently
+upgraded** to this contract.
+
+Immutable `UnitOutcome` records preserve every target, including abstentions, and
+bind each to its exact selected reading revision. Partial batches retain the
+explicit abstained outcomes while exposing translation pairs only for units with
+text. All-abstained batches return `status="abstained"`, not an empty successful
+preview or provider failure. Known lexical uncertainty/differing readings force
+an application-visible `review` outcome and `review_needed=true`, even if the
+model claims a plain preview. Model interpretations/reasons are unverified model
+reports, not independent facts. Generic unverified completeness alone does not
+block a call or impose a mandatory review step. Review flags are informational;
+all results remain preview-only, and this code never erases or renders images.
+
+Specialist output remains exact-prompt plaintext, with a visible `review` outcome
+and `specialist_reduced_capability` reason. No uncertainty instructions are added
+to its unsupported prompt. The raw source alternatives remain in the request;
+plaintext fluency does not resolve ambiguous OCR. Blank selected/main readings
+remain explicit blocked units with reasons and zero calls rather than disappearing.
+The legacy per-box compatibility path now also marks copied outputs as unverified
+translation previews in metadata; it retains OCR status and source provenance.
+
+`result.assert_current(request)` rejects reuse after any bound source, candidate,
+style, order, context or image revision changes. Hash binding establishes saved
+input consistency, not correctness or authenticity. Model digests/details remain
+explicit **parent assertions**, with no daemon/weight authentication claim.
+The request's `utterance_preview_v2` contract version also participates in its
+revision, so historical text-only requests/results do not share the new revision.
+
+Endpoint validation now enforces **address scope**, not merely a hostname label:
+HTTP origins must use literal loopback, RFC1918 private IPv4, shared-address
+`100.64.0.0/10` overlay, or IPv6 ULA addresses. `localhost` is pinned to
+`127.0.0.1`; arbitrary DNS names, public/link-local/unspecified addresses,
+credentials, paths and redirects are rejected. This is not proof that a private
+server is trustworthy or physically on the same host. The normalized origin and
+the absence of server authentication are recorded before execution. The approved
+`http://100.121.133.88:11434` origin satisfies the overlay scope rule.
+
+Direct immutable requests also have a 65,536-character compact-source ceiling,
+20-target/84-unit ceiling and pre-decode image-encoding bound. The legacy API is
+bounded to 20 groups/84 boxes per group and 32,768 source/response characters.
+Explicit evidence files are read with `limit+1` bounded reads, not just a prior
+file-size check. Conflicting duplicate ownership records and nonboolean crop
+safety flags are rejected. Existing original-image/pixel/presentation hashes,
+frame/dimension checks and safe-source geometry checks remain enforced. Images
+and file paths from source/model text are never implicitly opened.
+
+Each retry can retain its own raw evidence. If an evidence sink fails after a
+provider call, the result is `failed/evidence_retention` with that attempt counted,
+no output, and no retry; diagnostics appends that batch and charges the global
+budget. If storage cannot append the journal itself, execution fails rather than
+claiming successful persistence; previously flushed records remain. Results and
+summary distinguish per-unit review/abstention from provider/timeout/budget errors.
+
+**Readiness assessment:** Phases 1–2 contracts and the bounded Phase 3–4 preview/
+diagnostics paths are ready for parent final two-environment/source-only and live
+acceptance checks. They are not a validated autonomous translation/rendering
+pipeline. There is no independent semantic reference and no automatic model
+promotion. The parent-reported six-model × fourteen application previews are
+transport/schema/plaintext evidence, not 84 verified translations. Earlier A7/B7
+schema successes likewise establish no semantic quality gain.
+
+Experimental comparison profiles (separate from the user-selected TG27B workflow default):
+
+- **Qwen3.8 generalist schema:** structured, uncertainty-capable A reference;
+  evaluate B/C only against matched A targets. Context/vision quality gains remain
+  unproven. The new disposition contract needs fresh parent live verification.
+- **TranslateGemma 12B/27B native chat:** comparison candidates with mandatory
+  visible reduced-capability review flags, not automatically promoted by scores. Parent notes
+  suggest different pragmatic/idiomatic behavior, but noisy OCR defeated all
+  models and there is no independently scored winner.
+- **TranslateGemma 4B:** retain as a low-cost control; parent-observed major meaning
+  errors do not support recommendation for translation quality.
+- **Qwen3:4B residency/plain-output trial:** capability-limited under the tested
+  runtime/template. Parent reported three of three `done_reason="length"` outputs
+  with reasoning-like content despite `think=false`. The application rejects
+  length-terminated responses and retains their evidence. These are failures,
+  not translations; no guessed thinking/template workaround is implemented.
+
+Repeated identical-prompt warm measurements can exploit prefix caching and are
+cached **lower bounds**, not real multi-page throughput. Keep load, prompt-eval,
+generation and wall timings separate; compare matched distinct targets with
+identical controls and explicitly recorded residency. Human/independent reference
+evaluation must address source ambiguity, fidelity, omissions and pragmatics,
+not fluency or model-generated ground truth. Embedded HF remains deferred.
+
+## External clean-source quality comparison helper
+
+`tools/translation_quality.py` runs a bounded, **text-only Japanese→English**
+comparison using the current immutable translation API and existing prompts. It
+does not tune prompts, select a winner, change defaults, acquire a corpus, or use
+OCR/image fixtures. The parent supplies a licensed, independently human-referenced
+JSON list at `test-results/translation-quality-corpus-v1/cases.json`. Every item
+has exactly `id`, `source`, `reference`, `split`, and `origin` string fields;
+IDs must be unique. Origin/license/reference independence are parent assertions,
+not certifications made by the helper. Keep sources short enough for 4096 context
+tokens; the helper does not estimate model-specific tokenization.
+
+Only source text and an opaque case key enter a `Reading`/`Utterance` request.
+`page_json` explicitly says `synthetic_text_only_benchmark_not_OCR` and names the
+benchmark; no synthetic polygon, image hash or OCR evidence is manufactured.
+**References, split and origin never enter model prompts or requests.** References
+are used only in the separate reviewer artifact or optional post-generation
+metric. Changing a reference does not change the source request/prompt, but does
+change the frozen corpus-file hash used to validate paired comparisons.
+
+The helper selects the first `--max-cases` entries in **file order**, default/hard
+cap **150**. It stores the exact requests, model-facing payloads and their hashes
+in `run.json`. Same-profile model runs use identical prompts/options; generalists
+and TranslateGemma retain their different supported prompt formats. All runs in
+a comparison must have identical selected IDs/order/counts, corpus bytes and
+generation options. Frozen source/prompt/result bindings are revalidated. Missing,
+duplicate, reordered or stale records fail comparison rather than shrinking the
+denominator.
+
+Default execution is model-free. `--run-local-model` enables one serial attempt per
+case, **no retries or preload calls**, with timeout fixed at **120 seconds**, context
+4096, default `--num-predict 1024` and `--keep-alive 60` seconds. Prediction and
+residency overrides obey the existing bounded runtime ranges (1..8192 and 0..3600).
+Model identity must match an explicit parent-saved `--model-record` with `model`
+and full 64-character `digest`. This records a parent assertion, not a daemon or
+weight verification. Existing private/overlay endpoint restrictions apply.
+
+Each completed case is appended and flushed to `results.jsonl`, including status,
+typed outcomes, source/request/prompt hashes, model/digest/options, wall/generation
+durations and raw-response metadata. Raw evidence uses the existing observer and
+`retain_response`, retaining up to the runtime's full 4 MiB bound per attempt
+(at most 600 MiB for 150 calls); truncation, if any, is explicitly labeled.
+Provider failures, structural blocks, abstentions and preflight cases have blank
+candidates and remain in every selected-case denominator. A failed case is not
+retried or silently discarded. Storage failures stop rather than claim persistence;
+previously flushed results remain available. Output directories are exclusively
+created and their parent must already exist. Corpus input is capped at 16 MiB,
+model metadata at 64 KiB, and saved comparison JSONL at 64 MiB per run.
+
+### Parent commands
+
+Model-free preflight (the named parent model record already exists; output must
+be new):
+
+```sh
+.venv-paddle6/bin/python tools/translation_quality.py \
+  --cases test-results/translation-quality-corpus-v1/cases.json \
+  --output test-results/translation-quality-qwen-preflight-v1 \
+  --model qwen3.8:latest \
+  --model-record test-results/translation-parent-v1/model.json \
+  --profile generalist --max-cases 150 --num-predict 1024 --keep-alive 60
+```
+
+Parent-only live run:
+
+```sh
+.venv-paddle6/bin/python tools/translation_quality.py \
+  --cases test-results/translation-quality-corpus-v1/cases.json \
+  --output test-results/translation-quality-qwen-v1 \
+  --model qwen3.8:latest \
+  --model-record test-results/translation-parent-v1/model.json \
+  --profile generalist --endpoint http://100.121.133.88:11434 \
+  --run-local-model --max-cases 150 --num-predict 1024 --keep-alive 60
+```
+
+Run each additional model separately with its own fresh output and verified model
+record. Standard specialists use `--profile translategemma --model translategemma:12b`
+(or verified `:4b`/`:27b`) and their own records. Keep corpus/order/options fixed.
+No corpus references or generated reference substitutes are accepted as context.
+
+Offline paired review after the parent has produced both named runs:
+
+```sh
+.venv-paddle6/bin/python tools/translation_quality.py \
+  --cases test-results/translation-quality-corpus-v1/cases.json \
+  --output test-results/translation-quality-paired-review-v1 --max-cases 150 \
+  --compare test-results/translation-quality-qwen-v1 test-results/translation-quality-gemma12-v1
+```
+
+Both single-run and comparison outputs contain **`review.json`** with per-case
+source, human reference, split/origin, blank failures and opaque candidate labels;
+candidate display order is shuffled. Model identities/paths are stored separately
+in **`model-mapping.json`**. Distribute only `review.json` to a blinded reviewer,
+without run directory names, manifests, summaries or mapping. Tool metadata does
+not reveal identities there, but candidate text itself can self-identify a model;
+this is reviewer blinding, not an anonymity guarantee. Review fields invite
+fidelity, omissions and pragmatics notes. Failures stay blank rather than receiving
+model/provider error text as a candidate translation.
+
+`--score` optionally calls **already-installed** `sacrebleu.corpus_bleu` after
+generation or during offline comparison. It uses every selected case, including
+blank failures, and records package version/default settings and denominator.
+Without that package it reports **metric unavailable** and never installs it;
+without `--score` it only checks availability through `importlib`. Preflight-only
+outputs are not scored. No custom overlap metric is mislabeled chrF. Neither
+BLEU, schema acceptance nor plaintext fluency constitutes a semantic-quality or
+accuracy claim, and no metric triggers model promotion. Serial wall/load/eval
+evidence is not a controlled cold-load test or real-page throughput benchmark.
+
+Source-only verification:
+
+```sh
+.venv/bin/python -m unittest tests.tools.test_translation_quality -v
+.venv/bin/python -m unittest discover -s tests -t .
+.venv/bin/python -m unittest tests.source_only_check -v
+.venv/bin/python -m compileall -q tools/translation_quality.py tests/tools/test_translation_quality.py
+```
+
+## Normal image-to-unit preview workflow
+
+`src/main.py` is the normal **preview-only** image entrypoint. It uses the current
+OCR facade with `propose_units=True`, `complementary_ownership=True`, and
+`regroup_companions=True`, then snapshots automatic utterances and optionally
+translates them. It never imports a renderer/erasure implementation, writes on the
+input image, transforms translations into OCR boxes, or imports diagnostic tools.
+Importing the entrypoint or requesting `--help` loads no OCR/model engines or
+provider clients. Image processing requires `--run-local-ocr`; translation requires
+the separate `--run-local-model` flag. **Daniel selected `translategemma:27b` with
+the native `translategemma` profile as this workflow's default pair**, in both
+`src/main.py` and `run_preview`. Omitting model/profile with model opt-in uses that
+pair. OCR-only mode still constructs no model runtime and makes zero model calls.
+There is no implicit model acquisition, download or fallback if the configured tag
+is unavailable. This is an explicit user choice, not an inferred quality score.
+
+### Parent-ready CPU OCR preview
+
+Set `IMAGE` to an existing single raster image and `MODEL_ROOT` to the existing
+local export root. The root must contain complete, identity-matching
+`PP-OCRv6_medium_det` and `PP-OCRv6_medium_rec` exports (nonempty `inference.yml`,
+`inference.json`, and `inference.pdiparams`). The workflow pins the production
+medium profile, explicit device, one CPU thread and disabled oneDNN through the
+existing facade. It validates paths/arguments before constructing an engine; there
+is no download, missing-weight lookup, profile/device retry or fallback. Use the
+parent-prepared `.venv-paddle6` with the validated Paddle runtime.
+
+```sh
+IMAGE=/absolute/path/to/page.png
+MODEL_ROOT="$HOME/.paddlex/official_models"
+
+.venv-paddle6/bin/python src/main.py \
+  --image "$IMAGE" --output test-results/workflow-ocr-parent-v1 \
+  --run-local-ocr --device cpu --model-root "$MODEL_ROOT"
+```
+
+This performs OCR/proposals only: zero translation calls and no translation runtime
+construction. `preview.json` still contains original OCR polygons/text/confidence,
+current status/selection metadata, prediction reports, model provenance, complete
+proposal evidence, candidates if present, all proposed units, immutable requests,
+source-binding hashes and per-unit dispositions. Unassigned detections remain
+visible in raw/proposal evidence; they are not guessed into utterances. Human
+checking of every readable unit is not a prerequisite for automatic previews.
+
+### Parent-ready default TG27B preview with at most two translation calls
+
+Use a fresh output directory. This second command performs fresh CPU OCR before
+translation; it does not silently reuse a previous OCR snapshot.
+
+```sh
+.venv-paddle6/bin/python src/main.py \
+  --image "$IMAGE" --output test-results/workflow-tg27-default-parent-v1 \
+  --run-local-ocr --device cpu --model-root "$MODEL_ROOT" \
+  --run-local-model \
+  --endpoint http://100.121.133.88:11434 \
+  --max-attempts 2 --timeout 120 --keep-alive 60 --num-predict 1024
+```
+
+The default specialist uses the documented single-user text prompt and installed
+Ollama chat template. Overrides are explicit:
+
+- TG12: add `--model translategemma:12b` (the default native profile still applies),
+  optionally spelling out `--profile translategemma`.
+- Qwen generalist: add **both** `--model qwen3.8:latest --profile generalist`;
+  the existing strict typed schema applies.
+- `run_preview(..., model="qwen3.8:latest", profile="generalist")` and
+  `run_preview(..., model="translategemma:12b")` provide the same API overrides.
+
+Specifying Qwen without its generalist profile, or a generic profile with the
+inherited TG27B model, is rejected before OCR construction. No compatible model or
+profile is guessed. The legacy per-box `Translate` API retains its generalist
+default/behavior and is not redirected to a specialist. This
+workflow sends **utterance text only**, not page images/context. A model tag is
+configuration, not weight/digest authentication or a quality recommendation.
+The existing explicit private/overlay endpoint restriction and server-authentication
+limitations apply. These commands are for the parent; the coding agent exercises
+only fake OCR/providers in offline tests.
+
+### Artifacts, budgets and errors
+
+- `--output` must be a **new directory** with an existing parent. Existing files,
+  directories and symlinks are rejected before engine creation. The output directory
+  is private (`0700`); `preview.json` is published exclusively, then atomically
+  replaced only as this run's own checkpoint. JSON snapshots have a 64 MiB cap.
+- Original input is capped at 32 MiB, one frame and 40 million pixels. Original
+  file SHA256, RGB pixel SHA256 and size are bound to the page/proposal evidence.
+  Bytes are rechecked after OCR, before/after model calls and on completion. A
+  changed, removed or unreadable image, or mismatched raw/proposal snapshot, fails closed. Any retained
+  translations on a changed file are explicitly marked `stale_source` with
+  `binding_current=false`, not presented as current-source output.
+- Raw OCR and **every proposed unit** are checkpointed before model execution.
+  Unit records retain membership/order, all alternatives, selected-reading and
+  full request revisions, typed result/outcomes, blocking reasons and raw evidence.
+  `ocr_only`, `not_selected`, `budget_exhausted`, `blocked`, failed/abstained and
+  interrupted/not-executed units remain visible. Generic uncertainty does not cause
+  blanket blocking; genuine structural/blank-source faults remain explicit.
+- Default `--max-attempts 2` is a **global 0..20 provider-call budget**, with one
+  attempt per selected unit and no retries/preload calls. Errors and interrupted
+  dispatched calls spend the budget. Blocks and capability/input rejection that
+  never dispatch a call do not. Default selection follows saved proposal order;
+  repeated `--unit-id ID` flags optionally select units and their call order while
+  keeping unchosen units in the artifact. No source correction or candidate
+  promotion is performed.
+  With the optional fragment mode below, strict inputs run first; automatic
+  fragments use stable script-hint tiers, while explicit selection retains its order.
+- Context is fixed at 4096; default `--num-predict 1024` and `--keep-alive 60`
+  use existing runtime bounds. `--timeout` is 0..300 seconds per utterance (default
+  120), not an OCR timeout or hard remote-generation kill. Ctrl-C preserves a
+  reviewable interrupted checkpoint when Python can handle the interruption;
+  remote generation may continue. Abrupt process/storage failure can leave the
+  last valid `running` checkpoint and partial journal, not a completion claim.
+- `results.jsonl` is exclusively created, appended, flushed and fsynced per visited
+  nonblocked selected unit. Raw-response sidecars retain at most 1 MiB per attempt,
+  with full response SHA256/size, retained size, truncation flag and available
+  load/eval/token metadata. Truncated prefixes are `.txt`, not full-JSON claims.
+  Model/provider errors cannot become translated `Failed` text. Evidence-sink
+  failures use the existing typed failure path and still spend dispatched calls.
+- The workflow snapshots OCR evidence and closes the facade/underlying Paddle
+  engine in a `finally` path **before translation**, including prediction failures.
+  Injected translation runtimes remain caller-owned; the built-in runtime closes
+  each HTTP response. Ollama residency follows the explicit keep-alive setting.
+- Exit code **0** means the bounded pass completed (including OCR-only, blocked,
+  abstained or budget-limited units); **1** means unit translation failures,
+  interruption or a failed pipeline, with a reviewable artifact when storage permits;
+  **2** means rejected arguments/paths before engine creation. Inspect unit outcomes,
+  not just the exit code. Preview completion is not semantic quality certification.
+
+Source-only checks for this workflow:
+
+```sh
+.venv/bin/python -m unittest tests.translation.test_workflow -v
+.venv/bin/python -m unittest discover -s tests -t .
+.venv/bin/python -m unittest tests.source_only_check -v
+.venv/bin/python -m compileall -q src/main.py src/tralens/translation/workflow.py tests/translation/test_workflow.py
+```
+
+Production rendering/erasure, OCR algorithms/adapters, dependency manifests,
+provider prompts and legacy `Translate` behavior/defaults are outside this
+workflow change. The TG27B/native workflow default is user-selected; it does not
+establish semantic quality or enable automatic model promotion.
+
+## Explicit unverified text-only fragment previews
+
+The image workflow's **strict default is unchanged**. An explicit
+`--allow-fragment-previews` (API `allow_fragment_previews=True`) additionally permits
+derived raw-text fragment inputs for a narrow subset of blocked sources. It does
+not make the original utterance strictly eligible or change its blockers.
+OCR and model opt-ins remain separate; this flag alone enables neither engine.
+The API requires an actual boolean, not `1`, a string or another truthy value.
+
+Policy `unverified_raw_singleton_fragment_v1` supports **singletons only**:
+
+- Exactly one original main/source ID, with consistent singleton order and full
+  raw-detection/page/reading provenance. The selected reading must be the original
+  raw main reading; no alternative is silently selected or corrected.
+- Only `unknown_region_ownership`, `unsafe_crop` and `crop_isolation_unresolved`
+  may prevent strict eligibility. Other structural faults, unknown orientation,
+  mixed ownership, annotation-role/relationship conflicts, unknown structural
+  reasons, missing/inconsistent raw evidence and unresolved source association
+  retain the block. Explicit rejected/blank raw readings are not dispatched.
+- Combined units are **not split in this first policy**. Their existing contract
+  does not certify independent fragment role/order; they retain the explicit
+  `requires_independent_singleton_raw_input` reason. No merge or reading order is
+  inferred, and no manual-review requirement is added to normal readable previews.
+- Raw confidence is retained as evidence, not used as a readability threshold or
+  proof. Nonempty garbled text can still be unrecoverable. Generalists can abstain;
+  specialist plaintext may refuse or mistranslate and is not semantically certified.
+
+### Distinct contracts and source binding
+
+`FragmentInput` embeds the immutable **original `Utterance`**, original-unit
+revision, source reading revision, source IDs and policy revision. All original
+readings/candidates, ownership/crop evidence and blocked reasons remain intact.
+Its new fragment identifier and derived-reading revision are distinct from the
+original unit/reading; neither pretends to be a new OCR detection.
+
+`FragmentRequest` is not `TranslationRequest`. Strict `translate()` and
+`make_payload()` reject fragment requests; the original strict request still
+returns blocked. Execution uses `translate_fragment(...,
+allow_fragment_previews=True)` and a separate `FragmentResult`:
+
+```python
+from tralens.translation import fragment_plan, FragmentRequest
+
+inputs, rejected = fragment_plan(original_unit, allow_fragment_previews=True)
+if inputs:
+    request = FragmentRequest(inputs[0])
+    result = translator.translate_fragment(request, allow_fragment_previews=True)
+    result.assert_current(request, original_unit)
+```
+
+Fragment results expose **`fragments`**, not ordinary `translations`; their status
+is `fragment_preview`, `fragment_abstained`, `fragment_failed`, or another explicit
+fragment-prefixed disposition. `output_kind="unverified_text_fragment"`,
+`review_needed=true`, `preview_only=true` and `complete_utterance_claimed=false`
+are mandatory/recorded. Source readability is not verified by the wrapper. Model
+outputs and reasons remain unverified data. Replacing original evidence, selected
+reading, source IDs or policy invalidates the derived input/result binding.
+
+TG27 remains the workflow default. Its **native single-user prompt is unchanged**;
+uncertainty and reduced capability are recorded outside the unsupported prompt.
+No page images/context, recognition cropping, rendering or erasure permission is
+granted. Even an image-capable profile cannot send images through the fragment API.
+
+### Workflow artifacts and shared budget
+
+Opt-in output uses workflow schema2. Every original unit/request remains present;
+an original blocked unit remains `status="blocked"` with its ordinary `result=null`.
+Derived requests/results live only in its `fragment_previews` list, alongside
+`fragment_rejection_reasons`. Schema1/strict mode derives nothing.
+
+`strict_eligible_units`, `strict_preview_count`, `fragment_candidate_inputs`,
+`fragment_preview_count`, `fragment_status_counts`, `strict_attempts` and
+`fragment_attempts` are separate. A fragment must never be counted as a complete
+utterance translation. `attempts` is the single global budget across both paths.
+Selected strict inputs run first in selection/saved order. For **automatic**
+selection (no `--unit-id` / empty `selected_ids`), singleton fragments containing
+any Kana/Han letter run first, stably within the two tiers. There is no minimum
+length: short kana, kanji-only text and Japanese-script SFX are preserved.
+NFKC is used only in a temporary inspection view (including halfwidth kana);
+raw text, fullwidth Latin, alternatives, hashes and model prompts are unchanged.
+Han is shared with other languages; this hint certifies neither Japanese language,
+readability, dialogue role nor quality. Kana-containing noise can rank first;
+Latin/marker inputs remain candidates, not discarded sources.
+
+Nonempty explicit `selected_ids` bypass script reordering and preserve requested
+order within the strict-first contract. `--unit-id` continues to select original proposal IDs,
+not derived fragment IDs; unchosen/budget-skipped derived inputs remain visible.
+
+Scheduling policy `strict_then_kana_han_stable_v1` is recorded in settings and each
+fragment's `scheduling` data, with reason, tier, Unicode version and planned position.
+`input_schedule` is checkpointed before provider entry; budget-skips retain those
+reasons. Admission policy/provenance and original blocked reasons are unchanged.
+
+Both paths retain bounded raw responses, source/file drift checks, cancellation,
+exclusive output and atomic checkpoints. Fragments get exactly one attempt even
+if a standalone translator permits explicit strict retries; workflow retries and
+preload calls remain disabled. Errors and interrupted dispatched fragment calls
+consume the same global budget. OCR closes before either translation path.
+
+Parent-ready command, using the existing image/local medium exports and a **new**
+output directory (the agent does not run live OCR/models):
+
+```sh
+.venv-paddle6/bin/python src/main.py \
+  --image "$IMAGE" --output test-results/workflow-fragments-priority-parent-v1 \
+  --run-local-ocr --device cpu --model-root "$MODEL_ROOT" \
+  --run-local-model --allow-fragment-previews \
+  --endpoint http://100.121.133.88:11434 \
+  --max-attempts 20 --timeout 120 --keep-alive 60 --num-predict 1024
+```
+
+Omit `--run-local-model` for an OCR-only candidate inventory with zero translation
+calls; omit `--allow-fragment-previews` for the original strict behavior. The flag
+waives only text-input permission for the specified policy, not source ownership,
+crop safety, source certainty, utterance completeness or downstream approval.
+
+### Frozen current-page input comparison
+
+`test-results/translation-fragment-preview-v1/strict-vs-fragment.json` binds the
+accepted current page and lists every original unit, unchanged blockers, derived
+source IDs/revisions and rejection reasons. Strict eligibility stays **8 of29**;
+the same **21 original units remain blocked**. The opt-in policy permits15
+additional unverified singleton inputs, source IDs:
+
+`0,1,2,4,7,9,11,12,23,24,29,33,34,35,41`.
+
+Singletons3/32 remain blocked by orientation/structural faults. Combined groups
+14/19/21/22,13/18/20,25/26/27 and28/30 are not derived. This is **23 possible
+inputs, not23 complete/correct translations**. With a20-call cap, strict attempts
+take priority and remaining fragment candidates can be budget-exhausted. No model
+was called to produce this comparison and no coverage/accuracy claim follows.
+
+Scheduling-only replay of the saved live page is in
+`test-results/translation-fragment-priority-v1/before-after.json`. Strict inputs
+stay8 and fragments stay15. At the same20-call budget, projected fragment slots
+gain34/35/41 (including `ねえ`) and budget-skip11/23/33 instead. This is neither a
+model rerun nor a quality gain claim; old outputs are not reassigned to new inputs.
+
+Focused verification:
+
+```sh
+.venv/bin/python -m unittest tests.translation.test_fragments -v
+.venv/bin/python -m unittest tests.translation.test_fragment_priority -v
+.venv/bin/python -m unittest discover -s tests -t .
+.venv/bin/python -m unittest tests.source_only_check -v
+.venv/bin/python -m compileall -q src/main.py src/tralens/translation tests/translation/test_fragments.py
+```
+
+## Optional source-bound visual OCR review (off by default)
+
+`--review-ocr` adds a **sequential** optional phase: local OCR/proposals → visual
+reread proposals → reviewer release → normal TG27B/text previews. Without the flag
+there is no reviewer construction/call, image-view generation or release, and the
+original paths/prompts are retained. OCR-only plus `--review-ocr` is rejected before
+engine initialization: image review requires the separate `--run-local-model` opt-in.
+
+The default reviewer is the parent-installed **`qwen3.8:latest`**, configurable via
+`--review-model`. The existing explicit private/overlay `--endpoint` is used for both
+models. A configurable reviewer must support vision/schema JSON; unsupported
+providers fail visibly without model fallback/download. Tags are configuration,
+not weight/digest authentication. Same reviewer/translator tags (including implicit
+`:latest`) are rejected before OCR rather than silently unloading the translator.
+
+`--max-review-attempts 4` is an independent **0..20 generation budget**, with one
+attempt per target, no retry or preload. Review options are fixed at8192 context,
+1024 prediction tokens, temperature0,60-second residency and `think=false` on the
+built-in chat adapter. `--review-timeout` defaults90 and is capped120 seconds.
+These are requested settings; the parent smoke must verify actual installed model
+behavior. Raw response/load/eval/token evidence is retained, including truncation
+and invalid-output failures. Existing1 MiB retention prefixes are explicitly marked.
+
+### Attribution and immutable suggestions
+
+This bounded version reviews **attributable singletons only**. Combined main/order
+or annotation/role conflicts are skipped, while their original translation path
+remains intact. A blocked source is reviewable for alternate translation only when
+`--allow-fragment-previews` is also explicitly enabled and its existing singleton
+fragment policy permits it. Review never clears a structural block or enables
+fragment mode implicitly. Every unit has a review status/skip reason.
+
+Views are independently constructed from current raw polygons/member IDs and the
+exact original file/RGB hashes, not from a trusted `crop_safe` shortcut. Positive
+target/nonmember bbox overlap or invalid geometry is conservatively skipped.
+The model receives an **unmodified RGB context crop** and a **separate blue-target
+localization overlay**. Context-only neighboring IDs, global/local polygon,
+context bounds, original/view file and pixel hashes, unit/reading/model/request
+revisions and requested-body SHA256 are saved. No resize, rotation, enhancement,
+erasure or recognition-crop permission is introduced. View limits:1536 maximum
+side,2 million pixels and1 MiB per PNG; larger views are visibly skipped.
+
+Strict full JSON requires exact target/source IDs and original-text echo, one of
+`unchanged`, `proposed_correction`, `unreadable`, `uncertain`, bounded reasons and
+`unverified`/`ambiguous` uncertainty. Only a correction may carry nonempty different
+proposed text (at most8192 characters). Duplicate keys, extra confidence/approval
+fields, foreign/duplicate IDs, wrong types, empty corrections, oversized or
+length-truncated generation fail validation. No confidence threshold accepts text.
+Wider context cannot prove missing glyph membership. Neighbor text must never be
+treated as target source; actual semantic attribution still needs parent checking.
+
+Original OCR boxes, units, readings/candidates and `selected_revision` are **never
+overwritten**. A validated proposal creates separate `AlternateInput`/request/result
+records, with `output_kind="unverified_visual_alternate"`, `alternate_*` statuses,
+mandatory review, exact original/proposed text and source/image/review provenance.
+It exposes `alternates`, not ordinary `translations`. For blocked originals its
+base must remain the already-enabled fragment request. Strict APIs reject alternate
+requests; a suggestion cannot promote an original or fragment to strict eligibility.
+TG27B uses its unchanged native user template with the proposed text, never arbitrary
+JSON/image conditioning. Original text and original translation jobs remain retained.
+
+### Phase, fallback and residency rules
+
+- All review calls complete before any translation. Selected/saved parent-unit
+  order is used for review, subject to attribution skips and its independent budget.
+  `--unit-id` selects original units for both stages; no model result chooses new IDs.
+- Original strict jobs run first. Strict-source alternates follow them. In the
+  selected/script-ordered fragment queue, a proposed alternate precedes its own
+  original fragment, retaining the immediate original fallback where budget permits.
+  Both original and alternate translation attempts spend the same existing global
+  `--max-attempts` budget; alternate counts are separate from strict/fragment counts.
+- Reviewer provider/output failure is best-effort: visible failure/raw evidence,
+  no proposal, original translation path intact. Unreadable/uncertain verdicts are
+  unverified model reports, not source mutation or automatic vetoes. Cancellation,
+  source drift and changed view files are fatal phase stops, not swallowed fallback.
+- A workflow-created reviewer gets **one explicit tag-scoped** `/api/generate`
+  empty-prompt `keep_alive=0` control call after review, also on failure/interruption
+  when a generation was dispatched. It is not a service stop or wildcard unload.
+  `control_calls` is separately bounded to1; release timeout is at most30 seconds.
+  A failed release stops translation to avoid silently overlapping the large models.
+  The acknowledgment is recorded; actual residency/memory behavior needs parent smoke.
+- Injected caller-owned reviewers are **never unloaded or closed** by the workflow;
+  caller residency responsibility is explicit in the artifact. Zero review calls
+  initialize/load/release no default review provider.
+
+Review mode writes workflow schema3. `ocr_review` records all unit dispositions,
+requests, view paths/hashes, verdict revisions, generation timings/raw evidence and
+residency/control costs. Each unit also has `visual_alternates`; original strict and
+fragment fields remain separate. Source/request/crop changes invalidate proposals.
+Proposals, unchanged judgments and fluent alternate outputs are not human review,
+OCR truth, semantic-quality evidence or rendering/erasure authorization. No renderer
+or deferred HTML-review tool is invoked or modified.
+
+### Parent local smoke (four review calls maximum)
+
+Use existing `IMAGE` / `MODEL_ROOT` and a fresh output directory:
+
+```sh
+.venv-paddle6/bin/python src/main.py \
+  --image "$IMAGE" --output test-results/workflow-visual-review-parent-v1 \
+  --run-local-ocr --device cpu --model-root "$MODEL_ROOT" \
+  --run-local-model --review-ocr --review-model qwen3.8:latest \
+  --max-review-attempts 4 --review-timeout 90 \
+  --endpoint http://100.121.133.88:11434 \
+  --max-attempts 20 --timeout 120 --keep-alive 60 --num-predict 1024
+```
+
+Add `--allow-fragment-previews` explicitly to permit proposals on supported blocked
+singletons. Saved-page **input-only** preflight is in
+`test-results/translation-visual-review-v1/saved-page-preflight.json`: without that
+flag the first4 attributable targets are8/10/31/42; with it they are0/4/7/8.
+This preflight called no provider and established no reread or translation quality.
+The coder runs only mocked/offline tests; the parent runs this actual model/OCR smoke.
+
+```sh
+.venv/bin/python -m unittest tests.translation.test_ocr_review -v
+.venv/bin/python -m unittest discover -s tests -t .
+.venv/bin/python -m unittest tests.source_only_check -v
+.venv/bin/python -m compileall -q src/main.py src/tralens/translation tests/translation/test_ocr_review.py
+```

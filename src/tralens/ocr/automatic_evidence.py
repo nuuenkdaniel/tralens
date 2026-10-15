@@ -266,12 +266,80 @@ class OriginalInkEvidence:
         return GlyphEvidence(len(components), int(sum(stats[i,4] for i in components)), scale, flow,
                              tuple(int(v) for v in bounds))
 
-    def boundary_between(self, first, second, *, first_glyphs=None, second_glyphs=None):
+    def _included_row_glyph_component(self, labels, stats, label, scan, corridor,
+                                      included_members, nonmember_boxes):
+        """Attribute one complete original component, never clear a rectangle/ink mask."""
+        sx,sy,ex,ey = scan
+        x,y,w,h,area = (int(v) for v in stats[label])
+        # A scan-edge fragment is not an isolated component, even if an OCR box
+        # contains the fragment. Global labels below also check that it is whole.
+        if x <= 0 or y <= 0 or x+w >= ex-sx or y+h >= ey-sy:
+            return None
+        pixels = labels[y:y+h,x:x+w] == label
+        yy,xx = np.nonzero(pixels)
+        gx,gy = sx+x,sy+y
+        if not hasattr(self,"_boundary_dark_components"):
+            _,global_labels,global_stats,_ = cv2.connectedComponentsWithStats(self.ink,connectivity=8)
+            self._boundary_dark_components = global_labels,global_stats
+        global_labels,global_stats = self._boundary_dark_components
+        original_label = int(global_labels[gy+int(yy[0]),gx+int(xx[0])])
+        if tuple(int(v) for v in global_stats[original_label]) != (gx,gy,w,h,area):
+            return None
+        # Conservative reuse of original glyph-shape guards: bars and isolated
+        # outlines/rings are not evidence for suppressing a divider.
+        row_runs = int(np.max(np.sum(pixels & ~np.pad(pixels[:,:-1],((0,0),(1,0))),axis=1)))
+        column_runs = int(np.max(np.sum(pixels & ~np.pad(pixels[:-1,:],((1,0),(0,0))),axis=0)))
+        if min(row_runs,column_runs) < 2:
+            return None
+        contours,_ = cv2.findContours(pixels.astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        silhouette = np.zeros_like(pixels,dtype=np.uint8)
+        cv2.drawContours(silhouette,contours,-1,1,cv2.FILLED)
+        solid = silhouette != 0
+        # An isolated outline enclosing other original ink is not a glyph proof.
+        if np.any(solid & ~pixels & (self.ink[gy:gy+h,gx:gx+w] != 0)):
+            return None
+        outer_rows = int(np.max(np.sum(solid & ~np.pad(solid[:,:-1],((0,0),(1,0))),axis=1)))
+        outer_columns = int(np.max(np.sum(solid & ~np.pad(solid[:-1,:],((1,0),(0,0))),axis=0)))
+        if max(outer_rows,outer_columns) < 2:
+            return None
+        # Actual nonmember pixels, not overlapping rectangles, veto exclusion.
+        for box in nonmember_boxes:
+            if box.bbox[2] < gx or box.bbox[0] > gx+w or box.bbox[3] < gy or box.bbox[1] > gy+h:
+                continue
+            polygon = box.poly.astype(np.float32)
+            if any(cv2.pointPolygonTest(polygon,(float(gx+a),float(gy+b)),False) >= 0 for a,b in zip(xx,yy)):
+                return None
+        for box,glyphs in included_members:
+            if (glyphs.component_count < 2 or glyphs.flow != "horizontal" or not glyphs.bounds
+                    or glyphs.scale <= 0):
+                continue
+            a,b,r,s = glyphs.bounds
+            # Only an intervening core in the unextended facing corridor. Bounds
+            # are half-open pixel extents: touching an extent is not crossing it.
+            between = corridor[1] <= b < s <= corridor[3]
+            minor = min(box.bbox[2]-box.bbox[0],box.bbox[3]-box.bbox[1])
+            if (not between or not (a <= gx and b <= gy and gx+w <= r and gy+h <= s)
+                    or area < 2 or max(w,h) > 1.8*minor):
+                continue
+            if not all(cv2.pointPolygonTest(box.poly.astype(np.float32),(float(gx+u),float(gy+v)),False) > 0 for u,v in zip(xx,yy)):
+                continue
+            return {"member_id":box.box_id,"original_component_id":original_label,
+                    "component_bounds":(gx,gy,gx+w,gy+h),"component_area":area,
+                    "supported_core":glyphs.bounds,"row_runs":row_runs,"column_runs":column_runs,
+                    "silhouette_row_runs":outer_rows,"silhouette_column_runs":outer_columns}
+        return None
+
+    def boundary_between(self, first, second, *, first_glyphs=None, second_glyphs=None,
+                         included_members=(), nonmember_boxes=()):
         """Veto long original dark strokes in the facing corridor, even with a shared region.
 
         No OCR-mask removal: blank detections cannot erase the boundary. Use
         supported main-glyph cores when detection rectangles include annotations.
         A missing/open corridor is inconclusive, never positive ownership proof.
+        Only the automatic merge guard supplies already-included intervening mains.
+        Exclusion is scoped to the evidenced nonadjacent horizontal-row case;
+        vertical corridors and other callers retain the original veto. Components
+        are excluded only from the decision, never self.ink or the original image.
         """
         a = first_glyphs.bounds if first_glyphs and first_glyphs.bounds else first.bbox
         b = second_glyphs.bounds if second_glyphs and second_glyphs.bounds else second.bbox
@@ -306,10 +374,23 @@ class OriginalInkEvidence:
         else:
             x1,x2 = max(0,x1-endpoint_probe),min(self.ink.shape[1],x2+endpoint_probe)
         evidence.update(scan_bounds=(x1,y1,x2,y2), endpoint_probe_pixels=endpoint_probe)
-        count, _, stats, _ = cv2.connectedComponentsWithStats(self.ink[y1:y2,x1:x2], connectivity=8)
-        lengths = [int(stats[i,3] if axis == "vertical" else stats[i,2]) for i in range(1,count)
-                   if stats[i,4] >= max(4,.5*(stats[i,3] if axis == "vertical" else stats[i,2]))]
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(self.ink[y1:y2,x1:x2], connectivity=8)
+        lengths,original_lengths,ignored = [],[],[]
+        for i in range(1,count):
+            length = int(stats[i,3] if axis == "vertical" else stats[i,2])
+            if stats[i,4] < max(4,.5*length):
+                continue
+            original_lengths.append(length)
+            proof = (self._included_row_glyph_component(labels,stats,i,(x1,y1,x2,y2),bounds,
+                     included_members,nonmember_boxes) if included_members and axis == "horizontal" and length >= threshold else None)
+            if proof is not None:
+                ignored.append(proof)
+            else:
+                lengths.append(length)
         evidence.update(longest_dark_stroke=max(lengths,default=0), threshold=threshold)
+        if ignored:
+            evidence.update(original_longest_dark_stroke=max(original_lengths,default=0),
+                            ignored_member_components=tuple(ignored))
         evidence["blocked"] = any(length >= threshold for length in lengths)
         evidence["reason"] = "original_boundary_stroke" if evidence["blocked"] else "no_long_boundary_stroke_observed"
         return evidence

@@ -573,10 +573,17 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
         for left in first:
             for right in second:
                 pair = tuple(sorted((left.box_id,right.box_id),key=_key))
-                if pair not in boundary_cache:
-                    boundary_cache[pair] = ink.boundary_between(left,right,
-                        first_glyphs=glyphs[left.box_id],second_glyphs=glyphs[right.box_id])
-                evidence = boundary_cache[pair]
+                # A pair's exclusion proof belongs only to this merge attempt.
+                # Reusing it with a different member set could create a chain bridge.
+                key = (pair,members)
+                if key not in boundary_cache:
+                    included = tuple((box,glyphs[box.box_id]) for box in first+second
+                                     if box.box_id not in pair) if not unassigned else ()
+                    nonmembers = tuple(box for box in boxes if box.box_id not in members)
+                    boundary_cache[key] = ink.boundary_between(left,right,
+                        first_glyphs=glyphs[left.box_id],second_glyphs=glyphs[right.box_id],
+                        included_members=included,nonmember_boxes=nonmembers)
+                evidence = boundary_cache[key]
                 if evidence["blocked"]:
                     reasons.append("original_image_boundary_blocks_column_merge")
                     barriers.append({"source_ids": pair, "evidence": evidence})

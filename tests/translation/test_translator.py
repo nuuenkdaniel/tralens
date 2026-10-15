@@ -43,6 +43,10 @@ class TranslationGuardTests(unittest.TestCase):
         self.assertEqual(translated.ocr_metadata["candidates"], accepted.ocr_metadata["candidates"])
         self.assertEqual(translated.ocr_metadata["crop_bounds"], (8, 8, 22, 42))
         self.assertEqual(translated.ocr_metadata["ocr_selected_text"], "こんにちは")
+        self.assertTrue(translated.ocr_metadata["translation_preview_only"])
+        self.assertTrue(translated.ocr_metadata["translation_review_needed"])
+        self.assertEqual(translated.ocr_metadata["translation_semantic_status"], "legacy_unverified")
+        self.assertNotIn("translation_semantic_status", accepted.ocr_metadata)
         self.assertTrue(np.array_equal(translated.paddle_poly, accepted.paddle_poly))
         self.assertEqual(translated.paddle_box_id, 10)
         self.assertEqual(result[0].metadata, group.metadata)
@@ -56,3 +60,17 @@ class TranslationGuardTests(unittest.TestCase):
                                box(2, (30, 10, 40, 40), "", .99)])]
         self.assertEqual(self.translator.translate_groups(groups, "synthetic"), [])
         self.translator.client.chat.assert_not_called()
+
+    def test_malformed_duplicate_missing_or_provider_failure_never_yields_renderable_text(self):
+        accepted = box(10, (10, 10, 20, 40), "こんにちは", .99)
+        group = m.Text_Group([accepted])
+        for raw in ('prefix [{"id":1,"translation":"Hello"}]',
+                    '[{"id":1,"translation":"Hello"},{"id":1,"translation":"Other"}]',
+                    '[]', '[{"id":1,"translation":""}]',
+                    '[{"id":1,"id":2,"translation":"Hello"}]'):
+            with self.subTest(raw=raw):
+                self.translator.client.chat.return_value = {"message": {"content": raw}}
+                self.assertEqual(self.translator.translate_groups([group], "never-read"), [])
+                self.assertEqual(accepted.text, "こんにちは")
+        self.translator.client.chat.side_effect = RuntimeError("synthetic failure")
+        self.assertEqual(self.translator.translate_groups([group], "never-read"), [])
