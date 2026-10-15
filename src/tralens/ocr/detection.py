@@ -1,4 +1,6 @@
 import importlib
+import warnings
+from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
 
@@ -10,20 +12,66 @@ from .automatic_units import propose_page_from_boxes
 from .automatic_recognition import recognize_automatic_batch
 from .review import ReviewMixin
 from .paddle_result import associate_paddle_result, PaddleResultContractError
+from .paddle_profiles import DEFAULT_PROFILE, resolve_profile, validate_runtime, PaddleInitializationError
 from .types import MediaType, OCREngine, OCRReviewPolicy, OCRStatus, Text_Box, Text_Group
 
 
 def create_paddle_ocr(**settings):
     # PaddleX performs a host check on import: defer it to explicit construction.
-    return importlib.import_module("paddleocr").PaddleOCR(**settings)
+    validate_runtime(settings)
+    engine = importlib.import_module("paddleocr").PaddleOCR(**settings)
+    if any(settings.get(key) is not None for key in (
+            "device", "text_detection_model_name", "text_recognition_model_name",
+            "text_detection_model_dir", "text_recognition_model_dir")):
+        try:
+            pipeline = engine.paddlex_pipeline
+            predictors = (pipeline.text_det_model, pipeline.text_rec_model)
+            devices = [predictor.device for predictor in predictors]
+            if settings.get("device") is not None and devices != [settings["device"]] * 2:
+                raise RuntimeError("Paddle runtime device differs from explicit request: " + repr(devices))
+            for predictor, kind in zip(predictors, ("detection", "recognition")):
+                name = settings.get("text_" + kind + "_model_name")
+                directory = settings.get("text_" + kind + "_model_dir")
+                if name is not None and predictor.model_name != name:
+                    raise RuntimeError("Paddle runtime model differs from explicit request: " + str(name))
+                if directory is not None and Path(predictor.model_dir).resolve() != Path(directory).resolve():
+                    raise RuntimeError("Paddle runtime model directory differs from explicit request: " + str(directory))
+        except Exception:
+            engine.close()
+            raise
+    return engine
 
 
 class OCR(GroupingMixin, ReviewMixin):
     def __init__(self, image_path: str, *, media_type=MediaType.MANGA,
                  manga_recognizer=None, enable_manga_ocr=False,
-                 manga_model_path=None, review_policy=None):
+                 manga_model_path=None, review_policy=None,
+                 model_profile=DEFAULT_PROFILE, device=None, model_root=None, model_dirs=None,
+                 allow_restricted_paddle=False, cpu_threads=1):
+        # Reject invalid model selections/paths before initializing either engine.
+        if type(allow_restricted_paddle) is not bool:
+            raise ValueError("allow_restricted_paddle must be a boolean")
+        media = MediaType(media_type)
+        profile = resolve_profile(model_profile, device, model_root, model_dirs,
+                                  cpu_threads=cpu_threads)
+        restricted = profile.name == "v6_tiny"
+        if restricted and media == MediaType.MANGA and not allow_restricted_paddle:
+            raise ValueError("v6_tiny lacks Japanese kana; manga use requires explicit experimental "
+                             "allow_restricted_paddle=True")
+        self.paddle_provenance = profile.identity()
+        self.paddle_provenance.update(
+            media_type=media.value, allow_restricted_paddle=allow_restricted_paddle,
+            restricted_paddle_override=restricted and media == MediaType.MANGA and allow_restricted_paddle)
+        if restricted:
+            warning = ("Experimental v6_tiny: the inspected official recognizer dictionary has no "
+                       "hiragana or katakana; general Japanese recognition is unsupported. "
+                       "Not preferred for Japanese manga.")
+            self.paddle_provenance.update(
+                japanese_support="restricted_experimental_no_hiragana_or_katakana_not_general_japanese_support",
+                restricted_paddle_warning=warning)
+            warnings.warn(warning, RuntimeWarning, stacklevel=2)
         self.image_path = image_path
-        self.media_type = MediaType(media_type)
+        self.media_type = media
         self.review_policy = review_policy or OCRReviewPolicy()
         if enable_manga_ocr and manga_recognizer is not None:
             raise ValueError("Choose an injected recognizer or the runtime adapter")
@@ -34,11 +82,11 @@ class OCR(GroupingMixin, ReviewMixin):
             adapter = importlib.import_module(module_name)
             manga_recognizer = adapter.MangaOCRAdapter(manga_model_path)
         self.manga_recognizer = manga_recognizer
-        self.ocr = create_paddle_ocr(
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
-        )
+        try:
+            self.ocr = create_paddle_ocr(**profile.settings())
+        except Exception as error:
+            raise PaddleInitializationError(self.paddle_provenance, detail=str(error)) from error
+        self.paddle_provenance["initialization_status"] = "initialized"
 
     def predict(self) -> list[list[Text_Box]]:
         self.prediction_contract_reports = []
@@ -49,8 +97,14 @@ class OCR(GroupingMixin, ReviewMixin):
             try:
                 text_boxes,report = associate_paddle_result(res,page_index)
             except PaddleResultContractError as error:
+                if hasattr(self, "paddle_provenance"):
+                    error.report["model_identity"] = deepcopy(self.paddle_provenance)
                 self.prediction_contract_reports.append(error.report)
                 raise
+            if hasattr(self, "paddle_provenance"):
+                report["model_identity"] = deepcopy(self.paddle_provenance)
+                for box in text_boxes:
+                    box.ocr_metadata["paddle_model"] = deepcopy(self.paddle_provenance)
             self.prediction_contract_reports.append(report)
             images_text_box.append(text_boxes)
         return images_text_box
@@ -65,6 +119,10 @@ class OCR(GroupingMixin, ReviewMixin):
             raise ValueError("ownership/regrouping flags require explicit propose_units and complementary ownership")
         media = MediaType(media_type if media_type is not None else
                           getattr(self, "media_type", MediaType.MANGA))
+        identity = getattr(self, "paddle_provenance", {})
+        if (media == MediaType.MANGA and identity.get("profile") == "v6_tiny"
+                and not identity.get("allow_restricted_paddle", False)):
+            raise ValueError("v6_tiny manga processing requires allow_restricted_paddle=True at construction")
         if propose_units and media != MediaType.MANGA:
             raise ValueError("automatic unit proposals require explicit manga mode")
         # A validated call starts a new pass, even when it fails or disables

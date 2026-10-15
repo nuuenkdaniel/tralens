@@ -1,6 +1,8 @@
 __pycache__
 output.jpg
 *venv*
+# Explicit parent-managed Paddle 3.7 comparison environment.
+/.venv-paddle6/
 *.png
 *.jpg
 *.env

@@ -1,5 +1,199 @@
 # OCR review
 
+## Opt-in Paddle model profiles (isolated 3.7 runtime)
+
+The production default is explicitly pinned to **`v6_medium`**, including both
+model names, by the approved default-selection change. It requires the validated
+**PaddleOCR 3.7.0 / PaddleX 3.7.2** runtime in `requirements-paddle6.txt`.
+`OCR(image_path)` keeps its call shape; its selected model now changes to medium.
+Grouping/review/candidate policies remain unchanged. Counts alone are not an
+accuracy justification. **`v5_server` remains an explicit compatibility option**
+for the original runtime: `OCR(image_path, model_profile="v5_server")`.
+
+```python
+from tralens.ocr import OCR
+
+ocr = OCR(image_path, device="gpu:0",  # Default: v6_medium.
+          model_root="~/.paddlex/official_models")
+# Equivalent explicit local export pair (detector first, recognizer second):
+ocr = OCR(image_path, device="cpu", cpu_threads=1, model_dirs=(
+    "~/.paddlex/official_models/PP-OCRv6_medium_det",
+    "~/.paddlex/official_models/PP-OCRv6_medium_rec",
+))
+```
+
+| Profile | Explicit detector / recognizer |
+| --- | --- |
+| `v5_server` (explicit compatibility option) | `PP-OCRv5_server_det` / `PP-OCRv5_server_rec` |
+| `v6_tiny` | `PP-OCRv6_tiny_det` / `PP-OCRv6_tiny_rec` |
+| `v6_small` | `PP-OCRv6_small_det` / `PP-OCRv6_small_rec` |
+| `v6_medium` (production default) | `PP-OCRv6_medium_det` / `PP-OCRv6_medium_rec` |
+
+V6 needs the isolated runtime below. **Tiny is restricted experimental and blocked
+by default for `media_type=MediaType.MANGA` (the default media type).** Parent
+inspection of the official recognizer export found 6,904 dictionary characters
+and **zero hiragana/katakana** for tiny, versus 18,708 characters including 86
+hiragana and 94 katakana for small/medium. Tiny does not provide general Japanese
+kana recognition and is not preferred for Japanese manga. Dictionary coverage
+alone does not establish recognition quality for small/medium either.
+
+Only an explicit boolean override permits an experimental tiny manga run:
+
+```python
+ocr = OCR(image_path, model_profile="v6_tiny", device="cpu",
+          model_root="~/.paddlex/official_models", allow_restricted_paddle=True)
+```
+
+This emits a `RuntimeWarning` describing missing kana and records the override,
+media type and restriction warning in `paddle_provenance`, page reports and raw
+box model metadata (also on `PaddleInitializationError.provenance` if initialization
+fails). `allow_restricted_paddle` defaults to `False` and must be a real boolean;
+invalid flags/media/profile selections are rejected before either engine starts.
+Explicit `v6_tiny` selection with `media_type=MediaType.OTHER` is allowed without
+the manga override, still warns about absent kana and makes no general Japanese
+support claim. The override is a facade permission, not a Paddle runtime parameter.
+Switching a nonmanga tiny instance to `process_images(media_type=MediaType.MANGA)`
+also requires the permission supplied at construction; it cannot bypass the guard.
+
+All profiles require parent-run geometry/visual quality validation before adoption.
+No OCR accuracy claim follows from detection counts, agreement, or timing.
+
+`device=None` preserves legacy upstream automatic device selection. Explicit
+selection accepts only `cpu` or one `gpu:N`; both initialized predictors must
+report that exact device or construction fails, with no CPU retry. There is no
+implicit GPU preference setting. Use `device="gpu:0"` to request GPU explicitly.
+
+Every profile explicitly sets **`enable_mkldnn=False`** (oneDNN disabled) and
+**`cpu_threads=1`** by default, including automatic/GPU device selection. Set
+`OCR(..., cpu_threads=3)` to request another positive integer thread count;
+booleans, zero, negative values and non-integers fail before either engine
+initializes. The exact thread count and disabled oneDNN flag are retained in
+profile settings and model provenance. This is an explicit configuration, with
+no retry or runtime fallback.
+
+**Known CPU incompatibility:** parent production probes of v6 small/medium with
+upstream oneDNN settings initialized successfully but failed during prediction
+with `ConvertPirAttribute2RuntimeAttribute ... pir::ArrayAttribute<pir::DoubleAttribute>`
+at `onednn_instruction.cc:116`. The benchmark's eight profile/device configurations
+(120 calls) passed with oneDNN disabled and one CPU thread; production now uses
+those same two flags. The parent will rerun CPU/GPU facade and integrated proposal
+checks. Historical resource evidence is preserved. Profile/facade source hashes
+change for the medium default and validation fixes; the benchmark source hash
+also changes to correct custom-thread identity metadata. Default effective
+benchmark engine flags remain identical. Other benchmark flags remain as
+documented below.
+
+`model_root` expands `~` and appends the exact model names above; alternatively
+provide a two-element **tuple** in `model_dirs`. These options are mutually
+exclusive. Both exports must contain nonempty `inference.yml`, `inference.json`,
+and `inference.pdiparams`, with matching `Global.model_name` in the YAML. Bad
+profiles/devices/paths fail before Paddle or the optional manga engine initializes.
+Omitting local paths retains legacy upstream weight resolution; the benchmark
+always requires local paths and blocks lookup/download fallback.
+After native initialization, the facade verifies requested model names and local
+directories as well as explicit devices; a substitution fails instead of running.
+
+V6 construction checks installed package metadata **before importing PaddleOCR**.
+Only the pinned validated package pair above is accepted for v6; missing, older,
+or other unvalidated versions raise a clear `PaddleInitializationError` naming
+the required/installed versions and the explicit v5 option. No install, automatic
+v5 substitution or retry occurs. Explicit v5 does not require the v6 package pins.
+Importing the facade or resolving a profile alone does not import an OCR engine.
+
+`ocr.paddle_provenance`, per-page `prediction_contract_reports[*].model_identity`,
+and each raw box's `ocr_metadata["paddle_model"]` retain the requested profile,
+device policy, exact constructor settings, installed package versions, local-path
+selection and initialization status. `PaddleInitializationError.provenance`
+retains failed initialization identity and chains the original error. These are
+selection records, not independent weight authenticity or quality certification;
+the benchmark adds local weight hashes and checks observed predictor identities.
+Original pixel input, source IDs, raw polygons/text/scores and association repair
+are preserved; profile selection does not alter annotation/grouping semantics.
+
+### Parent-managed environment preparation
+
+`requirements-paddle6.txt` pins `paddleocr==3.7.0` and `paddlex[ocr]==3.7.2`.
+Keep the original `.venv`, `pyproject.toml`, and `uv.lock` intact. The parent can
+copy the existing GPU environment to a **new** `.venv-paddle6` and upgrade only
+that copy (the agent does not run these commands). For a fresh destination:
+
+```sh
+test ! -e .venv-paddle6 && cp -a .venv .venv-paddle6
+.venv-paddle6/bin/python -m pip install -r requirements-paddle6.txt
+```
+
+Use the copied environment's **Python module invocation**, since copied entrypoint
+shebangs may still reference the original environment. If `.venv-paddle6` already
+exists, use the parent's prepared copy. Parent verifies Paddle GPU/package
+compatibility and obtains the six official v6 exports and the v5 server pair
+separately; this code never performs benchmark downloads. No v5 mobile profile
+is introduced. The isolated environment is Git-ignored.
+
+### Parent-only serial comparison CLI
+
+The benchmark deliberately retains **`--profile v5_server` as its reference
+default**, independently of the production medium default. Always pass `--profile`
+when comparing models. A nondefault `--cpu-threads` value is reflected in both
+effective constructor parameters and profile identity.
+
+Run each profile/device in a **separate fresh process**, serially. For example,
+after weights exist under `~/.paddlex/official_models/<exact-model-name>`:
+
+```sh
+.venv-paddle6/bin/python tools/paddle_model_benchmark.py \
+  --run-local-ocr --profile v6_small --device gpu:0 \
+  --model-root "$HOME/.paddlex/official_models" \
+  --manifest test-results/detector-scale-parent-v2/detector-scale-results.json \
+  --output test-results/paddle-v6-small-gpu0.json
+```
+
+Repeat separately with `--profile v5_server`, `v6_tiny`, or `v6_medium`, and
+`--device cpu` or `gpu:0`, using a fresh output filename each time. The output's
+parent directory must exist; exclusive creation refuses existing files. Replace
+`--manifest ...` with `--images existing/page1.png existing/page2.png` for explicit
+raster inputs. Default manifest input verifies all seven `plan.images` file/RGB
+hashes and sizes. No page substitution or image manipulation is performed.
+
+Defaults: one process-cold inference on the first page, then **two full serial
+warm-process passes over all pages** (15 calls for the seven-page manifest).
+`--warm-passes 2`, `--cpu-threads 1`, and `--sample-interval 0.2` are explicit
+controls. The first encounter of later pages is labeled warm-process, not
+per-image warm-cache. OS filesystem/GPU driver caches are not flushed. Constructor
+timing excludes package import and initial timing synchronization; GPU inference
+timings synchronize the requested device before and after each call. Runtime
+uses recognition batch size 1, with HPI, MKLDNN, TensorRT and CINN disabled.
+Upstream preprocessing/postprocessing defaults are retained and exported as the
+merged public pipeline configuration and observed effective pipeline parameters;
+this is not a reproduction claim for historical runs with unknown settings.
+
+JSON retains package versions, requested/observed device and model names/paths,
+exact constructor parameters, source/weight/image/manifest SHA256 hashes,
+initialization and first-inference timing, every cold/warm per-page wall/CPU time,
+process user/system seconds, and `resource.getrusage` lifetime peak RSS with units.
+Each record includes the complete selective raw `dt_polys`, `rec_polys`, texts,
+scores (and detector scores when present) in `contract.raw`, plus the existing
+association contract report. Invalid detector contracts remain explicit evidence.
+Failures preserve a failed JSON report and raise; there is no retry/substitution.
+
+GPU telemetry samples `nvidia-smi --query-compute-apps=pid,gpu_uuid,used_gpu_memory`
+and filters to this process PID. It records per-GPU process memory, timestamps,
+sampling interval, sampled peak and errors. Missing PID rows, unavailable tools,
+unsupported/N/A memory and short-lived peaks are reported honestly; no whole
+desktop allocation or zero-memory assumption is used. Sampling has overhead and
+can miss peaks. Parent performs the actual CPU/GPU matrix and visual review before
+adoption; the offline suite only uses fake exports and mocked engines.
+
+Offline checks (no engine initialization):
+
+```sh
+.venv/bin/python -m unittest tests.ocr.test_paddle_profiles tests.tools.test_paddle_model_benchmark -v
+.venv/bin/python -m unittest discover -s tests -q
+.venv-paddle6/bin/python -m unittest discover -s tests -q
+.venv/bin/python -m unittest tests.source_only_check -v
+.venv/bin/python -m compileall -q src/tralens tools tests
+git diff --check
+```
+
 `OCR(image_path)` keeps the default manga grouping path. Use
 `OCR(image_path, media_type=MediaType.OTHER)` for nonmanga input. Import
 `MediaType`, `OCRStatus`, and `OCRReviewPolicy` from `tralens.ocr` alongside `OCR`.
