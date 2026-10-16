@@ -1,5 +1,442 @@
 # OCR review
 
+## Candidate natural rendering (approved Phases 0–3)
+
+`tools/render_preview.py` is an offline, separate rendering workstream. It reads
+an existing translation preview and explicit operator-supplied selection, font
+manifest and original image. It never initializes OCR, translation, models or a
+provider. Legacy `tralens.rendering.cover_text` / `draw_text` remain compatible.
+
+```sh
+.venv/bin/python tools/render_preview.py plan \
+  --preview test-results/workflow-fragments-priority-parent-v1/preview.json \
+  --image images/ubunchu-ja-test/ubunchu01_04.png \
+  --selection /explicit/local/selection.json --fonts /explicit/local/fonts.json \
+  --output test-results/render-plan-parent-v1
+.venv/bin/python tools/render_preview.py compose \
+  --preview test-results/workflow-fragments-priority-parent-v1/preview.json \
+  --image images/ubunchu-ja-test/ubunchu01_04.png \
+  --selection /explicit/local/selection.json --fonts /explicit/local/fonts.json \
+  --output test-results/render-compose-parent-v1
+```
+
+Both output directories must be fresh and their parents must already exist.
+Existing outputs, symlink inputs/outputs/ancestors and overlapping selected regions
+are rejected. A failed run may retain its fresh partial directory as evidence;
+choose another output name for a subsequent run. Source files are never written.
+
+### Explicit font manifest
+
+Supply installed/local **single-face, static sfnt TTF/OTF** fonts and local license
+evidence. No font lookup, fallback, download, collection, variable-font support or
+font redistribution is performed. Each font is manually assigned a dialogue role
+and regular/bold weight. SHA256 values are over exact file bytes. Example schema:
+
+```json
+{"schema_version":1,"fonts":[{
+  "id":"dialogue-regular", "role":"dialogue", "weight":"regular",
+  "path":"/explicit/local/dialogue.ttf", "sha256":"<font-file-sha256>",
+  "license":"<actual license identifier or description>",
+  "license_path":"/explicit/local/font-license.txt",
+  "license_sha256":"<license-file-sha256>"
+}]}
+```
+
+Only font/license paths explicitly listed in this manifest are read; rendering
+geometry cannot name JSON or mask sidecars. Font bytes and licenses are not copied
+into outputs. Hash/license evidence records supplied provenance, not a legal
+permission determination. Unicode cmap formats 4/12 verify nonzero glyph mappings;
+unknown/malformed coverage fails closed. Coverage is not shaping-quality proof.
+
+### Source-bound selection generation and geometry
+
+This milestone produces **candidates only**, never approved exports. Schema 1/2/3
+strict preview results are not selected automatically. The operator chooses exact
+strict unit IDs/text; choosing a candidate does not claim Daniel checked every
+word. Fragments, VLM visual alternates, blocked units and modified wording are
+rejected. No reviewed-override path is implemented; such cases require a separately
+specified, real operator decision contract. Do not relabel a fragment as strict.
+
+The following parent-side recipe creates a bound selection after the operator has
+chosen `UNIT_ID`, a font and actual source-pixel polygons. It is documentation,
+not an instruction to run on private page data during coding. `GEOMETRY` must be
+filled from original-page inspection; OCR rectangles alone are not erase permission.
+No approval flags or sample-specific production rules are generated.
+
+```python
+from pathlib import Path
+from tralens.rendering.natural import document, digest, read_explicit
+from tralens.translation.contracts import canonical, revision
+
+preview_path = Path("test-results/workflow-fragments-priority-parent-v1/preview.json")
+fonts_path = Path("/explicit/local/fonts.json")
+UNIT_ID = "<operator-chosen strict unit ID>"
+FONT_ID = "dialogue-regular"
+# Each value is a list of polygons, each polygon a list of [x,y] vertices.
+# Fill all four using original source-pixel inspection before running this recipe.
+GEOMETRY = {"interior": [], "layout": [], "cleanup_permission": [], "protected": []}
+
+preview_bytes = read_explicit(preview_path)
+p = document(preview_bytes)
+r = next(r for r in p["units"] if r["unit"]["unit_id"] == UNIT_ID)
+assert r["status"] == "preview" and r.get("input_kind", "strict_utterance") == "strict_utterance"
+assert r["result"]["status"] == "preview"
+translations = dict(r["result"]["translations"])
+unit = {
+    "unit_id": UNIT_ID, "member_ids": r["unit"]["member_ids"], "order": r["unit"]["order"],
+    "unit_revision": r["unit_revision"], "request_revision": r["request_revision"],
+    "result_sha256": revision(r["result"]), "text": translations[UNIT_ID],
+    "font_id": FONT_ID, "style": {"min_size": 16, "max_size": 30, "outline": 0},
+    "geometry_intent": "<operator's actual original-page geometry review intent/evidence>",
+    **GEOMETRY,
+}
+selection = {
+    "schema_version": 1, "purpose": "candidate_only", "source": p["input"],
+    "preview_sha256": digest(preview_bytes), "fonts_sha256": digest(read_explicit(fonts_path)),
+    "units": [unit],
+}
+# Exclusive creation, never overwrite previous evidence:
+with Path("/explicit/local/selection.json").open("x", encoding="utf-8") as stream:
+    stream.write(canonical(selection) + "\n")
+```
+
+`PYTHONPATH=src` is sufficient for this recipe. Input `source.path` must equal the
+explicit original image's absolute resolved path. `source.sha256` binds original
+file bytes; `pixels_sha256` is SHA256 of `RGB:<width>:<height>:` followed by decoded
+RGB bytes, and `size` is `[width,height]`. These are different identities. Saved
+source/member order, raw geometry/text, unit/request/result revisions, chosen text,
+preview bytes and font-manifest bytes are checked again; original preview JSON is
+retained in full. Only supplied files are opened, never paths in a preview.
+
+All masks use **original source pixel coordinates**, with inclusive polygon
+vertices bounded by `0..width-1`, `0..height-1`; they are not preview-thumbnail,
+normalized or half-open rectangle coordinates. Supplied mask vertices are integers;
+retained OCR polygons may have finite fractional coordinates. Polygons must be
+simple/nondegenerate; masks are inline unions. Supply:
+
+* `interior`: explicitly inspected supported flat balloon interior.
+* `layout`: approved text placement region, inside interior, excluding protection.
+* `cleanup_permission`: narrowly supplied glyph-search permission, inside interior,
+  excluding protection. This is **not** the final erased mask.
+* `protected`: border/art/other pixels that must remain exact original pixels.
+  An empty list means the caller supplies no additional protected pixels.
+
+Nonmember OCR polygons intersecting an interior block the selection, including
+annotations. Undetected art/annotations still require original-page inspection.
+Cleanup estimates a median RGB background from the interior outside permission
+and protection (at least 32 samples), requires all sampled pixels within 2 channel
+levels, and requires a light background (all channels >=180). Off-white is valid.
+Pixels differing by more than 2 levels form a limited glyph mask, whose area must
+be at most one-third of the interior and whose one-pixel collar stays within
+permission, interior and outside protection. Unexplained ink, sampled texture,
+gradients or crossing strokes block cleanup. This conservative test is not a
+general art/text separator: supplied permissions must describe actual glyphs.
+Only glyph-mask pixels receive the sampled color; no whole OCR rectangle is painted.
+
+Cleanup failures now carry bounded, actionable `cleanup_diagnostics` on the blocked
+unit. Codes distinguish `insufficient_sample`, `nonflat_sample`,
+`unsupported_dark_background`, `unpermitted_ink`, `no_cleanup_ink`,
+`excessive_ink_area`, and `boundary_touch`. These describe observed constraints,
+not semantic identification of a border, texture, gradient, annotation or art.
+`semantic_classification` stays `not_inferred`.
+
+Each diagnostic records the actual median/floored RGB background estimate (null
+when no samples exist; provisional when samples are insufficient), sample/interior
+counts, unchanged thresholds, observed maximum sample deviation when measured,
+glyph count when reached, offending-pixel count and exact bounding rectangle.
+Bounds are **half-open source pixels** `[left, top, right, bottom]`. At most 32
+coordinates `[x,y]` are retained in deterministic row-major order, with an explicit
+truncation flag. Coordinate extraction uses bounded row chunks instead of creating
+an unbounded full coordinate array. Boundary-touch coordinates identify the
+unsupported one-pixel glyph collar; they need not be dark pixels themselves.
+
+The static report visibly explains the rejection, background/sample/offending
+counts and next safe action. Inspect the **original source**, then supply a fresh
+explicitly reviewed geometry revision or leave the unit blocked. A nonflat sample
+does not authorize erasing the reported marks or relaxing the variance guard.
+Blocked units apply neither cleanup nor translated alpha, and their applied
+cleanup specimen remains empty. Successful/plan units have
+`cleanup_diagnostics: null`. Candidate/review verification re-runs cleanup for
+blocked layouts and checks exact diagnostics and rejection reasons, even if a
+modified report has had its artifact hashes recomputed. Implementation changes
+require fresh jobs; earlier artifacts and review records are retained.
+
+### Typography, artifacts and parent review
+
+English horizontal/LTR dialogue uses the same Pillow RAQM engine for measurement
+and drawing (`textlength`, ink `multiline_textbbox`, kerning, language `en`). Latin
+letters/combining marks and punctuation are supported if explicitly covered by the
+font. Explicit newlines, punctuation and whitespace are retained; additional
+linebreaks can be inserted after ordinary spaces or after a single existing
+ASCII/U+2010 hyphen between letters/digits. The existing hyphen stays on the first
+line; no hyphen is added or removed. Nonbreaking U+2011 hyphens, dash runs and
+punctuation-only suffixes do not create internal break sites. Search is
+deterministic: descending integer size within operator bounds (8–144), then
+bounded balanced line partitions (minimum squared visible RAQM line advances for each
+line count) with six legal greedy alternatives for irregular regions. At a given
+size fewer added breaks are preferred, then balanced advances and stable source
+offsets. A generic hyphenated utterance can therefore fit as two larger lines in
+a tall region, rather than forcing a small single line.
+
+Drawing first uses a padded **local glyph canvas**, independent of source-page
+edges. Touching that canvas's guard blocks output. Actual complete ink is cropped,
+centered and checked against the full-resolution layout region before page
+placement; nonzero alpha counts are compared again after placement. Actual ink,
+including a caller-selected white outline (0–8 pixels), must fit. Black text/white outline
+are the baseline. No truncation, rewriting, squashing, clipping or fallback font
+is used. Overflow/missing glyphs/unavailable RAQM become explicit blocked units.
+
+Fit screening ignores only the advance of existing trailing ASCII spaces before
+line ends; those spaces remain in exact drawn text. Otherwise an invisible blank
+advance can falsely reject a larger complete-ink fit in a narrow region. The
+multiline metric width is not a final rejection criterion: drawing on the bounded
+padded canvas and checking complete final alpha remain authoritative. Layout
+provenance records full `line_advances`, separate `line_fit_advances`, and policy
+`balanced_legal_hyphen_visible_space_v2`. Size bounds and all containment, outline,
+rotation and resource checks remain unchanged. This bounded search does not promise
+a globally optimal fit: unbreakable words, supplied width/height and irregular
+regions still legitimately limit font size. Geometry is never expanded automatically.
+
+`plan` draws transparent layers and a no-erase composite; `clean.png` stays exact
+canonical RGB source. `compose` independently validates cleanup before applying a
+unit's text; blocked units do not alter the cleanplate or composite. Outside the
+cleanup mask the cleanplate is exact canonical source; outside translated alpha
+the composite is exact cleanplate. The original file bytes remain untouched and
+are retained as `original-file.bin`. Only RGB/L, single-frame rasters are accepted;
+embedded ICC profiles and nontrivial EXIF orientation are rejected. There is no
+color-managed/profile-conversion claim.
+
+Output schema 1 contains:
+
+* `manifest.json`: `purpose: candidate_only`, `approved_export: false`, mode,
+  immutable canonical selection/source/preview/font bindings, engine versions,
+  per-unit status/reason, exact chosen/drawn text, ink bounds, origin, advances,
+  size/outline/spacing, sampled background and cleanup count; artifact SHA256 map.
+  Layout provenance also records `inserted_break_offsets` in the **original text**,
+  `line_break_policy`, local canvas size, complete `local_alpha_pixels`, cumulative
+  raster work and line-search work. Reconstruct `draw_text` by inserting newlines
+  at those offsets in reverse order; original explicit newlines stay in place.
+* `evidence-preview.json`, `evidence-selection.json`, `evidence-fonts.json`,
+  `original-file.bin`, `source.png`, `clean.png`, `composite.png`.
+* `unit-NNN-{interior,layout,permission,protected}.png`, transparent
+  `unit-NNN-text.png` when layout succeeds, `unit-NNN-glyph-cleanup.png` when
+  composition succeeds; `cleanup-diff.png` and `composite-diff.png` binary maps.
+* Static, script-free `review.html` with source/clean/composite comparisons,
+  diffs, unit statuses and a provenance link. No browser is launched.
+
+Per-unit and final `pixel_audit` fields count actual RGB comparisons at runtime:
+clean changed/unchanged pixels, unchanged and changed pixels outside cleanup,
+protected unchanged/changed pixels, translated alpha pixels, composite changes
+outside alpha, and `untouched_source_pixels`. Outside-cleanup, outside-alpha and
+protected change counts must be zero; per-unit `outside_layout_alpha_pixels` and
+`outside_cleanup_permission_pixels` must also be zero. A failed per-unit check
+blocks that unit before applying its pixels. A failed final check retains
+`rejected_pixel_audit`, marks all units blocked and writes canonical original
+clean/composite images instead. These are pixel invariants, never human approval.
+
+Resource checks precede large coverage-set or raster allocations: at most 16M
+source/page pixels, 32M aggregate unit-page pixels, 4M pixels/8192 pixels per side
+for each padded local canvas, and 64M cumulative local raster pixels per unit.
+Fonts are limited to 32 MiB per file/64 MiB aggregate, 128 tables, 65,536 expanded
+Unicode cmap points per font and 131,072 aggregate coverage points. Table bytes
+use bounded views rather than duplicated slices. Search allows at most 128
+paragraph/break endpoints, 32 total lines/candidates, 16 lines per paragraph,
+65,536 substring measurements and 1M DP transitions per unit across sizes.
+The manifest records major `resource_limits`. Per-font and per-unit resource
+failures become `blocked` with `failure_kind: resource_limit`; page/aggregate
+preflight failures reject the command before reserving output. Conservative
+background variance, protected-pixel and contamination guards are unchanged.
+
+Statuses are `candidate_layout_no_erase`, `candidate_composed`, or `blocked`.
+CLI success means the candidate report was produced, not that every unit rendered;
+inspect statuses. Hashes bind evidence, not translation correctness or approval.
+The parent must supply real-page selections/fonts/geometry, generate fresh outputs
+and visually inspect the original-resolution results before any subsequent phase.
+No real-page quality, semantic correctness or human approval is claimed here.
+
+Offline synthetic verification (includes an original synthetic sfnt font fixture,
+actual subprocess CLI plan/compose, and both legacy renderer tests):
+
+```sh
+.venv/bin/python -m unittest tests.rendering.test_layout_repairs tests.rendering.test_natural tests.rendering.test_renderer -v
+.venv/bin/python -m unittest discover -s tests -q
+.venv/bin/python -m unittest tests.source_only_check -v
+.venv/bin/python -m compileall -q src/tralens/rendering tests/rendering tools/render_preview.py
+git diff --check
+```
+
+### Phase 3: explicit role styles and aesthetic review loop
+
+Existing schema-1 selections and `plan`/`compose` commands still work. Omitting
+`preset` keeps the legacy black/white, centered, unrotated rendering behavior.
+An operator can copy a selection to a **fresh JSON file** and edit its per-unit
+`style` object, retaining exact chosen text and all source/request/result bindings:
+
+```json
+{"preset":"shout", "min_size":16, "max_size":28,
+ "fill":[25,25,25], "outline":2, "outline_fill":[255,255,255],
+ "leading":0.2, "align":"center", "rotation":-5}
+```
+
+| Preset | Default RGB fill | Outline | Leading (em spacing) | Alignment | Requested weight |
+| --- | --- | --- | --- | --- | --- |
+| `dialogue` | `[0,0,0]` | 0 | 0.20 | center | regular |
+| `narration` | `[25,25,25]` | 0 | 0.30 | left | regular |
+| `shout` | `[0,0,0]` | 2 | 0.15 | center | bold |
+| `thought` | `[55,55,70]` | 1 | 0.30 | center | regular |
+
+The operator must explicitly choose `font_id` from the supplied, hash/license-bound
+font manifest. Presets never select a system font or synthesize a bold face. The
+same already-approved local font ID can be explicitly used for any presentation
+role; manifest `role`/`weight` are declarations, not measured face certification.
+`resolved_style.actual_face` records FreeType-reported family/subfamily and the
+chosen font's OS/2 `weight_class`, or null when unavailable. `requested_weight`
+is separately recorded, with `synthetic_weight: false`. `style_approximation`
+always says no exact source-font match is asserted and explains unknown or
+mismatched weights. To change actual weight, select another explicit licensed
+font ID/face; changing only the preset does not change the selected face.
+
+Controls are bounded: RGB integer triplets 0–255, outline 0–8 px, leading 0–1 em,
+alignment `left`/`center`/`right`, and finite group rotation −20° to +20°. The
+explicit 8–144 px size bounds remain mandatory. Alignment aligns the lines inside
+the ink-centered group. Rotation transforms the entire multiline group, including
+outline, on its guarded local canvas using bicubic resampling. Both untransformed
+and transformed ink must pass padding/crop guards; OpenCV's raster bounding box
+independently checks the complete post-transform alpha crop against Pillow's
+ink bounds. The complete transformed alpha
+must fit the full-resolution approved layout/protection masks. Transformed canvas
+allocations and cumulative raster work are budgeted before rotation. Overflow and
+missing glyphs stay blocked; text is never rewritten or reduced below its bound.
+Rotated layouts record pretransform alpha count, posttransform canvas size and
+complete final alpha count; their page `origin` is null because a single unrotated
+drawing origin no longer describes placement.
+
+#### Static specimens and fresh revisions
+
+Every new job produces a CSP-constrained, script-free `review.html`. Each unit has
+side-by-side original/clean/text/composite specimens, interior/layout/permission/
+protected-mask and actual applied glyph-cleanup views, blocked reasons, exact text, resolved settings, approximation
+notes and locality counters. `unit-NNN-specimen-*.png` thumbnails are bounded to
+1000×1000 pixels, with original source bounds and scale recorded; full-resolution
+evidence is retained separately. Output `review.html` and specimen images are
+included in the manifest's artifact hashes.
+
+The report wraps long unit IDs/job hashes and uses four desktop columns, two at
+700px and below, and one at 420px and below. Figures have no browser-default
+margins/minimum width; content stays readable without globally hiding overflow.
+The applied glyph-cleanup specimen is empty for plan/blocked units, which perform
+no erasure. It is hash-bound and reconstructed during candidate/review verification.
+
+`job_revision` deterministically binds exact selection bytes, original/preview/font
+bindings, mode, rendering implementation hashes, shaping-engine versions and any
+explicit parent/comparison provenance. Equal inputs/implementation produce equal
+revisions and artifacts across fresh output names. Edited jobs always write fresh
+directories; neither source evidence nor earlier jobs/reviews are overwritten.
+
+Parent-side example using the supplied installed-font manifest (agent verification
+uses synthetic rasters/fonts only):
+
+```sh
+# Phase-3 baseline; the Phase-2 parent is retained as a hash-checked snapshot.
+.venv/bin/python tools/render_preview.py compose \
+  --preview test-results/workflow-fragments-priority-parent-v1/preview.json \
+  --image images/ubunchu-ja-test/ubunchu01_04.png \
+  --selection test-results/render-parent-input-v1/selection-broader-v3.json \
+  --fonts test-results/render-parent-input-v1/fonts.json \
+  --parent test-results/render-broader-parent-v3 \
+  --output test-results/render-phase3-baseline-parent-v1
+
+# Copy/edit selection-broader-v3.json to selection-phase3-thought-v1.json first.
+# Set the desired units' preset/controls and explicitly keep/choose font IDs.
+.venv/bin/python tools/render_preview.py compose \
+  --preview test-results/workflow-fragments-priority-parent-v1/preview.json \
+  --image images/ubunchu-ja-test/ubunchu01_04.png \
+  --selection test-results/render-parent-input-v1/selection-phase3-thought-v1.json \
+  --fonts test-results/render-parent-input-v1/fonts.json \
+  --parent test-results/render-phase3-baseline-parent-v1 \
+  --compare test-results/render-phase3-baseline-parent-v1 \
+  --output test-results/render-phase3-thought-parent-v1
+```
+
+Use distinct fresh names if any destination exists. `--parent` links the exact
+prior manifest/job/source hashes without inheriting its review state. Historical
+Phase-2 parents can be linked as hash-checked snapshots. `--compare` accepts at
+most four **explicit CLI directory inputs** for current Phase-3 jobs; their
+source/preview/font bindings, masks, re-rendered layers, reconstructed output
+pixels, specimens and hashes are validated before copying a comparison image.
+Selections may differ. Preview/image/font inputs must be the same current ones.
+No candidate/parent/comparison paths are opened from selection JSON or arbitrary
+sidecars. A changed font manifest requires updating `selection.fonts_sha256` to
+its exact bytes; changed translated wording still requires a correspondingly
+source-bound strict preview/result, not a free-text rendering override.
+
+#### Explicit aesthetic review records
+
+Candidates always start with `aesthetic_state: not_assessed` and
+`linguistic_approval: not_assessed`. After actual operator inspection, a separate
+explicit action can record `not_assessed`, `accepted`, `rejected` or `rework` for a
+successfully composed unit. Blocked, foreign and plan-only targets are rejected.
+There is no inferred/model-generated acceptance or final export.
+
+```sh
+# Replace the ID/operator/note with the real chosen unit and actual review action.
+.venv/bin/python tools/render_preview.py record-review \
+  --preview test-results/workflow-fragments-priority-parent-v1/preview.json \
+  --image images/ubunchu-ja-test/ubunchu01_04.png \
+  --selection test-results/render-parent-input-v1/selection-phase3-thought-v1.json \
+  --fonts test-results/render-parent-input-v1/fonts.json \
+  --candidate test-results/render-phase3-thought-parent-v1 \
+  --unit-id '<exact composed unit ID>' --state rework \
+  --operator '<actual operator>' --note '<actual aesthetic observations>' \
+  --output test-results/render-parent-input-v1/aesthetic-thought-v1.json
+
+.venv/bin/python tools/render_preview.py verify-review \
+  --preview test-results/workflow-fragments-priority-parent-v1/preview.json \
+  --image images/ubunchu-ja-test/ubunchu01_04.png \
+  --selection test-results/render-parent-input-v1/selection-phase3-thought-v1.json \
+  --fonts test-results/render-parent-input-v1/fonts.json \
+  --candidate test-results/render-phase3-thought-parent-v1 \
+  --review test-results/render-parent-input-v1/aesthetic-thought-v1.json
+```
+
+Production API equivalents are `record_review(...)`, `verify_review(...)` and
+`verify_candidate(...)` in `tralens.rendering.review`; `natural.run(..., parent=...,
+compare=[...])` creates fresh jobs. Records have `scope: aesthetic_only`, an explicit
+operator/note/state, `identity_verified: false`, `linguistic_approval: not_assessed`,
+`candidate_only: true`, an exact binding and a self-consistency revision hash.
+Record creation/verification re-reads the supplied current source, preview,
+selection and font/license bytes, re-layouts composed text and reconstructs actual
+clean/composite pixels. It checks all mask and specimen pixels, layout/settings,
+engine/implementation revisions, counters and closed-name artifact hashes.
+
+The review binding includes exact manifest/job/source/preview/selection/font hashes,
+chosen unit settings/layout, all mask/output/report artifact hashes. Any relevant
+edit—including source-file bytes, text, geometry, font/license, style, rendered
+output, HTML or implementation—invalidates an old acceptance. A new revision does
+not carry acceptance forward. Verification checks unsigned provenance consistency;
+it does **not** authenticate a person's identity, prevent a person from forging a
+new unsigned record, or establish translation truth. Aesthetic acceptance never
+promotes the candidate to a final export.
+
+Additional bounds: selection JSON ≤4 MiB, font manifest ≤256 KiB, manifest ≤8 MiB,
+HTML ≤4 MiB, review record ≤16 KiB, at most 1200 closed-name artifacts and 128 MiB
+aggregate artifact bytes per job/verification. Reports contain no scripts,
+external assets, editor/server, or save controls. Existing flat-interior variance,
+glyph-mask and protected-border guards are unchanged. Installed-font/real-page
+appearance remains parent visual verification.
+
+Phase-3 checks include actual synthetic CLI compose/revision/record/verify runs:
+
+```sh
+.venv/bin/python -m unittest tests.rendering.test_refinement tests.rendering.test_phase3 tests.rendering.test_layout_repairs tests.rendering.test_natural tests.rendering.test_renderer -v
+.venv/bin/python -m unittest discover -s tests -q
+.venv-paddle6/bin/python -m unittest discover -s tests -q
+.venv/bin/python -m unittest tests.source_only_check -v
+.venv-paddle6/bin/python -m unittest tests.source_only_check -v
+.venv/bin/python -m compileall -q src/tralens/rendering tests/rendering tools/render_preview.py
+git diff --check
+```
+
 ## Opt-in Paddle model profiles (isolated 3.7 runtime)
 
 The production default is explicitly pinned to **`v6_medium`**, including both
