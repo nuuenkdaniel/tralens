@@ -472,7 +472,7 @@ The installed OpenCV/Pillow path:
 4. Insets the original enclosure for boundary clearance, preserving all required
    glyph neighborhoods. The usable core must have single row/column spans.
    Small irregular empty edge scanlines can be excluded only after the **entire
-   original core** passes unchanged cleanup/flatness checks; at most the supplied
+   current core** passes unchanged cleanup/flatness checks; at most the supplied
    clearance count per edge is trimmed and no required ink/collar pixel can be
    discarded. Internal gaps, excessive irregularity, shared source regions and
    clipped cases still reject. Bounded polygonization
@@ -482,6 +482,16 @@ The installed OpenCV/Pillow path:
 5. Proposes independent interior, inset layout and limited glyph-neighborhood
    cleanup permission. The unchanged flatness/collar cleanup guard runs as an
    offline preflight. It is not broadened or retried with weaker thresholds.
+   A nonflat sample confined to the original edge can qualify for one additional
+   global inward geometry step (maximum 3px): every offending pixel must connect
+   to the original dark outline through original non-background pixels in the
+   bounded boundary band, avoid source-member neighborhoods, and preserve **all**
+   original owned ink/permission/collar pixels. The inset is measured from exact
+   edge distances, not searched until a sample passes. The resulting complete
+   core must pass the same cleanup guard or remain blocked. Isolated marks,
+   interior contamination, gradients, nonmembers and narrow-clearance failures
+   do not qualify. Tracing 1/2-level antialias bridges is original-pixel evidence,
+   never a change to cleanup's maximum allowed sample deviation of 2.
 
 `protected` is empty in this initial assisted path: no art-hole permission is
 inferred. Boundary pixels are excluded by the interior clearance, and the existing
@@ -503,10 +513,41 @@ adjacent-label samples (bounds, area, source IDs and distance), rather than trea
 every closed light pocket connected through page-wide black artwork as a balloon.
 Its saved-page regression reads only the explicitly authorized original/preview/
 font manifest and `render-preparation-parent-v1/proposals.json`; it creates no
-real-page artifact. On that frozen four-unit request, the long unit now proposes;
-Risa still rejects three sample pixels at deviation 3 versus limit 2, and the two
-units sharing white component 719 still reject their mutual nonmember geometry.
+real-page artifact. The later boundary-inset revision reads the authorized
+`render-preparation-parent-v2/proposals.json` request and produces two geometry
+positives in memory: Risa and the long unit. Risa's three 3-level edge pixels
+qualify for a 1px additional inset with zero required pixels discarded; the same
+variance limit of 2 then passes. The two units sharing white component 719 still
+reject their mutual nonmember geometry.
 These are measured candidate/guard outcomes, not visual or linguistic approval.
+
+`additional_boundary_inset` retains the original failure, connectivity evidence,
+exact proposed inset, refusal reason where applicable, excluded-pixel count and
+required-pixel preservation. Confirmation regenerates this evidence and geometry;
+it is not an editable approval flag. No permission grows and no source pixels are
+changed by proposal generation.
+
+Shared-region diagnostics now probe original enclosure clearance radii 1–8 while
+checking each source group's complete ink plus collar. The actual source 8/10
+region remains a single component at every radius, without losing either group's
+required pixels. There is no defensible narrow separator within the supported
+range: no bbox/Voronoi cut, invented line, translation merge or ownership split is
+exported. A synthetic thin-corridor counterexample confirms the diagnostic can
+detect distinct complete-ink cores, but it remains diagnostic, not automatic
+permission to split a joined speech region.
+
+Additional-page evaluation is **geometry-only**: the discovered 25 preview-named
+artifacts (including retained copies/baseline) all identify `ubunchu01_04.png`.
+No valid different-page strict translated preview was found. The existing
+`automatic-unit-diagnosis-parent-v3/automatic-proposals.json` supplies hash-bound
+originals/raw polygons for separate evaluations: all 15 saved groups on
+`ubunchu01_02.png` yield 1 proposed/14 rejected; all 14 on `ubunchu02_04.png`
+reject. Image byte/RGB hashes and saved raw/proposal revisions are validated; no
+strict preview, translated result, selection or confirmation is manufactured.
+These older groups include real ambiguity/nonmember/clipped/irregular cases and
+are not an end-to-end translation benchmark. Tests run at most two bounded
+evaluation batches (<=16 groups total) per page and preserve explicit skips when
+the local evidence is unavailable.
 
 For pixel contours that touch their own vertex/edge, exact clipped strips of
 32/16/8 pixels in two orientations can be decomposed into simple integer cycles.
@@ -601,12 +642,16 @@ font manifest <=256 KiB; manifest/HTML <=4 MiB each; aggregate artifact bytes
 <=128 MiB; overlay sides <=1000px. Existing local-font/license budgets also apply.
 Resource/invalid-input failures reject before output publication; valid but
 unsupported unit cases are preserved explicitly in the proposal report.
+The additional inset has a fixed 3px cap; the separator diagnostic tests at most
+8 radii and 8192 components per labeling. Neither exposes a tolerance/ownership
+bypass option. `limits` in each new proposal bundle records these bounds.
 
 Offline checks (synthetic assets/fonts; parent owns saved-page generation/inspection):
 
 ```sh
 .venv/bin/python -m unittest tests.rendering.test_preparation tests.rendering.test_refinement tests.rendering.test_phase3 tests.rendering.test_layout_repairs tests.rendering.test_natural tests.rendering.test_renderer -v
 .venv/bin/python -m unittest tests.rendering.test_preparation_boundaries -v
+.venv/bin/python -m unittest tests.rendering.test_geometry_coverage -v
 .venv/bin/python -m unittest discover -s tests -q
 .venv/bin/python -m unittest tests.source_only_check -v
 .venv/bin/python -m compileall -q src/tralens/rendering tests/rendering tools/render_preview.py

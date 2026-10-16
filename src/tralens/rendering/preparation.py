@@ -19,13 +19,14 @@ from .review import CSP
 
 
 PURPOSE = 'flat_geometry_proposals'
-ALGORITHM = 'original_closed_flat_enclosure_local_boundary_v2'
+ALGORITHM = 'original_closed_flat_enclosure_boundary_inset_v3'
 MAX_PIXELS = 4_000_000
 MAX_SIDE = 4096
 MAX_UNITS = 16
 MAX_DETECTIONS = 512
 MAX_PREFLIGHT_PIXELS = 512_000_000
 BOUNDARY_RADIUS = 8
+MAX_ADDITIONAL_INSET = 3
 DEFAULTS = {'clearance': 3, 'member_padding': 2, 'glyph_padding': 2, 'layout_inset': 1}
 
 
@@ -355,6 +356,103 @@ def span_evidence(mask):
     return result
 
 
+def conservative_boundary_inset(context, envelope, safe, permission, members, error, member_padding):
+    """One measured global inset for original-outline-connected edge fringe only.
+
+    No tolerance/permission change, no spot masking, no retry search. Isolated
+    marks, interior defects and any lost source member/collar remain blocked.
+    """
+    diagnostic = error.diagnostics
+    evidence = {'method': 'original_outline_connected_fringe_inset', 'maximum_inset': MAX_ADDITIONAL_INSET,
+                'geometry_inset_applied': False, 'original_cleanup_diagnostics': diagnostic}
+    if diagnostic['code'] != 'nonflat_sample':
+        evidence['refusal'] = 'not a sample-variance failure'
+        return None, evidence
+    color = np.array(diagnostic['background_estimate_rgb'], np.int16)
+    delta = np.max(np.abs(np.asarray(context.rgb).astype(np.int16)-color), axis=2)
+    contrast = delta > 2
+    offending = safe & ~permission & contrast
+    evidence['offending_count'] = int(offending.sum())
+    supported(evidence['offending_count'] == diagnostic['offending_count'], 'boundary diagnostic/source mismatch')
+    distance = cv2.distanceTransform(safe.astype(np.uint8), cv2.DIST_C, 3)
+    inset = int(distance[offending].max()) if offending.any() else 0
+    evidence['inset_pixels'] = inset
+    if not 1 <= inset <= MAX_ADDITIONAL_INSET:
+        evidence['refusal'] = 'sample contamination is not confined to the bounded original edge band'
+        return None, evidence
+    band = dilate(envelope, BOUNDARY_RADIUS) & ~erode(envelope, BOUNDARY_RADIUS)
+    # Trace original non-background antialias pixels (including 1/2-level
+    # bridges), not just the >2-level pixels which FAILED flatness. This does
+    # not alter cleanup tolerance; the inset must still pass that exact guard.
+    evidence['boundary_connection_minimum_delta'] = 1
+    count, labels = cv2.connectedComponents(((delta > 0) & band).astype(np.uint8), connectivity=8)
+    n.budget_check(count <= 8192, 'boundary fringe component budget')
+    outline = (context.dark != 0) & (dilate(envelope, 1) & ~envelope)
+    seeds = np.unique(labels[outline])
+    seeds = seeds[seeds != 0]
+    linked = np.zeros(count, bool)
+    linked[seeds] = True
+    offending_ids = np.unique(labels[offending])
+    connected = bool(len(offending_ids) > 0 and 0 not in offending_ids and linked[offending_ids].all())
+    evidence['connected_to_original_outline'] = connected
+    if not connected:
+        evidence['refusal'] = 'isolated/unassigned edge contrast is not original-outline-connected'
+        return None, evidence
+    selected = np.zeros(count, bool)
+    selected[offending_ids] = True
+    source_contact = selected[labels] & safe & dilate(members, member_padding)
+    if source_contact.any():
+        evidence['refusal'] = 'fringe component intersects source member neighborhood'
+        evidence['source_contact'] = n.offending_pixels(source_contact)
+        return None, evidence
+    candidate = erode(safe, inset)
+    lost = int(np.count_nonzero(permission & ~candidate))
+    evidence['required_pixels_discarded'] = lost
+    if lost:
+        evidence['refusal'] = 'additional inset would discard required whole ink/collar'
+        return None, evidence
+    evidence['excluded_pixels'] = int(safe.sum())-int(candidate.sum())
+    return candidate, evidence
+
+
+def separator_evidence(context, envelope, first, second, glyph_padding):
+    """Read original clearance topology, never invent a separator/ownership mask.
+
+    A finding is diagnostic only. The current shared-region guard still rejects;
+    wide shared speech regions are not split using source-box distances.
+    """
+    required = []
+    for footprint in (first, second):
+        ids = np.unique(context.dark[footprint])
+        ids = ids[ids != 0]
+        if not 0 < len(ids) <= 64:
+            return {'method': 'original_clearance_neck_probe', 'scope': 'diagnostic only; no ownership split',
+                    'reason': 'insufficient isolated source component support', 'separating_clearance_found': False}
+        lookup = np.zeros(len(context.dark_stats), bool)
+        lookup[ids] = True
+        ink = lookup[context.dark]
+        if (ink & ~envelope).any():
+            return {'method': 'original_clearance_neck_probe', 'scope': 'diagnostic only; no ownership split',
+                    'reason': 'source ink connects to border/art', 'separating_clearance_found': False}
+        required.append(dilate(ink, glyph_padding))
+    trials = []
+    for radius in range(1, BOUNDARY_RADIUS+1):
+        core = erode(envelope, radius)
+        count, labels = cv2.connectedComponents(core.astype(np.uint8), connectivity=8)
+        n.budget_check(count <= 8192, 'separator component budget')
+        lost = [int(np.count_nonzero(mask & ~core)) for mask in required]
+        anchors = [np.unique(labels[mask]).tolist() for mask in required]
+        single = all(len(values) == 1 and values[0] != 0 for values in anchors)
+        separate = bool(single and not any(lost) and anchors[0][0] != anchors[1][0])
+        trials.append({'radius': radius, 'components': count-1, 'required_pixels_lost': lost,
+                       'distinct_complete_ink_cores': separate})
+    found = any(row['distinct_complete_ink_cores'] for row in trials)
+    return {'method': 'original_clearance_neck_probe', 'scope': 'diagnostic only; no separator selected, ownership/translation unchanged',
+            'maximum_tested_radius': BOUNDARY_RADIUS, 'separating_clearance_found': found, 'trials': trials,
+            'reason': 'thin-neck observation requires separate source review; shared region remains manual' if found
+                      else 'no disjoint complete-ink cores at supported clearances; no image-supported narrow separator'}
+
+
 def propose_geometry(rgb, detections, member_ids, options=None, *, context=None):
     """Useful for closed, single-span light flat balloons; honest rejects otherwise."""
     options = settings(options)
@@ -411,6 +509,7 @@ def propose_geometry(rgb, detections, member_ids, options=None, *, context=None)
                 intersection = neighbor & envelope
                 if intersection.any():
                     measured['nonmember_contact'] = {'source_id': detection['source_id'], **n.offending_pixels(intersection)}
+                    measured['separator_evidence'] = separator_evidence(context, envelope, members, neighbor, options['glyph_padding'])
                     raise Unsupported('nonmember/annotation geometry intersects original enclosure')
         owned_ids = np.unique(context.dark[members])
         owned_ids = owned_ids[owned_ids != 0]
@@ -435,11 +534,27 @@ def propose_geometry(rgb, detections, member_ids, options=None, *, context=None)
         vertical = safe & ~np.pad(safe[:-1], ((1, 0), (0, 0)))
         permission = filled_outer(dilate(owned, options['glyph_padding']))
         supported(not (permission & ~safe).any(), 'ink/punctuation lacks boundary clearance; no erosion of required ink')
+        # Validate the complete original core, with a single evidence-qualified
+        # additional inward geometry step for boundary-connected fringe only.
+        try:
+            _, full_glyph, full_color = n.cleanup(rgb, safe, permission, np.zeros_like(safe))
+        except n.CleanupBlocked as error:
+            candidate, repair = conservative_boundary_inset(context, envelope, safe, permission, members,
+                                                            error, options['member_padding'])
+            measured['additional_boundary_inset'] = repair
+            if candidate is None:
+                raise
+            _, full_glyph, full_color = n.cleanup(rgb, candidate, permission, np.zeros_like(candidate))
+            safe = candidate
+            repair['geometry_inset_applied'] = True
+            repair['retained_cleanup_pixels'] = int(full_glyph.sum())
+            horizontal = safe & ~np.pad(safe[:, :-1], ((0, 0), (1, 0)))
+            vertical = safe & ~np.pad(safe[:-1], ((1, 0), (0, 0)))
         if int(horizontal.sum(axis=1).max()) > 1 or int(vertical.sum(axis=0).max()) > 1:
             measured['span_evidence'] = span_evidence(safe)
             # Do not hide texture, gray punctuation or border contamination by
-            # cropping: the ENTIRE original clearance core must pass first.
-            _, full_glyph, full_color = n.cleanup(rgb, safe, permission, np.zeros_like(safe))
+            # cropping: the ENTIRE current core has passed first (any preceding
+            # boundary-only inset is separately evidenced above).
             safe, core = trim_empty_boundary_spans(safe, permission, options['clearance'])
             core.update(full_original_core_cleanup_pixels=int(full_glyph.sum()), full_original_core_background=full_color)
             measured['boundary_span_trim'] = core
@@ -578,7 +693,8 @@ def _build(paths, contents, p, f, rgb, source, request):
                    'aggregate_vertices_per_unit': 4096}}
     report['limits'].update(local_boundary_radius=BOUNDARY_RADIUS, enclosing_region_comparisons=8,
         contact_samples=32, pixel_contour_cycle_limit=256, pixel_contour_split_work_per_strip_trial=4_000_000,
-        strip_trial_heights=[32, 16, 8], strip_trial_orientations=2)
+        strip_trial_heights=[32, 16, 8], strip_trial_orientations=2,
+        maximum_additional_boundary_inset=MAX_ADDITIONAL_INSET, separator_probe_maximum_radius=BOUNDARY_RADIUS)
     for uid in request['unit_ids']:
         record = by_id[uid]
         row = {'unit_id': uid, 'source_record_sha256': n.revision(record), 'binding_validated': False,
