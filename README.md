@@ -2338,8 +2338,8 @@ requests, view paths/hashes, verdict revisions, generation timings/raw evidence 
 residency/control costs. Each unit also has `visual_alternates`; original strict and
 fragment fields remain separate. Source/request/crop changes invalidate proposals.
 Proposals, unchanged judgments and fluent alternate outputs are not human review,
-OCR truth, semantic-quality evidence or rendering/erasure authorization. No renderer
-or deferred HTML-review tool is invoked or modified.
+OCR truth, semantic-quality evidence or rendering/erasure authorization. The workflow
+does not invoke a renderer or the separate offline HTML report tool below.
 
 ### Parent local smoke (four review calls maximum)
 
@@ -2367,4 +2367,75 @@ The coder runs only mocked/offline tests; the parent runs this actual model/OCR 
 .venv/bin/python -m unittest discover -s tests -t .
 .venv/bin/python -m unittest tests.source_only_check -v
 .venv/bin/python -m compileall -q src/main.py src/tralens/translation tests/translation/test_ocr_review.py
+```
+
+## Offline translation HTML report
+
+`tools/translation_review.py` turns a **saved** workflow preview into a static,
+self-contained `review.html` and `coverage.json`. It supports schema1 (strict),
+schema2 (separate fragment previews), and schema3 (optional visual review and
+separate proposed-reading alternate translations). It performs no OCR, inference,
+provider/network requests, engine initialization or browser launch, including on
+import. It needs only existing Python dependencies and the explicit original image.
+
+```sh
+.venv/bin/python tools/translation_review.py \
+  --preview test-results/workflow-fragments-priority-parent-v1/preview.json \
+  --image images/ubunchu-ja-test/ubunchu01_04.png \
+  --output test-results/translation-fragments-html-v1
+
+.venv/bin/python tools/translation_review.py \
+  --preview test-results/workflow-visual-review-parent-v2/preview.json \
+  --image images/ubunchu-ja-test/ubunchu01_04.png \
+  --output test-results/translation-visual-html-v1
+```
+
+The output directory must be **new**, with an existing parent and no symlink
+components. Existing directories and symlinks are refused. The saved `input.path`
+and batch page `image_path` must exactly equal the resolved explicit `--image` path;
+there is no relocation/substitution or automatic path following. Only `--preview`
+and `--image` are read as data inputs. Paths inside the preview are never opened;
+raw-response/view sidecars are not required. Traversal/URL-like sidecar names are
+rejected. Source files are never updated, and no reading is automatically selected
+or accepted. The tool does not follow the saved model endpoint.
+
+The report embeds the full original RGB page, with a checkbox for numbered
+source-unit geometry and separate unassigned-source labels. Geometry is diagnostic
+only. Unit cards show original OCR → unverified proposed correction → original
+strict/fragment and alternate translation outputs, with their distinct statuses,
+blockers, uncertainties, typed outcomes, failures and retained provenance. All
+outputs require review. Counters show translation/review budgets and retained
+review-release information; acknowledgment is not measured model residency.
+`--crops` optionally embeds conservative crops derived from the explicit image;
+blocked, unsafe or neighbor-intersecting crops are omitted in favor of the page.
+These crops do not establish ownership, completeness, rendering or erasure rights.
+
+Validation recomputes original byte/RGB hashes, detection snapshot/batch evidence,
+proposal membership identities, original units/readings and exact workflow requests.
+Strict, fragment and alternate results are checked against their own immutable
+contracts, including source/reading/request revisions and execution metadata.
+Visual review crops/overlays and requested-body hashes are regenerated from the
+original pixels, then compared with retained view/request/verdict/alternate metadata.
+**Raw HTTP responses and existing view files are not opened or authenticated.**
+Matching claimed response digests establishes internal consistency only, not that
+a model actually produced the text. No data hash proves semantic/model truth,
+accuracy, human approval or transcription fidelity. Regenerating encoded view
+hashes requires compatible Pillow/font/PNG behavior; an encoder mismatch is rejected
+rather than silently certified.
+
+Failed/interrupted artifacts with consistent retained source evidence can be
+reported. An OCR-stage failure before request construction shows derived source
+cards explicitly as unexecuted, with source-only coverage. Missing/inconsistent
+provenance, stale sources, unsupported schemas, malformed geometry/types, duplicate
+JSON keys and contradictory counters/statuses are rejected without publishing a
+report. Empty no-detection pages are supported. Limits: 64MiB JSON, 32MiB original
+image, one raster frame/40 million pixels, 2048 detections, 512 units, bounded JSON
+depth/items/text, 32MiB unit-card HTML and 64MiB total HTML. HTML/SVG text is escaped;
+the report has no scripts or external resources and a restrictive no-network CSP.
+
+Offline verification (portable synthetic fixtures plus explicit optional saved-page
+schema1/2/3 CLI integrations, skipped when those local artifacts are unavailable):
+
+```sh
+.venv/bin/python -m unittest tests.tools.test_translation_review -v
 ```
