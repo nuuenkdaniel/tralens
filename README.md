@@ -437,6 +437,182 @@ Phase-3 checks include actual synthetic CLI compose/revision/record/verify runs:
 git diff --check
 ```
 
+### Assisted flat-balloon preparation: proposals, then explicit confirmation
+
+`tools/render_preview.py prepare` reduces manual polygon transcription for a
+conservative subset of closed flat balloons. It consumes the **original** image,
+saved preview, explicit licensed font manifest/ID, size bounds and explicitly
+requested strict unit IDs. It imports no OCR facade, initializes no OCR/provider,
+and never changes recognition/translation evidence. A successful proposal is
+geometry evidence only, not erase permission or linguistic approval.
+
+The installed OpenCV/Pillow path:
+
+1. Labels original light pixels (all RGB channels >=180) with both 4- and
+   8-connectivity. Member background support must identify the same closed,
+   non-frame-connected enclosure in both labelings. No OCR polygons are removed
+   from the source raster to manufacture an enclosure.
+2. Traces whole original dark components touching source members. Their complete
+   extents must fit a bounded member neighborhood and remain separate from
+   outline/art. Every other dark component and every nonmember OCR polygon inside
+   the enclosure rejects the proposal, including annotations and unassigned marks.
+   Missing punctuation is not silently eroded away or granted ownership.
+   Touching/seam checks are local: re-label original outline ink in a fixed 8px
+   exterior band and test source-supported peer contacts there. A distant common
+   black panel/frame is not by itself touching-balloon evidence. Peer support
+   uses independent original detection geometry (at least half light support,
+   90% of light votes in one region), never confidence or translated wording.
+   Enclosing/four-edge surrounding light regions are recorded as ambient context;
+   unassigned exterior art pockets/counters are recorded without declaring them
+   balloons or granting any erase permission. This does not certify semantic
+   independence or detect every unlabeled neighboring balloon.
+3. Accounts for holes only when their dark pixels belong to those supported
+   components (e.g. a glyph counter). This fills an **analysis silhouette**, not
+   source pixels. There is no hull mask or OCR-rectangle whitening.
+4. Insets the original enclosure for boundary clearance, preserving all required
+   glyph neighborhoods. The usable core must have single row/column spans.
+   Small irregular empty edge scanlines can be excluded only after the **entire
+   original core** passes unchanged cleanup/flatness checks; at most the supplied
+   clearance count per edge is trimmed and no required ink/collar pixel can be
+   discarded. Internal gaps, excessive irregularity, shared source regions and
+   clipped cases still reject. Bounded polygonization
+   is accepted only after checking every rasterized pixel stays inside the safe
+   mask and all required ink/collar pixels remain represented. Unrepresentable
+   holes or excessive geometry complexity reject.
+5. Proposes independent interior, inset layout and limited glyph-neighborhood
+   cleanup permission. The unchanged flatness/collar cleanup guard runs as an
+   offline preflight. It is not broadened or retried with weaker thresholds.
+
+`protected` is empty in this initial assisted path: no art-hole permission is
+inferred. Boundary pixels are excluded by the interior clearance, and the existing
+renderer preserves all pixels outside cleanup/translated alpha. This does **not**
+claim a separately inspected complete border/art mask. Unknown enclosed ink is
+rejected rather than covered by an outer contour or invented protection decision.
+
+The feasibility suite supports rectangles/ellipses, white/off-white, accounted
+glyph counters, and a synthetic eight-border-pixel geometry-error case. It rejects
+open/page/frame-connected, shared/touching, nonmember/furigana, unexplained ink,
+gradient/texture and clipped-component cases. This is not universal balloon,
+ownership, text-versus-art or full-utterance detection: art completely inside an
+oversized source member may be indistinguishable from glyph evidence. Operator
+inspection of the original source remains necessary. Real pages may yield many
+honest rejects; existing manual selection remains available.
+
+The local-boundary revision records exact global/local contact counts and capped
+adjacent-label samples (bounds, area, source IDs and distance), rather than treating
+every closed light pocket connected through page-wide black artwork as a balloon.
+Its saved-page regression reads only the explicitly authorized original/preview/
+font manifest and `render-preparation-parent-v1/proposals.json`; it creates no
+real-page artifact. On that frozen four-unit request, the long unit now proposes;
+Risa still rejects three sample pixels at deviation 3 versus limit 2, and the two
+units sharing white component 719 still reject their mutual nonmember geometry.
+These are measured candidate/guard outcomes, not visual or linguistic approval.
+
+For pixel contours that touch their own vertex/edge, exact clipped strips of
+32/16/8 pixels in two orientations can be decomposed into simple integer cycles.
+Every reconstructed mask must remain a subset of the original allowed mask and
+retain all required pixels; no permission is broadened. The existing 128 polygons,
+128 vertices/polygon and 4096 aggregate vertices/unit limits remain. Splitting is
+bounded to 256 pending/output cycles and 4M edge tests per strip trial. This fixes
+raster representation only; it does not split shared balloon interiors. Preview
+windows include the original enclosure so excluded background stays inspectable.
+
+#### CLI workflow (parent-generated real-page artifacts)
+
+```sh
+common=(
+  --preview test-results/workflow-fragments-priority-parent-v1/preview.json
+  --image images/ubunchu-ja-test/ubunchu01_04.png
+  --fonts test-results/render-parent-input-v1/fonts.json
+)
+
+.venv/bin/python tools/render_preview.py prepare "${common[@]}" \
+  --unit-id '<explicit saved strict unit ID>' \
+  --font-id dialogue-bold --min-size 16 --max-size 28 \
+  --output test-results/render-preparation-parent-v1
+
+# Inspect review.html, original/overlay images, reasoning and exact geometry first.
+# Repeat --proposal-id only for the specific inspected, proposed rows to select.
+.venv/bin/python tools/render_preview.py confirm-preparation "${common[@]}" \
+  --proposal-bundle test-results/render-preparation-parent-v1 \
+  --proposal-id '<exact geometry-... ID from a proposed row>' \
+  --operator '<actual inspecting operator, including honest AI-PM identity>' \
+  --intent '<actual original-source geometry inspection/selection intent>' \
+  --output test-results/render-parent-input-v1/selection-assisted-v1.json
+
+.venv/bin/python tools/render_preview.py compose "${common[@]}" \
+  --selection test-results/render-parent-input-v1/selection-assisted-v1.json \
+  --output test-results/render-assisted-compose-parent-v1
+```
+
+`--unit-id` can repeat during preparation; there is no implicit all-units mode.
+Only strict source/request/result bindings accepted by the existing renderer can
+produce confirmable geometry. Blocked strict records, fragments, VLM alternates
+and other unrequested evidence stay in the exact retained preview. Choosing a
+strict input for proposal generation does not claim its wording was human checked.
+
+Preparation output has **`purpose: flat_geometry_proposals`**, which compose
+rejects as a selection. The exclusively created bundle contains:
+
+* `proposals.json`: deterministic proposal revision/IDs, source/file/RGB/preview/
+  font/implementation bindings, settings, `proposed`/`rejected`/`unsupported` rows,
+  exact selected-result bindings where valid, geometry, measured reasoning,
+  uncertainty and artifact hashes. `operator_confirmation` remains null.
+* `evidence-preview.json`, `evidence-fonts.json`, `evidence-request.json`,
+  `original-file.bin`, `source.png`: original evidence, never an erased page.
+* Bounded `unit-NNN-source.png` / `unit-NNN-overlay.png` views and responsive,
+  escaped, CSP-constrained, script-free `review.html`. Green is interior, blue
+  layout, orange cleanup permission; rejected source footprints are red.
+
+No cleaned image, composite or translated text layer is written by preparation.
+The cleanup preflight is evaluated in memory and discarded. No source image is
+overwritten. Multiunit proposed-region collisions reject both affected proposals.
+
+Confirmation requires explicit unique proposal IDs, operator identity and intent;
+no generation flag can confirm all units. It re-reads the current explicit source,
+preview and font/license inputs, revalidates bindings, and **regenerates** geometry,
+measurements, IDs, overlays and report bytes under the current implementation.
+Every stored artifact must match. Tampered geometry/output/report, stale source,
+font/license/implementation changes, invented approval flags and unsupported IDs
+reject. No filenames from supplied manifest JSON are followed: only regenerated,
+closed artifact names are opened. The result is a fresh `candidate_only` selection
+with separate `preparation_confirmation` provenance (`scope: geometry_candidate_only`,
+`identity_verified: false`, `linguistic_approval: not_assessed`). It does not modify
+the bundle or authenticate a person; it is an unsigned, operator-supplied action.
+The normal plan/compose cleanup, font coverage, full-alpha and pixel-locality
+guards still run independently and can block confirmed geometry/typography.
+
+Production APIs are `propose_geometry`, `prepare`, and `confirm_preparation` in
+`tralens.rendering.preparation`; production never imports `tools`. Confirmation
+outputs cannot overwrite files or be written inside the original proposal bundle.
+Repeat generation/confirmation uses fresh paths and revisions, retaining evidence.
+
+Preparation bounds are intentionally narrower than manual rendering: <=4M source
+pixels and 4096 per side, <=16 requested units, <=32M aggregate unit-page pixels,
+<=512 raw detections, <=512M source-binding/neighbor raster work, <=32 member masks
+and <=32M member-mask pixels per unit. Each original labeling allows <=8192
+components; each unit <=64 owned ink and <=64 outline components. Enclosure area must be >=64 and
+<=1M pixels, <=60% of the page and <=30 times member-mask area. Geometry allows
+<=128 polygons/mask, <=128 vertices/polygon and <=4096 aggregate vertices/unit.
+Defaults: clearance 3px (allowed 2–8), member padding 2px (0–4), glyph padding 2px
+(2–4), layout inset 1px (0–4). Only these four integer settings are configurable;
+there is no variance/brightness bypass. Source preview <=16 MiB, image <=32 MiB,
+font manifest <=256 KiB; manifest/HTML <=4 MiB each; aggregate artifact bytes
+<=128 MiB; overlay sides <=1000px. Existing local-font/license budgets also apply.
+Resource/invalid-input failures reject before output publication; valid but
+unsupported unit cases are preserved explicitly in the proposal report.
+
+Offline checks (synthetic assets/fonts; parent owns saved-page generation/inspection):
+
+```sh
+.venv/bin/python -m unittest tests.rendering.test_preparation tests.rendering.test_refinement tests.rendering.test_phase3 tests.rendering.test_layout_repairs tests.rendering.test_natural tests.rendering.test_renderer -v
+.venv/bin/python -m unittest tests.rendering.test_preparation_boundaries -v
+.venv/bin/python -m unittest discover -s tests -q
+.venv/bin/python -m unittest tests.source_only_check -v
+.venv/bin/python -m compileall -q src/tralens/rendering tests/rendering tools/render_preview.py
+git diff --check
+```
+
 ## Opt-in Paddle model profiles (isolated 3.7 runtime)
 
 The production default is explicitly pinned to **`v6_medium`**, including both

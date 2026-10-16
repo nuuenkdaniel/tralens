@@ -6,20 +6,56 @@ import sys
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("plan", "compose", "record-review", "verify-review"))
-    for name in ("preview", "image", "selection", "fonts"):
+    parser.add_argument("mode", choices=("plan", "compose", "record-review", "verify-review", "prepare", "confirm-preparation"))
+    for name in ("preview", "image", "fonts"):
         parser.add_argument("--"+name, required=True, type=Path)
+    parser.add_argument('--selection', type=Path)
     for name in ('output', 'parent', 'candidate', 'review'):
         parser.add_argument('--'+name, type=Path)
     parser.add_argument('--compare', action='append', type=Path, default=[])
-    parser.add_argument('--unit-id')
+    parser.add_argument('--unit-id', action='append')
     parser.add_argument('--state', choices=('not_assessed', 'accepted', 'rejected', 'rework'))
     parser.add_argument('--operator')
     parser.add_argument('--note')
+    parser.add_argument('--proposal-bundle', type=Path)
+    parser.add_argument('--proposal-id', action='append')
+    parser.add_argument('--intent')
+    parser.add_argument('--font-id')
+    for name in ('min-size', 'max-size', 'clearance', 'member-padding', 'glyph-padding', 'layout-inset'):
+        parser.add_argument('--'+name, type=int)
     args = parser.parse_args(argv)
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]/"src"))
     from tralens.rendering.natural import run
     inputs = {name: getattr(args, name) for name in ('preview', 'image', 'selection', 'fonts')}
+    preparation_options = ('font_id', 'min_size', 'max_size', 'clearance', 'member_padding', 'glyph_padding', 'layout_inset')
+    if args.mode in ('prepare', 'confirm-preparation'):
+        if args.output is None or args.selection is not None or args.parent is not None or args.compare or any(
+                getattr(args, k) is not None for k in ('candidate', 'review', 'state', 'note')):
+            parser.error('preparation modes require fresh --output and do not consume rendering/review inputs')
+        source_inputs = {name: inputs[name] for name in ('preview', 'image', 'fonts')}
+        try:
+            if args.mode == 'prepare':
+                if any(getattr(args, k) is None for k in ('unit_id', 'font_id', 'min_size', 'max_size')) or any(
+                        getattr(args, k) is not None for k in ('proposal_bundle', 'proposal_id', 'operator', 'intent')):
+                    parser.error('prepare requires explicit --unit-id(s) --font-id --min-size --max-size; no confirmation is inferred')
+                from tralens.rendering.preparation import prepare
+                options = {key: getattr(args, key) for key in ('clearance', 'member_padding', 'glyph_padding', 'layout_inset') if getattr(args, key) is not None}
+                report = prepare(unit_ids=args.unit_id, font_id=args.font_id, min_size=args.min_size, max_size=args.max_size,
+                                 options=options, output=args.output, **source_inputs)
+                print(f"Unconfirmed geometry: {sum(r['status'] == 'proposed' for r in report['units'])}/{len(report['units'])} proposed; {args.output}/review.html")
+            else:
+                if any(getattr(args, k) is None for k in ('proposal_bundle', 'proposal_id', 'operator', 'intent')) or args.unit_id is not None or any(
+                        getattr(args, k) is not None for k in preparation_options):
+                    parser.error('confirm-preparation requires --proposal-bundle --proposal-id(s) --operator --intent; no automatic all-selection')
+                from tralens.rendering.preparation import confirm_preparation
+                selected = confirm_preparation(proposal_bundle=args.proposal_bundle, proposal_ids=args.proposal_id,
+                    operator=args.operator, intent=args.intent, output=args.output, **source_inputs)
+                print(f"Explicit geometry confirmation: {len(selected['units'])} candidate-only units; {args.output}; no identity/linguistic approval")
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            parser.exit(2, f"preparation rejected: {error}\n")
+        return 0
+    if args.selection is None or any(getattr(args, k) is not None for k in (*preparation_options, 'proposal_bundle', 'proposal_id', 'intent')):
+        parser.error('render/review modes require --selection and do not consume preparation options')
     if args.mode in ('plan', 'compose'):
         if args.output is None or any(getattr(args, k) is not None for k in ('candidate', 'review', 'unit_id', 'state', 'operator', 'note')):
             parser.error('render modes require --output and do not consume review decisions')
@@ -31,10 +67,12 @@ def main(argv=None):
         parser.error('record-review creates a fresh record; it does not consume --review')
     elif args.mode == 'verify-review' and (args.review is None or any(getattr(args, k) is not None for k in ('output', 'unit_id', 'state', 'operator', 'note'))):
         parser.error('verify-review requires --review and does not consume new decisions')
+    if args.unit_id is not None and len(args.unit_id) != 1:
+        parser.error('record-review requires exactly one --unit-id')
     try:
         if args.mode == 'record-review':
             from tralens.rendering.review import record_review
-            record = record_review(candidate=args.candidate, unit_id=args.unit_id, state=args.state,
+            record = record_review(candidate=args.candidate, unit_id=args.unit_id[0], state=args.state,
                                    operator=args.operator, note=args.note, output=args.output, **inputs)
             print(f"Aesthetic record {record['state']}: {args.output}; identity/translation not verified")
             return 0
