@@ -6,7 +6,7 @@ import sys
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("plan", "compose", "record-review", "verify-review", "prepare", "confirm-preparation"))
+    parser.add_argument("mode", choices=("plan", "compose", "record-review", "verify-review", "prepare", "confirm-preparation", "auto-compose"))
     for name in ("preview", "image", "fonts"):
         parser.add_argument("--"+name, required=True, type=Path)
     parser.add_argument('--selection', type=Path)
@@ -21,6 +21,7 @@ def main(argv=None):
     parser.add_argument('--proposal-id', action='append')
     parser.add_argument('--intent')
     parser.add_argument('--font-id')
+    parser.add_argument('--max-units', type=int, help='auto-compose evaluation cap only; default processes all strict eligible candidates within resource budgets')
     for name in ('min-size', 'max-size', 'clearance', 'member-padding', 'glyph-padding', 'layout-inset'):
         parser.add_argument('--'+name, type=int)
     args = parser.parse_args(argv)
@@ -28,6 +29,23 @@ def main(argv=None):
     from tralens.rendering.natural import run
     inputs = {name: getattr(args, name) for name in ('preview', 'image', 'selection', 'fonts')}
     preparation_options = ('font_id', 'min_size', 'max_size', 'clearance', 'member_padding', 'glyph_padding', 'layout_inset')
+    if args.mode == 'auto-compose':
+        forbidden = ('selection', 'unit_id', 'operator', 'note', 'state', 'proposal_bundle', 'proposal_id', 'intent',
+                     'parent', 'candidate', 'review', 'clearance', 'member_padding', 'glyph_padding', 'layout_inset')
+        if args.output is None or args.compare or any(getattr(args, key) is not None for key in forbidden):
+            parser.error('auto-compose requires --output; no selection, per-unit IDs, confirmation/review or mask overrides')
+        from tralens.rendering.automatic import run_automatic
+        try:
+            report = run_automatic(preview=args.preview, image=args.image, fonts=args.fonts, output=args.output,
+                font_id=args.font_id, min_size=16 if args.min_size is None else args.min_size,
+                max_size=28 if args.max_size is None else args.max_size, max_units=args.max_units)
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            parser.exit(2, f'automatic render rejected: {error}\n')
+        print(f"Automatic candidate output: {report['coverage']['rendered']}/{report['coverage']['strict_eligible']} strict candidates rendered; "
+              f"{report['coverage']['skipped']} saved units skipped; {args.output}/review.html; no human approval")
+        return 0
+    if args.max_units is not None:
+        parser.error('--max-units is an automatic evaluation cap, not a manual/confirmation option')
     if args.mode in ('prepare', 'confirm-preparation'):
         if args.output is None or args.selection is not None or args.parent is not None or args.compare or any(
                 getattr(args, k) is not None for k in ('candidate', 'review', 'state', 'note')):

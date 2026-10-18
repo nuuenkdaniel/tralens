@@ -576,17 +576,39 @@ class BoundSelection:
     fonts_sha256: str
 
 
-def bind(preview, image_path, rgb, image_bytes, preview_bytes, selection, fonts_bytes):
+def strict_result_binding(record, unit):
+    """Current strict candidate data only; no geometry or review authorization."""
+    require(unit.disposition == 'preview' and record['status'] == 'preview'
+            and record.get('input_kind', 'strict_utterance') == 'strict_utterance'
+            and record['binding_current'] is True, 'blocked/fragment/alternate selection unsupported')
+    request = TranslationRequest((unit,), (unit.unit_id,))
+    require(canonical(record['request']) == canonical(asdict(request)) and record['request_revision'] == request.revision
+            and record['unit_revision'] == unit.revision, 'stale request/unit')
+    data = dict(record['result'])
+    data['translations'] = tuple(tuple(p) for p in data['translations'])
+    data['outcomes'] = tuple(UnitOutcome(**{**o, 'reasons': tuple(o['reasons'])}) for o in data['outcomes'])
+    result = TranslationResult(**data)
+    result.assert_current(request)
+    require(result.status == 'preview' and len(result.translations) == 1 and result.translations[0][0] == unit.unit_id,
+            'result not a strict translated candidate')
+    return {'unit_id': unit.unit_id, 'member_ids': list(unit.member_ids), 'order': list(unit.order),
+            'unit_revision': unit.revision, 'request_revision': request.revision,
+            'result_sha256': revision(record['result']), 'text': result.translations[0][1]}
+
+
+def bind(preview, image_path, rgb, image_bytes, preview_bytes, selection, fonts_bytes, *, selection_kind='candidate_only'):
     require(type(preview["schema_version"]) is int and preview["schema_version"] in (1, 2, 3)
             and preview["preview_only"] is True, "unsupported saved preview")
     source = {"path": str(Path(image_path).resolve()), "sha256": digest(image_bytes),
               "pixels_sha256": digest(f"RGB:{rgb.width}:{rgb.height}:".encode()+rgb.tobytes()), "size": list(rgb.size)}
     require(canonical(preview["input"]) == canonical(source) and canonical(selection["source"]) == canonical(source),
             "stale source image/file/pixel binding")
+    require(selection_kind in ('candidate_only', 'automatic_candidate_only'), 'unknown rendering binding policy')
     require(type(selection["schema_version"]) is int and selection["schema_version"] == 1
-            and selection["purpose"] == "candidate_only", "candidate-only selection required")
+            and selection["purpose"] == selection_kind, "candidate-only selection required")
     require(selection["preview_sha256"] == digest(preview_bytes) and selection["fonts_sha256"] == digest(fonts_bytes), "stale preview/font manifest binding")
-    require(type(selection["units"]) is list and 1 <= len(selection["units"]) <= 64, "selection unit budget")
+    require(type(selection["units"]) is list and (0 if selection_kind == 'automatic_candidate_only' else 1)
+            <= len(selection["units"]) <= 64, "selection unit budget")
     batch = preview["ocr"]["batches"][0]
     require(batch["page"]["image_sha256"] == source["sha256"] and batch["page"]["pixels_sha256"] == source["pixels_sha256"]
             and batch["page"]["image_path"] == source["path"], "foreign batch page")
@@ -623,24 +645,11 @@ def bind(preview, image_path, rgb, image_bytes, preview_bytes, selection, fonts_
         require(uid not in seen and uid in by_id, "duplicate/foreign selected unit")
         seen.add(uid)
         record, unit = by_id[uid]
-        require(unit.disposition == "preview" and record["status"] == "preview"
-                and record.get("input_kind", "strict_utterance") == "strict_utterance"
-                and record["binding_current"] is True, "blocked/fragment/alternate selection unsupported")
-        request = TranslationRequest((unit,), (uid,))
-        require(canonical(record["request"]) == canonical(asdict(request)) and record["request_revision"] == request.revision
-                and record["unit_revision"] == unit.revision, "stale request/unit")
-        r = dict(record["result"])
-        r["translations"] = tuple(tuple(p) for p in r["translations"])
-        r["outcomes"] = tuple(UnitOutcome(**{**o, "reasons": tuple(o["reasons"])}) for o in r["outcomes"])
-        result = TranslationResult(**r)
-        result.assert_current(request)
-        require(result.status == "preview" and len(result.translations) == 1 and result.translations[0][0] == uid,
-                "result not a strict translated candidate")
-        require(s["text"] == result.translations[0][1] and s["unit_revision"] == unit.revision
-                and s["request_revision"] == request.revision and s["result_sha256"] == revision(record["result"])
-                and canonical(s["member_ids"]) == canonical(unit.member_ids)
-                and canonical(s["order"]) == canonical(unit.order), "selection text/member/order/result drift")
-        require(type(s["geometry_intent"]) is str and bool(s["geometry_intent"].strip()), "explicit geometry review intent required")
+        expected = strict_result_binding(record, unit)
+        require(all(canonical(s[key]) == canonical(value) for key, value in expected.items()),
+                'selection text/member/order/result drift')
+        if selection_kind == 'candidate_only':
+            require(type(s["geometry_intent"]) is str and bool(s["geometry_intent"].strip()), "explicit geometry review intent required")
     return BoundSelection(canonical(selection), digest(preview_bytes), digest(image_bytes), digest(fonts_bytes))
 
 

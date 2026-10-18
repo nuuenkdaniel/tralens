@@ -1,5 +1,131 @@
 # OCR review
 
+## Automatic saved-preview rendering: input → output
+
+`auto-compose` is a separate **machine-selection policy**, not automatic operator
+confirmation of the assisted/manual tools. It takes the original raster, saved
+translation preview and explicit local licensed font manifest and writes a fresh
+partial candidate output directly. No selection JSON, proposal IDs, mask drawing,
+operator identity or per-balloon review is required or consumed.
+
+```sh
+.venv/bin/python tools/render_preview.py auto-compose \
+  --preview test-results/workflow-fragments-priority-parent-v1/preview.json \
+  --image images/ubunchu-ja-test/ubunchu01_04.png \
+  --fonts test-results/render-parent-input-v1/fonts.json \
+  --output test-results/automatic-tight-render-parent-v1
+```
+
+The sole explicitly supplied manifest face is used if the manifest contains one
+font. With several approved faces, supply one global `--font-id`; there is no
+implicit system-font lookup or learned font matching. Global size bounds default
+to `--min-size 16 --max-size 28` (allowed 8–144). Optional `--max-units N` is an
+explicit evaluation cap, not per-unit selection; without it all current strict
+translated candidates are machine-selected in saved order and attempted within
+declared resource budgets. Every saved unit remains in the report, including
+blocked/untranslated/fragment/alternate-only entries and resource skips. No OCR,
+translation, provider, model initialization or network request occurs.
+
+### Automatic tight-mask policy
+
+`automatic_original_tight_flat_v1` does not need a complete white-balloon partition:
+
+1. Seed original **whole 8-connected dark components** from member polygons using
+   RGB-to-gray `<180`. Every component must remain within the original member
+   geometry plus 2px. Frame contacts, excessive extents, spills and nonmember
+   polygon intersections reject; OCR rectangles are never paint masks.
+2. Measure original RGB background from a local collar 2–4px outside the dark
+   silhouette. Require >=32 samples, light neutral white/off-white (minimum
+   channel 180, maximum channel spread 16), and maximum channel deviation **2**.
+   Colored/gradient/texture/neighbor contamination does not receive a fallback.
+3. Re-label full original RGB contrast `>2` relative to that measured background,
+   retaining whole components seeded by the dark ink. This audits antialias
+   coverage instead of assuming a one-pixel dilation of the 180-threshold mask
+   is sufficient. Contrast-component spill and unexplained/isolated gray marks
+   in the source neighborhood reject. Colored foreground is unsupported.
+4. Dilate that complete foreground by **1px** for erasure. Its independent **2px
+   collar** must be original flat background and it must not intersect any
+   nonmember polygon or reach the source frame. Fill only this mask with the
+   measured RGB color. Outside it the cleanplate remains exact canonical source.
+5. Separately derive a bounded source-local layout rectangle using original flat
+   whitespace and 2px clearance from all unrelated original contrast and all
+   nonmember geometry. Expansion is limited to the source bbox plus <=32px
+   horizontally/24px vertically. Shared white regions can have disjoint local
+   layouts; this is not semantic ownership, a Voronoi partition or a claimed
+   speech boundary. Obstructed complete-ink seeds, colliding layouts/erasures or
+   RAQM overflow skip the unit. Both colliding units reject symmetrically.
+
+All effects/full-resolution alpha checks use the existing measured RAQM renderer.
+No text rewrite, clipping, squashing or size below the supplied bound is allowed.
+Cleanup is committed only after successful typography and per-unit pixel checks;
+skips leave source ink untouched. The manual/assisted flat-interior cleanup guard
+is unchanged. OpenCV Telea/Navier–Stokes are not used in this production policy;
+the parent's spike/comparison is feasibility evidence, not automatic permission
+for textured restoration. Learned segmentation remains outside this method.
+
+Original source masks are raster-counted once per job; exact per-pixel counts
+preserve coincident/contained nonmember annotations when subtracting a member's
+contribution. Whole-component/color/collar checks still run per unit. No global
+white ownership or shared-outline condition is required for tight erasure.
+
+### Automatic outputs and provenance
+
+The output purpose is `automatic_candidate_output`, separate from operator-selected
+`candidate_only` jobs. It includes:
+
+* `original-file.bin`, `source.png`, exact `evidence-preview.json` and
+  `evidence-fonts.json`.
+* `clean.png`, transparent accepted `text.png`, `composite.png`, applied
+  `erase-mask.png`, `alpha-mask.png`, `protected-mask.png` and binary diffs.
+* Bounded per-unit foreground/proposed-erasure/applied-erasure/layout masks and
+  text layers where derived. Skipped/colliding units have empty applied erasure;
+  any saved text is diagnostic, not applied.
+* Responsive, escaped, CSP-constrained, script-free `review.html` with original,
+  clean, text, composite and mask specimens. No browser/editor/server is launched.
+* `manifest.json` with exact source/file/RGB/preview/font hashes, implementation
+  and engine versions, strict unit/request/result/text bindings, mask/antialias/
+  background evidence, resolved layout/font metadata, artifact hashes, job revision,
+  machine selection, coverage and per-unit skip reasons.
+
+`operator_confirmation` stays null, `linguistic_approval` stays `not_assessed`, and
+`approved_export` is false. Nothing fabricates a human review, silently calls
+confirmation, or promotes fragments/blocked/VLM alternatives. The shared strict
+result validator is used under an explicit `automatic_candidate_only` binding
+contract with no geometry-intent/review assertion. Existing manual commands keep
+their original default binding contract and confirmation behavior.
+
+Per-unit `candidate_pixel_audit` describes the isolated proposed operation before
+collision rejection; final global `pixel_audit` and applied masks describe actual
+committed pixels. Runtime outside-cleanup/outside-alpha/protected change counts
+must be zero. Failed final locality rolls output back to source and records the
+rejected counters. Inputs and local font/license hashes are rechecked before
+exclusive publication. CLI exit 0 means a report/partial candidate was written,
+not that every unit rendered or the language/visual quality is correct.
+
+Bounds: <=4M source pixels/4096px per side, <=512 source units/detections, <=16
+processed mask slots, <=32M aggregate unit-page pixels and <=512M source-binding/
+neighbor raster work. Labelings allow <=8192 components; <=64 seeded components
+per unit, max component side 96px/20,000 ink pixels and bbox area no more than half
+member-mask area (with a 64px floor). Existing font/license, RAQM search and local
+raster budgets apply. At most 256 artifacts/128 MiB total, HTML <=4 MiB, manifest
+<=8 MiB, and specimens <=1000px per side. Budget exhaustion is explicit partial
+skipping or preflight rejection, never implicit truncation or unsafe rendering.
+
+Remaining uncertainty: source polygons and strict candidates can be wrong. This
+policy does not certify text-versus-art identity inside an oversized source box,
+utterance completeness/punctuation outside detections, language truth or balloon
+ownership. Unassigned nearby contrast is a skip; unknown outside obstacles are
+preserved and constrain layout. The parent independently checks actual generated
+page outputs; product generation has no operator confirmation gate.
+
+```sh
+.venv/bin/python -m unittest tests.rendering.test_automatic -v
+.venv/bin/python -m unittest discover -s tests -q
+.venv/bin/python -m unittest tests.source_only_check -v
+.venv/bin/python -m compileall -q src/tralens/rendering tests/rendering tools/render_preview.py
+git diff --check
+```
+
 ## Candidate natural rendering (approved Phases 0–3)
 
 `tools/render_preview.py` is an offline, separate rendering workstream. It reads
