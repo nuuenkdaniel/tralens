@@ -1,5 +1,52 @@
 # Tralens
 
+## Minimal development frontend
+
+No frontend framework, npm, build step or new dependencies. Using the existing
+validated runtime and this checkout's saved licensed font manifest:
+
+```sh
+.venv-paddle6/bin/python tools/dev_frontend.py \
+  --fonts test-results/render-parent-input-v1/fonts.json
+```
+
+Open **http://127.0.0.1:7860**, choose a PNG/JPEG, select how far to run, and click
+**Run**. See raw OCR boxes, grouped units, source/translated text, actual stage
+status, then the cleanplate/text/composite layers and masks. Click a unit to
+highlight its source boxes. Blocked, budget-limited and failed units remain visible.
+
+The default OCR export root is `~/.cache/tralens/paddle-v6-models`; override with
+`--model-root PATH` if needed. Translation uses the existing local Ollama service
+and `translategemma:27b`; no models are downloaded. Without `--fonts`, OCR and
+translation still work, but rendering is disabled. For another checkout, supply
+your own explicit licensed font manifest using the schema below.
+
+The translation call budget defaults to **2**; increase it to at most **20** in the
+page for a broader pass. Existing rendering/eligibility limits still apply. No
+inference happens on server startup, page load or refresh—only on **Run**.
+
+Status comes from real saved checkpoints, polled once a second. OCR/grouping
+details appear when that phase publishes evidence, translations appear as units
+finish, and rendering layers appear when published. There is no fake percentage
+progress, token streaming, mask editing or manual source correction in this viewer.
+
+Jobs keep their uploads and pipeline artifacts under `test-results/dev-frontend/`.
+One job runs at a time, with eight runs per server session; refresh preserves the
+session list, but restarting the server resets that in-memory list without deleting
+files. Retries create new jobs. Ctrl+C stops the server; it does not guarantee a
+running native OCR/model operation finished or its last checkpoint is final.
+
+**Local development only:** binds to loopback, rejects cross-origin requests and
+path traversal, and accepts only bounded PNG/JPEG uploads (32 MiB, 4M pixels,
+4096px side; opaque source required). Do not expose this Python development server
+as a public upload service. Native engine setup/model failures are shown in the UI.
+
+Verification: 10 offline viewer tests cover HTTP upload through the real pipeline
+with injected engines/providers, checkpoint visibility, mode dispatch, errors,
+source retention and request/path guards. A headless Firefox smoke test also
+exercised browser file upload, results/layers, unit highlighting and page refresh;
+it used the same synthetic pipeline fixtures, not live inference.
+
 ## One-command image pipeline
 
 The stage implementations stay separate; **`src/main.py` connects them**:

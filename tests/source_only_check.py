@@ -26,6 +26,14 @@ class SourceOnlySuiteTest(unittest.TestCase):
                     target = checkout/path.relative_to(source)
                     target.parent.mkdir(parents=True,exist_ok=True)
                     shutil.copyfile(path,target)
+            # Browser source belongs to the application, not optional local
+            # image/evaluation evidence. Keep the isolated UI smoke tests real.
+            for path in (source/'src/tralens/devui/static').glob('*'):
+                self.assertFalse(path.is_symlink(), 'refuse symlinked frontend source')
+                if path.suffix in ('.html', '.css', '.js') and path.is_file():
+                    target = checkout/path.relative_to(source)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(path, target)
             for name in ("README.md",".gitignore"):
                 shutil.copyfile(source/name,checkout/name)
             self.assertFalse((checkout/"images").exists())
