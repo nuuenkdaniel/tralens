@@ -202,10 +202,10 @@ class BestEffortWorkflowTests(unittest.TestCase):
         from tralens.translation.contracts import TranslationRequest, TranslationResult, UnitOutcome
         with Image.open(self.f.image) as opened:
             tile = opened.convert('RGB')
-        image = Image.new('RGB', (tile.width*4, tile.height*4), 'white')
+        image = Image.new('RGB', (tile.width*6, tile.height*4), 'white')
         boxes = []
         for row in range(4):
-            for col in range(4):
+            for col in range(6):
                 x, y = col*tile.width, row*tile.height
                 image.paste(tile, (x, y))
                 for detection in self.f.preview['ocr']['raw_detections'][0]:
@@ -214,7 +214,7 @@ class BestEffortWorkflowTests(unittest.TestCase):
         image.save(self.f.image)
         batch = asdict(propose_page_from_boxes(boxes, str(self.f.image)))
         units = n.automatic_units(batch)
-        self.assertEqual(len(units), 32)
+        self.assertEqual(len(units), 48)
         records = []
         for unit in units:
             self.assertEqual(unit.disposition, 'preview', unit.blocking_reasons)
@@ -233,7 +233,7 @@ class BestEffortWorkflowTests(unittest.TestCase):
         (self.f.root/'preview.json').write_text(n.canonical(preview))
         report = self.run_render()
         self.assertEqual(report['coverage']['rendered'], a.MAX_SLOTS)
-        self.assertEqual(report['coverage']['strict_eligible'], 32)
+        self.assertEqual(report['coverage']['strict_eligible'], 48)
         self.assertEqual(sum(row['reason_code'] == 'resource_budget' for row in report['units']), 16)
         self.assertTrue(report['coverage']['partial_output'])
         self.assertLessEqual(len(report['artifacts'])+1, report['limits']['artifact_count'])

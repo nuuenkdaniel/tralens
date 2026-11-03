@@ -164,7 +164,7 @@ class PipelineTests(unittest.TestCase):
     def test_structurally_blocked_units_and_fragment_previews_are_never_promoted(self):
         self.fixture.engine.automatic_unit_proposals = [replace(self.fixture.batch, regions=())]
         with patch.object(automatic, 'run_automatic', side_effect=AssertionError('fragments cannot render')):
-            report = self.run_pipeline(allow_fragment_previews=True)
+            report = self.run_pipeline(allow_fragment_previews=True, translation_policy='conservative')
         self.assertEqual(report['status'], 'partial')
         self.assertEqual(report['coverage']['ocr_blocked_units'], 2)
         self.assertEqual(report['coverage']['ocr_blocking_reasons']['unknown_region_ownership'], 2)
@@ -269,7 +269,7 @@ class PipelineTests(unittest.TestCase):
             self.assertFalse((self.root/'job').exists())
 
     def test_font_license_raqm_and_size_options_rejected_before_ocr(self):
-        for options in ({'min_size': 7}, {'min_size': 30, 'max_size': 20}, {'max_units': 17}, {'font_id': 'foreign'}):
+        for options in ({'min_size': 7}, {'min_size': 30, 'max_size': 20}, {'max_units': 33}, {'font_id': 'foreign'}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 self.run_pipeline(**options)
         with patch.object(automatic.n.features, 'check_feature', return_value=False):

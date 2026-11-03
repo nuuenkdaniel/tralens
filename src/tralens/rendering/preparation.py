@@ -613,7 +613,7 @@ def _sources(preview, image, fonts):
         rgb = source_rgb(opened)
     source = {'path': str(paths[1].resolve()), 'sha256': n.digest(contents[1]),
               'pixels_sha256': n.digest(f'RGB:{rgb.width}:{rgb.height}:'.encode()+rgb.tobytes()), 'size': list(rgb.size)}
-    n.require(type(p['schema_version']) is int and p['schema_version'] in (1, 2, 3) and p['preview_only'] is True
+    n.require(type(p['schema_version']) is int and p['schema_version'] in (1, 2, 3, 4) and p['preview_only'] is True
               and n.canonical(p['input']) == n.canonical(source), 'saved preview/current source binding drift')
     n.require(type(p['units']) is list and len(p['units']) <= 512 and len(p['ocr']['raw_detections']) == 1,
               'single-page unit budget')

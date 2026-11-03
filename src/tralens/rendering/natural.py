@@ -626,7 +626,7 @@ def strict_result_binding(record, unit):
 
 
 def bind(preview, image_path, rgb, image_bytes, preview_bytes, selection, fonts_bytes, *, selection_kind='candidate_only'):
-    require(type(preview["schema_version"]) is int and preview["schema_version"] in (1, 2, 3)
+    require(type(preview["schema_version"]) is int and preview["schema_version"] in (1, 2, 3, 4)
             and preview["preview_only"] is True, "unsupported saved preview")
     source = {"path": str(Path(image_path).resolve()), "sha256": digest(image_bytes),
               "pixels_sha256": digest(f"RGB:{rgb.width}:{rgb.height}:".encode()+rgb.tobytes()), "size": list(rgb.size)}

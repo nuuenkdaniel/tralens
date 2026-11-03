@@ -26,6 +26,9 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         raise ValueError('pipeline output must be fresh with an existing parent and no symlinks')
     from tralens.rendering.automatic import preflight_automatic, run_automatic
     from tralens.translation.workflow import run_preview, _atomic_json
+    from tralens.translation.coverage import validate_policy
+
+    translation_policy = validate_policy(preview_options.get('translation_policy', 'coverage-first'))
 
     rendering_options = dict(image=Path(image).expanduser().absolute(), fonts=Path(fonts).expanduser().absolute(),
         font_id=font_id, min_size=min_size, max_size=max_size, max_units=max_units, background_method=background_method,
@@ -35,6 +38,7 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         'stage': 'preview', 'source': checked['source'], 'fonts_sha256': checked['fonts_sha256'],
         'font_id': checked['font_id'], 'background_method': background_method,
         'render_policy': render_policy,
+        'translation_policy': translation_policy,
         'approved_export': False, 'linguistic_approval': 'not_assessed',
         'full_page_translation_verified': False, 'preview': None,
         'rendering': {'status': 'not_started'}, 'coverage': None, 'error': None}
@@ -56,12 +60,15 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         statuses = Counter(row['status'] for row in records)
         strict_count = sum(row['status'] == 'preview' and row.get('input_kind', 'strict_utterance') == 'strict_utterance'
                            for row in records)
+        coverage_count = sum(row['status'] == 'preview' and row.get('input_kind') == 'coverage_text_region' for row in records)
         report['preview'] = {'status': preview['status'], 'path': 'preview/preview.json',
             'sha256': fingerprint(output/'preview/preview.json'), 'attempts': preview['attempts'],
             'unit_status_counts': dict(statuses), 'error': preview['error'],
             'ocr_cleanup': preview['cleanup'], 'fragment_previews': preview.get('fragment_preview_count', 0),
             'visual_alternates': preview.get('alternate_preview_count', 0)}
         report['coverage'] = {'saved_units': len(records), 'strict_translations': strict_count,
+            'coverage_translations': coverage_count, 'total_translations': strict_count+coverage_count,
+            'source_uncertain_units': sum(row.get('input_kind') == 'coverage_text_region' for row in records),
             'ocr_blocked_units': statuses['blocked'],
             'ocr_blocking_reasons': dict(Counter(reason for row in records for reason in row['blocking_reasons'])),
             'translation_budget_exhausted': statuses['budget_exhausted'], 'rendered': 0,
@@ -74,9 +81,9 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
             # preview binding. A source/font change cannot become a new job input.
             if preflight_automatic(**rendering_options) != checked or preview['input'] != checked['source']:
                 raise ValueError('pipeline image/font inputs changed after preflight')
-            if not strict_count:
+            if not strict_count and not (coverage_count and render_policy == 'best-effort'):
                 report['status'] = 'partial'
-                report['rendering'] = {'status': 'skipped', 'reason': 'no_strict_translations',
+                report['rendering'] = {'status': 'skipped', 'reason': 'coverage_requires_best_effort' if coverage_count else 'no_strict_translations',
                     'note': 'No composite was produced; original image and preview evidence remain unchanged.'}
             else:
                 report['stage'] = 'rendering'
@@ -92,6 +99,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                     'coverage': rendered['coverage'], 'background_summary': rendered['background_summary'],
                     'quality_summary': rendered['quality_summary']}
                 report['coverage'].update(rendered=rendered['coverage']['rendered'],
+                    strict_rendered=rendered['coverage']['strict_rendered'],
+                    coverage_rendered=rendered['coverage']['coverage_rendered'],
                     render_skip_reasons=dict(Counter(row['reason_code'] for row in rendered['units']
                         if row['machine_selected'] and row['status'] == 'skipped')),
                     partial_output=rendered['coverage']['partial_output'])
@@ -128,7 +137,9 @@ def main(argv=None):
     parser.add_argument("--profile", choices=("generalist", "translategemma"), default="translategemma",
                         help="capability profile (default: translategemma); Qwen overrides require generalist")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434")
-    parser.add_argument("--max-attempts", type=int, default=2, help="global model call budget, 0..20; no retries")
+    parser.add_argument("--max-attempts", type=int, default=2, help="global model call budget, 0..64; no retries")
+    parser.add_argument('--translation-policy', choices=('coverage-first', 'conservative'), default='coverage-first',
+                        help='default coverage-first: attempt source-bound OCR text despite uncertain ownership/crop/orientation')
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--keep-alive", type=int, default=60)
     parser.add_argument("--num-predict", type=int, default=1024)
@@ -138,7 +149,7 @@ def main(argv=None):
     parser.add_argument('--font-id', help='global font ID; required if the manifest has multiple faces')
     parser.add_argument('--min-size', type=int, help='preferred rendering minimum, default 16; conservative mode enforces it strictly')
     parser.add_argument('--max-size', type=int, help='rendering maximum size, default 28')
-    parser.add_argument('--max-units', type=int, help='optional rendering evaluation cap, 1..16; not a translation budget')
+    parser.add_argument('--max-units', type=int, help='optional rendering evaluation cap, 1..32; not a translation budget')
     parser.add_argument('--background-method', choices=('auto', 'flat'),
                         help='render: flat fill then classical restoration (default auto); flat disables restoration')
     parser.add_argument('--text-mask-model', type=Path,
@@ -163,6 +174,7 @@ def main(argv=None):
             keep_alive=args.keep_alive, num_predict=args.num_predict, selected_ids=tuple(args.unit_id),
             allow_fragment_previews=args.allow_fragment_previews,review_ocr=args.review_ocr,review_model=args.review_model,
             max_review_attempts=args.max_review_attempts,review_timeout=args.review_timeout)
+        preview_options['translation_policy'] = args.translation_policy
         if args.render:
             report = run_pipeline(args.image, args.output, fonts=args.fonts, font_id=args.font_id,
                 min_size=16 if args.min_size is None else args.min_size,
@@ -172,6 +184,7 @@ def main(argv=None):
             coverage = report['coverage'] or {}
             print(f"{report['status']}: {args.output / 'pipeline.json'}; "
                   f"strict translations={coverage.get('strict_translations', 0)}; rendered={coverage.get('rendered', 0)}; "
+                  f"uncertain translations={coverage.get('coverage_translations', 0)}; "
                   'candidate only, not verified full-page translation')
             if report['rendering'].get('composite'):
                 print(f"Composite: {args.output / report['rendering']['composite']}; review: {args.output / report['rendering']['review']}")
@@ -182,7 +195,8 @@ def main(argv=None):
     except (ValueError, TypeError, OSError, KeyError) as error:
         parser.exit(2, ("pipeline" if args.render else "preview") + " rejected: " + str(error) + "\n")
     print(f"{preview['status']}: {args.output / 'preview.json'}; model calls={preview['attempts']}; "
-          f"strict previews={preview.get('strict_preview_count',0)}; unverified fragments={preview.get('fragment_preview_count',0)}")
+          f"strict previews={preview.get('strict_preview_count',0)}; uncertain regions={preview.get('coverage_preview_count',0)}; "
+          f"unverified fragments={preview.get('fragment_preview_count',0)}")
     if args.review_ocr:
         stage = preview.get("ocr_review",{})
         print(f"visual review calls={stage.get('attempts',0)}; release/control calls={stage.get('control_calls',0)}; "

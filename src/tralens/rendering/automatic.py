@@ -21,7 +21,9 @@ from . import typography
 
 
 POLICY = 'automatic_original_tight_flat_v3'
-MAX_SLOTS = 16
+MAX_SLOTS = 32
+MAX_RETAINED_PIXELS = 128_000_000
+MAX_ARTIFACTS = 512
 MAX_WORK = 512_000_000
 
 
@@ -75,6 +77,24 @@ class AutomaticPlan:
     background: list | None
     evidence: dict
     restored_pixels: np.ndarray | None = None
+
+
+class PackedPlan:
+    """Retain four exact boolean masks at one bit/pixel, not four bytes/pixel.
+
+    Full masks are materialized only while computing collisions/composition or
+    writing one unit's evidence. Pixel coordinates and output PNGs are unchanged.
+    """
+    def __init__(self, plan):
+        self.shape = plan.erase.shape
+        self.masks = {name: np.packbits(getattr(plan, name), axis=None)
+                      for name in ('foreground', 'erase', 'layout', 'obstacles')}
+        self.background, self.evidence, self.restored_pixels = plan.background, plan.evidence, plan.restored_pixels
+
+    def __getattr__(self, name):
+        if name in self.masks:
+            return np.unpackbits(self.masks[name], count=self.shape[0]*self.shape[1]).reshape(self.shape).view(bool)
+        raise AttributeError(name)
 
 
 def apply_cleanup(pixels, plan):
@@ -281,7 +301,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', '../translation/coverage.py')})
 
 
 def _report_html(report):
@@ -383,6 +403,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     """All current strict translated candidates, with explicit machine skip states."""
     _options(min_size, max_size, max_units, background_method, render_policy)
     from . import restoration
+    from ..translation import coverage as tc
     model_spec = None
     if text_mask_model is not None:
         from . import segmentation
@@ -408,14 +429,15 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         'policy': POLICY if background_method == 'flat' else 'automatic_flat_then_classical_v1',
         'background_method': background_method,
         'render_policy': render_policy,
-        'selection_method': 'all current strict translated candidates in saved order; machine geometric/typographic checks',
+        'selection_method': 'strict translations first; explicitly bound uncertain text regions only in best-effort; machine geometric/typographic checks',
         'operator_confirmation': None, 'linguistic_approval': 'not_assessed', 'approved_export': False,
         'source': source, 'preview_sha256': n.digest(contents[0]), 'fonts_sha256': n.digest(contents[2]),
         'implementation_sha256': implementation_hash(), 'font_id': font_id, 'style': style,
         'typography_policy': typography.POLICY,
         'evaluation_cap': max_units, 'units': [],
         'limits': {'page_pixels': p.MAX_PIXELS, 'page_side': p.MAX_SIDE, 'processed_slots': MAX_SLOTS,
-            'aggregate_unit_pixels': n.MAX_UNIT_PIXELS, 'binding_neighbor_raster_work': MAX_WORK,
+            'aggregate_unit_pixels': MAX_RETAINED_PIXELS, 'retained_mask_encoding': 'bitpacked_boolean_v1',
+            'binding_neighbor_raster_work': MAX_WORK,
             'components_per_labeling': 8192, 'owned_components': 64, 'member_masks': 32, 'member_padding': 2,
             'seed_gray_threshold_exclusive': 180, 'component_side': 96, 'component_ink_pixels': 20000,
             'component_bbox_member_area_fraction': .5, 'component_bbox_area_floor': 64,
@@ -427,7 +449,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             'typography_shared_raster_pixels': 64_000_000,
             'restoration_local_pixels': restoration.MAX_LOCAL_PIXELS, 'restoration_local_side': restoration.MAX_LOCAL_SIDE,
             'restoration_samples': restoration.MAX_SAMPLES, 'restoration_methods_per_unit': 2,
-            'artifact_count': 256, 'artifact_bytes': 128*1024*1024, 'report_bytes': 4*1024*1024,
+            'artifact_count': MAX_ARTIFACTS, 'artifact_bytes': 128*1024*1024, 'report_bytes': 4*1024*1024,
             'manifest_bytes': 8*1024*1024},
         'engine': {'pillow': n.pillow_version, 'opencv': cv2.__version__, 'raqm': n.features.version_feature('raqm'),
                    'harfbuzz': n.features.version_feature('harfbuzz'), 'freetype': n.features.version_module('freetype2')}}
@@ -465,9 +487,27 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     'reason_code': getattr(error, 'code', 'validation'), 'reason': str(error),
                     'evidence': getattr(error, 'evidence', {})})
         raise original_error
-    work, eligible, attempts = pixels*len(raw), 0, 0
+    work, eligible, coverage_eligible, attempts = pixels*len(raw), 0, 0, 0
     context, context_error, context_initialized = None, None, False
-    for index, (record, unit) in enumerate(zip(preview_doc['units'], units)):
+
+    def initialize_context():
+        nonlocal context, context_error, context_initialized, work
+        if not context_initialized:
+            context_initialized = True
+            try:
+                n.budget_check(work+pixels*len(raw) <= MAX_WORK, 'automatic source geometry raster work budget')
+                context = OriginalComponents(rgb)
+                context.bind_geometry(raw)
+                work += pixels*len(raw)
+            except n.ResourceLimit as error:
+                context, context_error = None, str(error)
+
+    pairs = list(enumerate(zip(preview_doc['units'], units)))
+    # Keep report/artifact indices in saved OCR order, but reserve budgets for
+    # existing strict translations first, independent of uncertain page position.
+    report['units'] = [None]*len(pairs)
+    pairs.sort(key=lambda pair: pair[1][0].get('input_kind') == tc.KIND)
+    for index, (record, unit) in pairs:
         saved_result = record.get('result')
         review_needed = saved_result.get('review_needed') if type(saved_result) is dict else None
         row = {'unit_id': unit.unit_id, 'source_status': record['status'], 'source_record_sha256': n.revision(record),
@@ -477,32 +517,41 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                    'structural_reasons': list(unit.structural_reasons), 'lexical_reasons': list(unit.lexical_reasons),
                    'blocked_reasons': list(unit.blocked_reasons),
                    'translation_review_needed': review_needed if type(review_needed) is bool else None}}
-        report['units'].append(row)
-        if record['status'] != 'preview' or record.get('input_kind', 'strict_utterance') != 'strict_utterance':
+        row['input_kind'] = record.get('input_kind', 'strict_utterance')
+        report['units'][index] = row
+        is_coverage = row['input_kind'] == tc.KIND
+        if record['status'] != 'preview' or row['input_kind'] not in ('strict_utterance', tc.KIND):
+            continue
+        if is_coverage and render_policy != 'best-effort':
+            row.update(reason_code='coverage_requires_best_effort', reason='uncertain text-region replacements require best-effort rendering')
             continue
         try:
-            binding = n.strict_result_binding(record, unit)
+            if is_coverage:
+                n.require(preview_doc['schema_version'] == 4 and
+                    preview_doc['settings'].get('translation_policy') == 'coverage-first', 'coverage translation policy/schema required')
+                binding = tc.bound_result(record, unit)
+                coverage_eligible += 1
+                row['coverage'] = record['coverage']
+            else:
+                binding = n.strict_result_binding(record, unit)
+                eligible += 1
             row.update(machine_selected=True, binding=binding)
-            eligible += 1
-            if max_units is not None and eligible > max_units:
+            if max_units is not None and eligible+coverage_eligible > max_units:
                 raise AutomaticSkip('evaluation_cap', 'explicit evaluation cap reached; candidate preserved, not rendered')
             n.validate_text(binding['text'], coverage)
+            if is_coverage:
+                # Delay not just geometry but also its slot/raster budget until
+                # ALL strict placements and their fallback attempts finish.
+                row['coverage_pending'] = True
+                raise AutomaticSkip('coverage_uncertain_geometry', 'source-bound uncertain region; try local routes after strict placements')
             unit_work = pixels*len(binding['member_ids'])
-            if attempts >= MAX_SLOTS or (attempts+1)*pixels > n.MAX_UNIT_PIXELS or work+unit_work > MAX_WORK:
+            if attempts >= MAX_SLOTS or (attempts+1)*pixels > MAX_RETAINED_PIXELS or work+unit_work > MAX_WORK:
                 raise AutomaticSkip('resource_budget', 'automatic per-job mask/raster-work budget reached')
             attempts += 1
             work += unit_work
             row['attempted'] = True
             row['background_attempts'] = []
-            if not context_initialized:
-                context_initialized = True
-                try:
-                    n.budget_check(work+pixels*len(raw) <= MAX_WORK, 'automatic source geometry raster work budget')
-                    context = OriginalComponents(rgb)
-                    context.bind_geometry(raw)
-                    work += pixels*len(raw)
-                except n.ResourceLimit as error:
-                    context, context_error = None, str(error)
+            initialize_context()
             try:
                 if context_error is not None:
                     raise n.ResourceLimit(context_error)
@@ -529,7 +578,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                             'reason_code': getattr(restore_error, 'code', 'resource_budget'), 'reason': str(restore_error),
                             'evidence': getattr(restore_error, 'evidence', {})})
                         plan = semantic_plan(binding, row, flat_error)
-            plans[index] = plan
+            plans[index] = PackedPlan(plan)
             row['mask_evidence'] = plan.evidence
             check(not (plan.erase & plan.obstacles).any(), 'erasure_obstacle', 'automatic erasure intersects original obstacles')
             unit_style = style
@@ -541,7 +590,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 row['text_contrast'] = {'fill': fill, 'outline_fill': outline, 'background_luminance_estimate': luminance}
             layer, provenance, content = typography.layout_dialogue(binding['text'], font_data, coverage,
                 Image.fromarray(plan.layout.astype(np.uint8)*255), unit_style)
-            content_masks[index] = content
+            content_masks[index] = content.convert('1')
             provenance['typography']['content_mask_artifact'] = f'unit-{index:03d}-content-mask.png'
             box = layer.getchannel('A').getbbox()
             check(box is not None, 'empty_alpha', 'automatic text has no raster alpha')
@@ -586,8 +635,20 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         for i in ready:
             if i not in collisions:
                 reserved |= plans[i].layout | plans[i].erase
-        for i, row in enumerate(report['units']):
-            if row['status'] != 'skipped' or not row.get('attempted') or 'binding' not in row:
+        for i, _ in pairs:
+            row = report['units'][i]
+            if row['status'] != 'skipped' or 'binding' not in row:
+                continue
+            if row.pop('coverage_pending', False):
+                unit_work = pixels*len(row['binding']['member_ids'])
+                if attempts >= MAX_SLOTS or (attempts+1)*pixels > MAX_RETAINED_PIXELS or work+unit_work > MAX_WORK:
+                    row.update(reason_code='resource_budget', reason='automatic per-job mask/raster-work budget reached after strict placements')
+                    continue
+                attempts += 1
+                work += unit_work
+                row.update(attempted=True, background_attempts=[])
+                initialize_context()
+            if not row.get('attempted'):
                 continue
             # These are runtime integrity failures, not artistic uncertainty.
             if row['reason_code'] in ('typography_containment', 'alpha_containment', 'erasure_obstacle', 'runtime_locality'):
@@ -596,13 +657,20 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             row['best_effort_attempts'] = []
             existing = plans.get(i)
             fallback_work = n.LayoutWork()
-            for route in ('reuse', 'native_hint', 'footprint'):
+            routes = ('source_local', 'native_hint', 'footprint') if row['input_kind'] == tc.KIND else ('reuse', 'native_hint', 'footprint')
+            for route in routes:
                 reuse = route == 'reuse'
                 if reuse and (existing is None or row['reason_code'] == 'region_collision'
                               or ((existing.layout | existing.erase) & reserved).any()):
                     continue
                 try:
-                    if reuse:
+                    if route == 'source_local':
+                        if context_error is not None:
+                            raise n.ResourceLimit(context_error)
+                        plan = derive_plan(rgb, raw, row['binding']['member_ids'], context=context)
+                        method = 'flat_fill_uncertain_region'
+                        check(not ((plan.layout | plan.erase) & reserved).any(), 'region_collision', 'uncertain region touches reserved strict output')
+                    elif reuse:
                         plan = existing
                         method = 'reuse_cleanup_relaxed_typesetting'
                     elif route == 'native_hint':
@@ -655,7 +723,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                         n.verify_pixel_audit(audit)
                     except ValueError as error:
                         raise AutomaticSkip('runtime_locality', str(error)) from error
-                    plans[i], content_masks[i], tiles[i] = plan, content, (layer.crop(box), box[:2])
+                    plans[i], content_masks[i], tiles[i] = PackedPlan(plan), content.convert('1'), (layer.crop(box), box[:2])
                     if not reuse:
                         row.pop('text_mask_method', None)
                     provenance['typography']['content_mask_artifact'] = f'unit-{i:03d}-content-mask.png'
@@ -668,7 +736,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                         candidate_audit_scope='isolated best-effort proposal; final global audit describes committed pixels',
                         outside_content_alpha_pixels=0,
                         best_effort={'original_failure': original_failure, 'reused_cleanup': reuse,
-                            'warnings': (['Typography relaxed; exact text preserved.'] if reuse else plan.evidence['warnings'])
+                            'warnings': (['Typography relaxed; exact text preserved.'] if reuse else
+                                plan.evidence.get('warnings', ['OCR region ownership/order is uncertain; full utterance not certified.']))
                                 +(['Font size is below the requested minimum.'] if provenance['typography']['below_requested_minimum'] else [])})
                     if i not in ready:
                         ready.append(i)
@@ -676,9 +745,11 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     reserved |= plan.layout | plan.erase
                     break
                 except (ValueError, OSError, KeyError, TypeError) as error:
-                    row['best_effort_attempts'].append({'method': {'reuse': 'reuse_cleanup', 'native_hint': 'native_contrast_hint',
+                    row['best_effort_attempts'].append({'method': {'source_local': 'flat_fill_uncertain_region', 'reuse': 'reuse_cleanup', 'native_hint': 'native_contrast_hint',
                         'footprint': 'ocr_footprint_replacement'}[route],
                         'status': 'failed', 'reason_code': getattr(error, 'code', 'validation'), 'reason': str(error)})
+                    if isinstance(error, n.ResourceLimit):
+                        row.update(reason_code='resource_budget', reason=str(error))
                     if isinstance(error, AutomaticSkip) and error.code in ('runtime_locality', 'alpha_containment', 'erasure_obstacle'):
                         row.update(reason_code=error.code, reason=str(error))
                         break
@@ -733,13 +804,22 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         report['pixel_audit'] = n.pixel_audit(rgb, clean, composite, erase_union, alpha_union, protected)
         report['alpha_integrity'] = {'validated_pixels': 0, 'actual_pixels': 0, 'disagreement_pixels': 0}
     rendered = sum(row['status'] == 'automatic_composed' for row in report['units'])
+    strict_rendered = sum(row['status'] == 'automatic_composed' and row['input_kind'] == 'strict_utterance' for row in report['units'])
     report['coverage'] = {'saved_units': len(report['units']), 'strict_eligible': eligible, 'attempted': attempts,
+        'coverage_eligible': coverage_eligible, 'total_eligible': eligible+coverage_eligible,
+        'strict_rendered': strict_rendered, 'coverage_rendered': rendered-strict_rendered,
         'rendered': rendered, 'skipped': len(report['units'])-rendered, 'partial_output': rendered < len(report['units']),
-        'strict_coverage_fraction': rendered/eligible if eligible else None, 'has_rendered_output': bool(rendered)}
+        'strict_coverage_fraction': strict_rendered/eligible if eligible else None,
+        'total_coverage_fraction': rendered/(eligible+coverage_eligible) if eligible+coverage_eligible else None,
+        'has_rendered_output': bool(rendered)}
     best_count = sum(row['status'] == 'automatic_composed' and row.get('render_quality') == 'best_effort'
                      for row in report['units'])
     report['quality_summary'] = {'conservative_rendered': rendered-best_count, 'best_effort_rendered': best_count,
         'has_degraded_output': bool(best_count), 'best_effort_artwork_preservation': 'not_guaranteed' if best_count else 'not_used'}
+    report['retained_masks'] = {'encoding': 'bitpacked_boolean_v1', 'plans': len(plans),
+        'boolean_mask_bytes': sum(mask.nbytes for plan in plans.values() for mask in plan.masks.values()),
+        'equivalent_unpacked_mask_bytes': 4*pixels*len(plans),
+        'content_mask_storage': 'Pillow mode 1; expanded to L for unchanged PNG artifacts'}
     report['background_summary'] = {'flat_rendered': sum(row['status'] == 'automatic_composed'
             and row.get('cleanup_method') in ('flat_fill', 'flat_fill_semantic') for row in report['units']),
         'restored_rendered': sum(row['status'] == 'automatic_composed'
@@ -759,7 +839,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         nonlocal total
         total += len(value)
         n.budget_check(len(value) <= 64*1024*1024 and total <= 128*1024*1024, 'automatic artifact byte budget')
-        n.budget_check(len(blobs) < 256, 'automatic artifact count budget')
+        n.budget_check(len(blobs) < MAX_ARTIFACTS, 'automatic artifact count budget')
         blobs[name] = value
     def png(name, value):
         stream = BytesIO()
@@ -787,7 +867,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         for name, mask in (('proposed-erase', plan.erase), ('applied-erase', applied), ('foreground', plan.foreground), ('layout-mask', plan.layout)):
             png(f'unit-{i:03d}-{name}.png', Image.fromarray(mask.astype(np.uint8)*255))
         if i in content_masks:
-            png(f'unit-{i:03d}-content-mask.png', content_masks[i])
+            png(f'unit-{i:03d}-content-mask.png', content_masks[i].convert('L'))
         if i in tiles:
             layer = Image.new('RGBA', rgb.size)
             layer.paste(tiles[i][0], tiles[i][1])

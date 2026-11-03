@@ -280,7 +280,9 @@ class SavedTypographyTests(unittest.TestCase):
                 image=root/'images/ubunchu-ja-test/ubunchu01_04.png',
                 fonts=root/'test-results/render-parent-input-v1/fonts.json', output=output, render_policy='conservative')
             self.assertEqual(after['coverage']['rendered'], 6)
-            self.assertEqual(after['coverage'], before['coverage'])
+            self.assertEqual({key: after['coverage'][key] for key in before['coverage']}, before['coverage'])
+            self.assertEqual(after['coverage']['strict_rendered'], 6)
+            self.assertEqual(after['coverage']['coverage_rendered'], 0)
             for key in ('source', 'preview_sha256', 'fonts_sha256'):
                 self.assertEqual(after[key], before[key])
             for name in ('source.png', 'clean.png', 'erase-mask.png'):
