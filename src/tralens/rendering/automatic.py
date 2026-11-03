@@ -281,7 +281,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py')})
 
 
 def _report_html(report):
@@ -298,12 +298,17 @@ def _report_html(report):
         +escape(json.dumps(report['coverage'], indent=2))+'</pre><p>Job '+escape(report['job_revision'])+'</p>'
         '<a href="manifest.json">Exact source, policy, hashes and per-unit reasons</a>')
     rows = []
+    if report.get('quality_summary', {}).get('best_effort_rendered'):
+        rows.append('<p><strong>BEST-EFFORT OUTPUT: some edits use uncertain OCR footprints, may damage artwork, '
+            'or use smaller/emergency-wrapped text. Originals are retained; inspect the marked units below.</strong></p>')
     for index, row in enumerate(report['units']):
         images = ''
         typography_note = ''
         background_note = ''
+        if row.get('render_quality') == 'best_effort':
+            background_note = '<p><strong>BEST-EFFORT replacement — background/art preservation is not guaranteed.</strong></p>'
         if row.get('background_attempts'):
-            background_note = '<ul>'+''.join('<li>'+escape(attempt['method'])+': '+escape(attempt['status'])
+            background_note += '<ul>'+''.join('<li>'+escape(attempt['method'])+': '+escape(attempt['status'])
                 +(' — '+escape(attempt['reason']) if attempt.get('reason') else '')+'</li>'
                 for attempt in row['background_attempts'])+'</ul>'
         if row.get('cleanup_method', '').startswith('inpaint_'):
@@ -329,12 +334,13 @@ def _report_html(report):
     return (head+''.join(rows)+'</html>').encode()
 
 
-def _options(min_size, max_size, max_units, background_method):
+def _options(min_size, max_size, max_units, background_method, render_policy='best-effort'):
     n.integer(min_size, 8, 144)
     n.integer(max_size, min_size, 144)
     if max_units is not None:
         n.integer(max_units, 1, MAX_SLOTS)
     n.require(type(background_method) is str and background_method in ('auto', 'flat'), 'unknown background method')
+    n.require(type(render_policy) is str and render_policy in ('best-effort', 'conservative'), 'unknown rendering policy')
 
 
 def _font(fonts_doc, font_id):
@@ -347,13 +353,13 @@ def _font(fonts_doc, font_id):
     return font_id, available[font_id]
 
 
-def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None):
+def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort'):
     """Check rendering prerequisites before upstream inference, without a preview.
 
     This is not erase permission: run_automatic still validates the complete saved
     preview, source bindings, geometry, typography and actual output pixels.
     """
-    _options(min_size, max_size, max_units, background_method)
+    _options(min_size, max_size, max_units, background_method, render_policy)
     image, fonts = Path(image).absolute(), Path(fonts).absolute()
     content = n.read_explicit(image, 32*1024*1024)
     font_manifest = n.read_explicit(fonts, 256*1024)
@@ -369,16 +375,16 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
                 'size': list(rgb.size)}
     selected, _ = _font(n.document(font_manifest), font_id)
     n.require(n.features.check_feature('raqm'), 'RAQM unavailable')
-    checked = {'source': source, 'fonts_sha256': n.digest(font_manifest), 'font_id': selected}
+    checked = {'source': source, 'fonts_sha256': n.digest(font_manifest), 'font_id': selected, 'render_policy': render_policy}
     if text_mask_model is not None:
         from . import segmentation
         checked['text_mask_model'] = segmentation.model_spec(text_mask_model)
     return checked
 
 
-def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None):
+def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort'):
     """All current strict translated candidates, with explicit machine skip states."""
-    _options(min_size, max_size, max_units, background_method)
+    _options(min_size, max_size, max_units, background_method, render_policy)
     from . import restoration
     model_spec = None
     if text_mask_model is not None:
@@ -404,6 +410,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     report = {'schema_version': 1, 'purpose': 'automatic_candidate_output',
         'policy': POLICY if background_method == 'flat' else 'automatic_flat_then_classical_v1',
         'background_method': background_method,
+        'render_policy': render_policy,
         'selection_method': 'all current strict translated candidates in saved order; machine geometric/typographic checks',
         'operator_confirmation': None, 'linguistic_approval': 'not_assessed', 'approved_export': False,
         'source': source, 'preview_sha256': n.digest(contents[0]), 'fonts_sha256': n.digest(contents[2]),
@@ -494,6 +501,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 raise AutomaticSkip('resource_budget', 'automatic per-job mask/raster-work budget reached')
             attempts += 1
             work += unit_work
+            row['attempted'] = True
             row['background_attempts'] = []
             try:
                 if context_error is not None:
@@ -565,6 +573,109 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 collisions.update((i, j))
     for i in collisions:
         report['units'][i].update(status='skipped', reason_code='region_collision', reason='automatic layout/erasure overlaps another ready unit; both remain original')
+    if render_policy == 'best-effort':
+        from . import best_effort
+        report['conservative_policy'] = report['policy']
+        report['policy'] = 'automatic_coverage_first_v1'
+        reserved = np.zeros((rgb.height, rgb.width), bool)
+        for i in ready:
+            if i not in collisions:
+                reserved |= plans[i].layout | plans[i].erase
+        for i, row in enumerate(report['units']):
+            if row['status'] != 'skipped' or not row.get('attempted') or 'binding' not in row:
+                continue
+            # These are runtime integrity failures, not artistic uncertainty.
+            if row['reason_code'] in ('typography_containment', 'alpha_containment', 'erasure_obstacle', 'runtime_locality'):
+                continue
+            original_failure = {key: row.get(key) for key in ('reason_code', 'reason', 'cleanup_method')}
+            row['best_effort_attempts'] = []
+            existing = plans.get(i)
+            fallback_work = n.LayoutWork()
+            for route in ('reuse', 'native_hint', 'footprint'):
+                reuse = route == 'reuse'
+                if reuse and (existing is None or row['reason_code'] == 'region_collision'
+                              or ((existing.layout | existing.erase) & reserved).any()):
+                    continue
+                try:
+                    if reuse:
+                        plan = existing
+                        method = 'reuse_cleanup_relaxed_typesetting'
+                    elif route == 'native_hint':
+                        extra_work = pixels*len(row['binding']['member_ids'])
+                        n.budget_check(work+extra_work <= MAX_WORK, 'best-effort native raster budget')
+                        work += extra_work
+                        plan = best_effort.native_plan(rgb, raw, row['binding']['member_ids'], reserved=reserved)
+                        method = plan.evidence['cleanup_method']
+                    else:
+                        # Geometry/source checks are reused, not weakened. The
+                        # artistic interpretation of the OCR footprint is weaker.
+                        extra_work = pixels*len(row['binding']['member_ids'])
+                        n.budget_check(work+extra_work <= MAX_WORK, 'best-effort aggregate raster budget')
+                        work += extra_work
+                        if restoration_context is None:
+                            extra_work = pixels*len(raw) if context is None else 0
+                            n.budget_check(work+extra_work <= MAX_WORK, 'best-effort geometry raster budget')
+                            restoration_context = restoration.OriginalGeometry(rgb, raw, geometry=context)
+                            work += extra_work
+                        plan = best_effort.derive_plan(rgb, raw, row['binding']['member_ids'],
+                            context=restoration_context, reserved=reserved, background_method=background_method)
+                        method = plan.evidence['cleanup_method']
+                    check(not (plan.erase & plan.obstacles).any(), 'erasure_obstacle', 'best-effort erasure touches protected output')
+                    background = plan.evidence.get('background_rgb_at_center', plan.background)
+                    n.require(background is not None, 'best-effort contrast estimate unavailable')
+                    light = float(np.dot(background, [.2126, .7152, .0722])) < 128
+                    fill = [255, 255, 255] if light else [0, 0, 0]
+                    fallback_style = {**style, 'fill': fill, 'outline_fill': [255-v for v in fill], 'outline': 1}
+                    try:
+                        layer, provenance, content = best_effort.fit(row['binding']['text'], font_data, coverage,
+                            Image.fromarray(plan.layout.astype(np.uint8)*255), fallback_style, work=fallback_work)
+                    except ValueError as error:
+                        if route != 'footprint' or isinstance(error, n.ResourceLimit) or not str(error).startswith('overflow:'):
+                            raise
+                        plan = best_effort.overlay_plan(plan)
+                        row['best_effort_attempts'].append({'method': 'source_local_art_overlay', 'status': 'attempted'})
+                        layer, provenance, content = best_effort.fit(row['binding']['text'], font_data, coverage,
+                            Image.fromarray(plan.layout.astype(np.uint8)*255), fallback_style, work=fallback_work)
+                    box = layer.getchannel('A').getbbox()
+                    check(box is not None, 'empty_alpha', 'best-effort text has no raster alpha')
+                    alpha = np.asarray(layer.getchannel('A')) != 0
+                    check(not (alpha & (~plan.layout | plan.obstacles | reserved)).any(),
+                          'alpha_containment', 'best-effort alpha leaves declared local overlay support')
+                    plate_pixels = np.asarray(rgb).copy()
+                    apply_cleanup(plate_pixels, plan)
+                    plate = Image.fromarray(plate_pixels)
+                    composed = Image.alpha_composite(plate.convert('RGBA'), layer).convert('RGB')
+                    audit = n.pixel_audit(rgb, plate, composed, plan.erase, alpha, plan.obstacles)
+                    n.verify_pixel_audit(audit)
+                    plans[i], content_masks[i], tiles[i] = plan, content, (layer.crop(box), box[:2])
+                    if not reuse:
+                        row.pop('text_mask_method', None)
+                    provenance['typography']['content_mask_artifact'] = f'unit-{i:03d}-content-mask.png'
+                    row['best_effort_attempts'].append({'method': method, 'status': 'planned'})
+                    row.update(status='ready', reason_code=None, reason=None, render_quality='best_effort',
+                        cleanup_method=row.get('cleanup_method') if reuse else method,
+                        text_contrast={'fill': fill, 'outline_fill': [255-v for v in fill],
+                            'background_luminance_estimate': float(np.dot(background, [.2126, .7152, .0722]))},
+                        layout=provenance, mask_evidence=plan.evidence, candidate_pixel_audit=audit,
+                        candidate_audit_scope='isolated best-effort proposal; final global audit describes committed pixels',
+                        outside_content_alpha_pixels=0,
+                        best_effort={'original_failure': original_failure, 'reused_cleanup': reuse,
+                            'warnings': (['Typography relaxed; exact text preserved.'] if reuse else plan.evidence['warnings'])
+                                +(['Font size is below the requested minimum.'] if provenance['typography']['below_requested_minimum'] else [])})
+                    if i not in ready:
+                        ready.append(i)
+                    collisions.discard(i)
+                    reserved |= plan.layout | plan.erase
+                    break
+                except (ValueError, OSError, KeyError, TypeError) as error:
+                    row['best_effort_attempts'].append({'method': {'reuse': 'reuse_cleanup', 'native_hint': 'native_contrast_hint',
+                        'footprint': 'ocr_footprint_replacement'}[route],
+                        'status': 'failed', 'reason_code': getattr(error, 'code', 'validation'), 'reason': str(error)})
+                    if isinstance(error, n.ResourceLimit) and (work+pixels*len(row['binding']['member_ids']) > MAX_WORK
+                            or fallback_work.rasterized_pixels >= 64_000_000
+                            or fallback_work.search['measures'] >= 65536
+                            or fallback_work.search['transitions'] >= 1_000_000):
+                        break
     erase_union = np.zeros((rgb.height, rgb.width), bool)
     alpha_union = np.zeros_like(erase_union)
     layout_union = np.zeros_like(erase_union)
@@ -614,10 +725,16 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     report['coverage'] = {'saved_units': len(report['units']), 'strict_eligible': eligible, 'attempted': attempts,
         'rendered': rendered, 'skipped': len(report['units'])-rendered, 'partial_output': rendered < len(report['units']),
         'strict_coverage_fraction': rendered/eligible if eligible else None, 'has_rendered_output': bool(rendered)}
+    best_count = sum(row['status'] == 'automatic_composed' and row.get('render_quality') == 'best_effort'
+                     for row in report['units'])
+    report['quality_summary'] = {'conservative_rendered': rendered-best_count, 'best_effort_rendered': best_count,
+        'has_degraded_output': bool(best_count), 'best_effort_artwork_preservation': 'not_guaranteed' if best_count else 'not_used'}
     report['background_summary'] = {'flat_rendered': sum(row['status'] == 'automatic_composed'
             and row.get('cleanup_method') in ('flat_fill', 'flat_fill_semantic') for row in report['units']),
         'restored_rendered': sum(row['status'] == 'automatic_composed'
             and row.get('cleanup_method', '').startswith('inpaint_') for row in report['units']),
+        'best_effort_cleanup_rendered': sum(row['status'] == 'automatic_composed'
+            and row.get('cleanup_method', '').startswith('best_effort_') for row in report['units']),
         'restoration_attempted': sum(any(attempt['method'] == 'classical_inpaint'
              for attempt in row.get('background_attempts', [])) for row in report['units'])}
     if model_spec is not None:

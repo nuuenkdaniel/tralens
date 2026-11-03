@@ -171,7 +171,7 @@ class TypographyContainmentTests(unittest.TestCase):
             return layer, meta, content
         with patch.object(t, 'layout_dialogue', side_effect=outside_margin):
             report = a.run_automatic(preview=fixture.root/'preview.json', image=fixture.image,
-                fonts=fixture.root/'fonts.json', output=fixture.root/'render', min_size=14, max_size=28)
+                fonts=fixture.root/'fonts.json', output=fixture.root/'render', min_size=14, max_size=28, render_policy='conservative')
         self.assertEqual(report['coverage']['rendered'], 0)
         selected = next(row for row in report['units'] if row['machine_selected'])
         self.assertEqual(selected['reason_code'], 'typography_containment')
@@ -278,7 +278,7 @@ class SavedTypographyTests(unittest.TestCase):
             output = Path(directory)/'render'
             after = a.run_automatic(preview=root/'test-results/workflow-fragments-priority-parent-v1/preview.json',
                 image=root/'images/ubunchu-ja-test/ubunchu01_04.png',
-                fonts=root/'test-results/render-parent-input-v1/fonts.json', output=output)
+                fonts=root/'test-results/render-parent-input-v1/fonts.json', output=output, render_policy='conservative')
             self.assertEqual(after['coverage']['rendered'], 6)
             self.assertEqual(after['coverage'], before['coverage'])
             for key in ('source', 'preview_sha256', 'fonts_sha256'):

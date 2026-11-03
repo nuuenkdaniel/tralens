@@ -26,6 +26,8 @@ def main(argv=None):
                         help='auto-compose: flat fill then classical restoration (default auto); flat disables restoration')
     parser.add_argument('--text-mask-model', type=Path,
                         help='auto-compose: optional acquired CTD ONNX for native-mask/periodic fallback; no download')
+    parser.add_argument('--render-policy', choices=('best-effort', 'conservative'),
+                        help='auto-compose: default best-effort attempts risk-labelled replacements; conservative preserves uncertain source')
     for name in ('min-size', 'max-size', 'clearance', 'member-padding', 'glyph-padding', 'layout-inset'):
         parser.add_argument('--'+name, type=int)
     args = parser.parse_args(argv)
@@ -43,10 +45,12 @@ def main(argv=None):
             report = run_automatic(preview=args.preview, image=args.image, fonts=args.fonts, output=args.output,
                 font_id=args.font_id, min_size=16 if args.min_size is None else args.min_size,
                 max_size=28 if args.max_size is None else args.max_size, max_units=args.max_units,
-                background_method=args.background_method or 'auto', text_mask_model=args.text_mask_model)
+                background_method=args.background_method or 'auto', text_mask_model=args.text_mask_model,
+                render_policy=args.render_policy or 'best-effort')
         except (ValueError, OSError, KeyError, TypeError) as error:
             parser.exit(2, f'automatic render rejected: {error}\n')
         print(f"Automatic candidate output: {report['coverage']['rendered']}/{report['coverage']['strict_eligible']} strict candidates rendered; "
+              f"{report['quality_summary']['best_effort_rendered']} best-effort; "
               f"{report['coverage']['skipped']} saved units skipped; {args.output}/review.html; no human approval")
         return 0
     if args.max_units is not None:
@@ -55,6 +59,8 @@ def main(argv=None):
         parser.error('--background-method requires auto-compose')
     if args.text_mask_model is not None:
         parser.error('--text-mask-model requires auto-compose')
+    if args.render_policy is not None:
+        parser.error('--render-policy requires auto-compose')
     if args.mode in ('prepare', 'confirm-preparation'):
         if args.output is None or args.selection is not None or args.parent is not None or args.compare or any(
                 getattr(args, k) is not None for k in ('candidate', 'review', 'state', 'note')):

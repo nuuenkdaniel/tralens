@@ -1,5 +1,10 @@
 # Native-component association and phase-locked repair
 
+This records the retained conservative/opt-in methods. The later default
+[coverage-first policy](coverage-first-rendering.md) can attempt explicitly risky
+replacements after these methods fail; `--render-policy conservative` retains this
+record's skip-on-uncertainty behavior.
+
 ## Kept improvements
 
 The first CTD/LaMa feasibility pass showed that learned masks alone are too loose

@@ -10,10 +10,11 @@ from pathlib import Path
 
 
 def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28,
-                 max_units=None, background_method='auto', text_mask_model=None, **preview_options):
+                 max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', **preview_options):
     """Connect the existing OCR/translation preview to automatic rendering.
 
-    No stage policy is relaxed. A fresh job owns preview/ and rendering/ plus a
+    Source/translation bindings stay strict; rendering quality follows the chosen
+    coverage-first or conservative policy. A fresh job owns preview/ and rendering/ plus a
     pipeline.json checkpoint; failures retain evidence, never resume/overwrite.
     OCR factories/providers may be injected through the existing preview API.
     """
@@ -28,11 +29,12 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
 
     rendering_options = dict(image=Path(image).expanduser().absolute(), fonts=Path(fonts).expanduser().absolute(),
         font_id=font_id, min_size=min_size, max_size=max_size, max_units=max_units, background_method=background_method,
-        text_mask_model=text_mask_model)
+        text_mask_model=text_mask_model, render_policy=render_policy)
     checked = preflight_automatic(**rendering_options)
     report = {'schema_version': 1, 'purpose': 'automatic_pipeline_candidate', 'status': 'running',
         'stage': 'preview', 'source': checked['source'], 'fonts_sha256': checked['fonts_sha256'],
         'font_id': checked['font_id'], 'background_method': background_method,
+        'render_policy': render_policy,
         'approved_export': False, 'linguistic_approval': 'not_assessed',
         'full_page_translation_verified': False, 'preview': None,
         'rendering': {'status': 'not_started'}, 'coverage': None, 'error': None}
@@ -87,7 +89,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                 report['rendering'] = {'status': 'complete', 'manifest': 'rendering/manifest.json',
                     'manifest_sha256': fingerprint(output/'rendering/manifest.json'),
                     'composite': 'rendering/composite.png', 'review': 'rendering/review.html',
-                    'coverage': rendered['coverage'], 'background_summary': rendered['background_summary']}
+                    'coverage': rendered['coverage'], 'background_summary': rendered['background_summary'],
+                    'quality_summary': rendered['quality_summary']}
                 report['coverage'].update(rendered=rendered['coverage']['rendered'],
                     render_skip_reasons=dict(Counter(row['reason_code'] for row in rendered['units']
                         if row['machine_selected'] and row['status'] == 'skipped')),
@@ -133,13 +136,15 @@ def main(argv=None):
     parser.add_argument('--render', action='store_true', help='connect OCR/translation to automatic cleanup and rendering')
     parser.add_argument('--fonts', type=Path, help='explicit local licensed font manifest; required with --render')
     parser.add_argument('--font-id', help='global font ID; required if the manifest has multiple faces')
-    parser.add_argument('--min-size', type=int, help='rendering minimum size, default 16; never shrink below it')
+    parser.add_argument('--min-size', type=int, help='preferred rendering minimum, default 16; conservative mode enforces it strictly')
     parser.add_argument('--max-size', type=int, help='rendering maximum size, default 28')
     parser.add_argument('--max-units', type=int, help='optional rendering evaluation cap, 1..16; not a translation budget')
     parser.add_argument('--background-method', choices=('auto', 'flat'),
                         help='render: flat fill then classical restoration (default auto); flat disables restoration')
     parser.add_argument('--text-mask-model', type=Path,
                         help='optional acquired CTD ONNX file: automatic native-mask/periodic fallback; no download')
+    parser.add_argument('--render-policy', choices=('best-effort', 'conservative'),
+                        help='default best-effort: attempt risk-labelled fallback replacements; conservative leaves uncertain regions unchanged')
     args = parser.parse_args(argv)
     if not args.run_local_ocr:
         parser.error("image processing requires explicit --run-local-ocr; no engine was initialized")
@@ -147,7 +152,7 @@ def main(argv=None):
         parser.error("--review-ocr requires --run-local-model; OCR-only performs no image review")
     if args.render and (not args.run_local_model or args.fonts is None):
         parser.error('--render requires --run-local-model and --fonts; no engine was initialized')
-    if not args.render and any(getattr(args, name) is not None for name in ('fonts', 'font_id', 'min_size', 'max_size', 'max_units', 'background_method', 'text_mask_model')):
+    if not args.render and any(getattr(args, name) is not None for name in ('fonts', 'font_id', 'min_size', 'max_size', 'max_units', 'background_method', 'text_mask_model', 'render_policy')):
         parser.error('font/rendering options require --render')
     # Keep help/import and missing opt-in paths free of OCR/provider imports.
     from tralens.translation.workflow import run_preview
@@ -162,7 +167,8 @@ def main(argv=None):
             report = run_pipeline(args.image, args.output, fonts=args.fonts, font_id=args.font_id,
                 min_size=16 if args.min_size is None else args.min_size,
                 max_size=28 if args.max_size is None else args.max_size, max_units=args.max_units,
-                background_method=args.background_method or 'auto', text_mask_model=args.text_mask_model, **preview_options)
+                background_method=args.background_method or 'auto', text_mask_model=args.text_mask_model,
+                render_policy=args.render_policy or 'best-effort', **preview_options)
             coverage = report['coverage'] or {}
             print(f"{report['status']}: {args.output / 'pipeline.json'}; "
                   f"strict translations={coverage.get('strict_translations', 0)}; rendered={coverage.get('rendered', 0)}; "

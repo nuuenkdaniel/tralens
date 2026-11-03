@@ -186,7 +186,7 @@ class SavedIrregularLayoutTests(unittest.TestCase):
             output = Path(temporary)/'render'
             after = a.run_automatic(preview=root/'test-results/workflow-fragments-priority-parent-v1/preview.json',
                 image=root/'images/ubunchu-ja-test/ubunchu01_04.png',
-                fonts=root/'test-results/render-parent-input-v1/fonts.json', output=output)
+                fonts=root/'test-results/render-parent-input-v1/fonts.json', output=output, render_policy='conservative')
             self.assertEqual(before['coverage']['rendered'], 5)
             self.assertEqual(after['coverage']['rendered'], 6)
             for key in ('source', 'preview_sha256', 'fonts_sha256'):

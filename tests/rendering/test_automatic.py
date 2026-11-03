@@ -130,6 +130,7 @@ class AutomaticWorkflowTests(unittest.TestCase):
 
     def run_auto(self, name='auto', **options):
         from tralens.rendering.automatic import run_automatic
+        options.setdefault('render_policy', 'conservative')
         return run_automatic(**self.inputs(), output=self.f.root/name, min_size=14, max_size=28, **options)
 
     def make_other_strict(self):
@@ -189,7 +190,7 @@ class AutomaticWorkflowTests(unittest.TestCase):
     def test_overflow_missing_coverage_and_resource_failures_do_not_erase(self):
         from tralens.rendering import automatic as auto
         from tralens.rendering.automatic import run_automatic
-        report = run_automatic(**self.inputs(), output=self.f.root/'overflow', min_size=144, max_size=144)
+        report = run_automatic(**self.inputs(), output=self.f.root/'overflow', min_size=144, max_size=144, render_policy='conservative')
         self.assertEqual(report['coverage']['rendered'], 0)
         self.assertEqual(report['pixel_audit']['clean_changed_pixels'], 0)
         actual_loader = n.load_fonts

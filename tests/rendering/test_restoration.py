@@ -211,6 +211,7 @@ class AutomaticRestorationTests(unittest.TestCase):
 
     def run_render(self, name='auto', **options):
         f = self.fixture
+        options.setdefault('render_policy', 'conservative')
         return a.run_automatic(preview=f.root/'preview.json', image=f.image, fonts=f.root/'fonts.json',
             output=f.root/name, min_size=14, max_size=28, **options)
 
@@ -283,7 +284,7 @@ class AutomaticRestorationTests(unittest.TestCase):
             output = f.root/method
             process = subprocess.run([sys.executable, str(tool), 'auto-compose', '--preview', str(f.root/'preview.json'),
                 '--image', str(f.image), '--fonts', str(f.root/'fonts.json'), '--output', str(output),
-                '--background-method', method, '--min-size', '14'], capture_output=True, text=True)
+                '--background-method', method, '--min-size', '14', '--render-policy', 'conservative'], capture_output=True, text=True)
             self.assertEqual(process.returncode, 0, process.stderr)
             report = json.loads((output/'manifest.json').read_text())
             self.assertEqual(report['coverage']['rendered'], count)

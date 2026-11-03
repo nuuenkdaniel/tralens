@@ -49,12 +49,20 @@ Outputs are:
 * `rendering/`: `composite.png`, original/clean/text layers, masks, `manifest.json`
   and `review.html`, using the existing automatic rendering policy.
 
-Rendering now defaults to `--background-method auto`: flat fill first, then a
+**Replacement now defaults to `--render-policy best-effort`.** After the existing
+methods fail, it tries risk-labelled native/footprint cleanup and relaxed exact-text
+lettering instead of immediately leaving a translated unit unchanged. Edits may
+damage artwork or use smaller type; originals and all layers remain available.
+Use `--render-policy conservative` for the former skip-on-uncertainty policy and
+strict font minimum. See [coverage-first behavior and limits](docs/coverage-first-rendering.md).
+
+Rendering uses `--background-method auto`: flat fill first, then a
 separately validated classical-inpainting fallback for remaining strict translated
 candidates. No per-region manual selection is needed. `--background-method flat`
-preserves white/off-white-only behavior without the learned-model opt-in below. This option is also available on the
-standalone `auto-compose` command. Unsupported/missing translations or uncertain
-text-versus-art masks remain explicit skips, not guessed replacements.
+preserves white/off-white-only behavior in conservative mode without the learned-model opt-in below. This option is also available on the
+standalone `auto-compose` command. Missing source-bound full translations remain
+explicit skips. Uncertain masks/backgrounds now receive a marked best-effort
+attempt by default; they still skip under `--render-policy conservative`.
 
 Image format/dimensions, fonts/licenses, shaping availability and rendering options
 are checked **before OCR**. The pipeline uses the renderer's narrower limit of
@@ -1264,7 +1272,7 @@ src/tralens/
                 recognition_units.py, transcription_selection.py, automatic_units.py,
                 automatic_evidence.py, automatic_recognition.py, manga_adapter.py
   translation/  contracts.py, workflow.py, runtime.py, ocr_review.py, translator.py
-  rendering/    automatic.py, restoration.py, segmentation.py, typography.py, natural.py, preparation.py,
+  rendering/    automatic.py, best_effort.py, restoration.py, segmentation.py, typography.py, natural.py, preparation.py,
                 review.py, styles.py, renderer.py
 src/main.py     preview CLI and optional end-to-end rendering coordinator
 tools/          standalone OCR/translation/rendering diagnostics

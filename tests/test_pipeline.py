@@ -43,7 +43,7 @@ class PipelineTests(unittest.TestCase):
     def run_pipeline(self, name='job', **options):
         kwargs = dict(fonts=self.fonts, device='cpu', model_root=self.fixture.weights,
             run_local_ocr=True, run_local_model=True, ocr_factory=self.fixture.factory,
-            runtime=SimpleNamespace(generate=self.provider))
+            runtime=SimpleNamespace(generate=self.provider), render_policy='conservative')
         kwargs.update(options)
         with patch('socket.socket', side_effect=AssertionError('no live network')):
             return main.run_pipeline(self.fixture.image, self.root/name, **kwargs)
@@ -93,6 +93,20 @@ class PipelineTests(unittest.TestCase):
             self.run_pipeline(text_mask_model=invalid)
         self.provider.assert_not_called()
         self.fixture.engine.ocr.close.assert_not_called()
+        self.assertFalse((self.root/'job').exists())
+
+    def test_best_effort_recovers_layout_failure_without_more_translation_calls(self):
+        report = self.run_pipeline(render_policy='best-effort', min_size=144, max_size=144)
+        self.assertEqual(report['coverage']['rendered'], 2)
+        self.assertEqual(report['render_policy'], 'best-effort')
+        self.assertEqual(report['rendering']['quality_summary']['best_effort_rendered'], 2)
+        self.assertEqual(self.provider.call_count, 2)
+        self.assertFalse(report['approved_export'])
+
+    def test_invalid_render_policy_is_rejected_before_upstream_calls(self):
+        with self.assertRaisesRegex(ValueError, 'policy'):
+            self.run_pipeline(render_policy='unknown')
+        self.provider.assert_not_called()
         self.assertFalse((self.root/'job').exists())
 
     def test_restoration_is_automatic_in_the_main_pipeline_and_can_be_disabled(self):

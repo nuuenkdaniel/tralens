@@ -158,7 +158,7 @@ def render_saved(preview, image, fonts, raw_path, output, expected_raw_sha, expe
             return plan
 
     with patch.object(a, 'derive_plan', derive):
-        report = a.run_automatic(preview=preview, image=image, fonts=fonts, output=output)
+        report = a.run_automatic(preview=preview, image=image, fonts=fonts, output=output, render_policy='conservative')
     report['experimental_mask_trial'] = dict(policy=trial.POLICY, trial_sha256=hashlib.sha256(TRIAL_SOURCE).hexdigest(),
         runner_sha256=hashlib.sha256(RUNNER_SOURCE).hexdigest(), ctd_sha256=CTD_SHA, raw_path=str(raw_path), raw_sha256=sha(raw_path),
         raw_source_sha256=expected_source_sha,
