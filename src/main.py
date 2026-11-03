@@ -9,9 +9,56 @@ import hashlib
 from pathlib import Path
 
 
+def quality_refiner(*, endpoint, model, manga_model):
+    """Coordinate explicit OCR readers; algorithms/evidence stay in the OCR stage."""
+    path = Path(manga_model).expanduser().resolve(strict=True)
+    required = ('config.json', 'preprocessor_config.json', 'pytorch_model.bin', 'vocab.txt',
+                'special_tokens_map.json', 'tokenizer_config.json')
+    if not path.is_dir() or any(not (path / name).is_file() for name in required):
+        raise ValueError('quality reread needs the complete existing local Manga OCR snapshot; no downloads')
+    if any((path / name).stat().st_size > 512*1024*1024 for name in required):
+        raise ValueError('quality reread local model artifact exceeds the explicit byte budget')
+    from tralens.translation.runtime import local_endpoint
+    endpoint = local_endpoint(endpoint)
+    def refine(engine, *, output):
+        from io import BytesIO
+        from importlib.metadata import version
+        import json
+        from PIL import Image
+        from tralens.ocr import quality_reread
+        from tralens.ocr.manga_adapter import MangaOCRAdapter
+        from tralens.translation.runtime import OllamaRuntime
+        if not engine.automatic_unit_proposals or engine.automatic_unit_proposals[0] is None:
+            return
+        original = Path(engine.image_path).read_bytes()
+        identity = json.dumps({'vision': model, 'vision_identity': 'configured installed tag, not authenticated weights',
+            'manga_snapshot': str(path), 'manga_artifact_sha256': {
+                name: hashlib.sha256((path / name).read_bytes()).hexdigest() for name in required},
+            'manga_runtime': {name: version(name) for name in ('manga-ocr', 'transformers', 'torch')}}, sort_keys=True)
+        manga = MangaOCRAdapter(path)
+        provider = OllamaRuntime(endpoint)
+        try:
+            with Image.open(BytesIO(original)) as source:
+                quality_reread.refine(engine, source.convert('RGB'), original,
+                    vision=lambda payload: provider.generate(model=model, payload=payload, timeout=120),
+                    manga=manga, model_identity=identity, output=output)
+        finally:
+            stage = getattr(engine, 'quality_rereads', {})
+            if stage.get('vision_calls', 0):
+                try:
+                    stage['reviewer_release'] = provider.unload(model=model, timeout=30)
+                except Exception as error:
+                    stage['reviewer_release'] = {'status': 'failed', 'error': type(error).__name__+': '+str(error)[:512]}
+                    raise
+            elif stage:
+                stage['reviewer_release'] = {'status': 'not_dispatched_no_vision_calls'}
+    return refine
+
+
 def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28,
                  max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort',
-                 replacement_policy='all', min_ocr_confidence=None, **preview_options):
+                 replacement_policy='all', min_ocr_confidence=None, quality_reread=False,
+                 reread_model='qwen3.8:latest', manga_reread_model=None, **preview_options):
     """Connect the existing OCR/translation preview to automatic rendering.
 
     Source/translation bindings stay strict; rendering quality follows the chosen
@@ -30,6 +77,17 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
     from tralens.translation.coverage import validate_policy
 
     translation_policy = validate_policy(preview_options.get('translation_policy', 'coverage-first'))
+    if type(quality_reread) is not bool or (not quality_reread and manga_reread_model is not None):
+        raise ValueError('quality reread requires explicit enablement and existing local model assets')
+    if quality_reread:
+        if manga_reread_model is None or translation_policy != 'coverage-first':
+            raise ValueError('quality reread requires explicit local Manga OCR snapshot and coverage-first translation')
+        from tralens.translation.ocr_review import validate_options
+        validate_options(True, reread_model, preview_options.get('model', 'translategemma:27b'), 8, 120, True)
+        if 'ocr_refine' in preview_options:
+            raise ValueError('choose the built-in quality refiner or an injected refinement callback')
+        preview_options['ocr_refine'] = quality_refiner(endpoint=preview_options.get('endpoint', 'http://127.0.0.1:11434'),
+            model=reread_model, manga_model=manga_reread_model)
 
     rendering_options = dict(image=Path(image).expanduser().absolute(), fonts=Path(fonts).expanduser().absolute(),
         font_id=font_id, min_size=min_size, max_size=max_size, max_units=max_units, background_method=background_method,
@@ -49,6 +107,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         report['text_mask_model'] = checked['text_mask_model']
     if 'replacement_policy' in checked:
         report['replacement_policy'] = checked['replacement_policy']
+    if quality_reread:
+        report['quality_reread'] = {'enabled': True, 'model': reread_model, 'truth_approval': False}
     output.mkdir(mode=0o700)
     checkpoint = output/'pipeline.json'
     _atomic_json(checkpoint, report)
@@ -167,6 +227,10 @@ def main(argv=None):
                         help='render: optional experimental OCR/native-cleanup confidence gate; translation coverage is unchanged')
     parser.add_argument('--min-ocr-confidence', type=float,
                         help='confidence-gated render: weakest raw main-line score 0..1; provisional default 0.70, not an accuracy probability')
+    parser.add_argument('--quality-reread', action='store_true',
+                        help='render: opt-in enclosed terminal grouping and paired visual/line OCR rereads; original readings retained')
+    parser.add_argument('--reread-model', default='qwen3.8:latest', help='existing local vision model for quality rereads; never downloaded')
+    parser.add_argument('--manga-reread-model', type=Path, help='existing local Manga OCR snapshot, required with --quality-reread')
     args = parser.parse_args(argv)
     if not args.run_local_ocr:
         parser.error("image processing requires explicit --run-local-ocr; no engine was initialized")
@@ -174,6 +238,8 @@ def main(argv=None):
         parser.error("--review-ocr requires --run-local-model; OCR-only performs no image review")
     if args.render and (not args.run_local_model or args.fonts is None):
         parser.error('--render requires --run-local-model and --fonts; no engine was initialized')
+    if not args.render and (args.quality_reread or args.manga_reread_model is not None):
+        parser.error('quality reread options require --render')
     if not args.render and any(getattr(args, name) is not None for name in ('fonts', 'font_id', 'min_size', 'max_size', 'max_units', 'background_method', 'text_mask_model', 'render_policy', 'replacement_policy', 'min_ocr_confidence')):
         parser.error('font/rendering options require --render')
     # Keep help/import and missing opt-in paths free of OCR/provider imports.
@@ -192,7 +258,8 @@ def main(argv=None):
                 max_size=28 if args.max_size is None else args.max_size, max_units=args.max_units,
                 background_method=args.background_method or 'auto', text_mask_model=args.text_mask_model,
                 render_policy=args.render_policy or 'best-effort', replacement_policy=args.replacement_policy or 'all',
-                min_ocr_confidence=args.min_ocr_confidence, **preview_options)
+                min_ocr_confidence=args.min_ocr_confidence, quality_reread=args.quality_reread,
+                reread_model=args.reread_model, manga_reread_model=args.manga_reread_model, **preview_options)
             coverage = report['coverage'] or {}
             print(f"{report['status']}: {args.output / 'pipeline.json'}; "
                   f"strict translations={coverage.get('strict_translations', 0)}; rendered={coverage.get('rendered', 0)}; "

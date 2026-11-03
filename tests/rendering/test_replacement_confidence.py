@@ -147,6 +147,26 @@ class ReplacementConfidenceTests(unittest.TestCase):
         n.verify_pixel_audit(report['pixel_audit'])
         self.assertEqual(self.f.image.read_bytes(), before)
 
+    def test_shared_blank_layout_can_be_trimmed_without_changing_any_stroke(self):
+        with Image.open(self.f.image) as source:
+            plan = a.derive_plan(source, json.loads(n.canonical(self.f.preview['ocr']['raw_detections'][0])), list(self.unit.member_ids))
+        reserved = np.zeros_like(plan.erase)
+        candidates = plan.layout & ~plan.erase
+        y, x = np.argwhere(candidates)[0]
+        reserved[y, x] = True
+        trimmed = a.reserve_layout(plan, reserved)
+        self.assertFalse((trimmed.layout & reserved).any())
+        self.assertTrue(trimmed.obstacles[y, x])
+        self.assertTrue(np.array_equal(plan.erase, trimmed.erase))
+        self.assertTrue(np.array_equal(plan.foreground, trimmed.foreground))
+        self.assertEqual(trimmed.evidence['layout_reservation']['cleanup_pixels_discarded'], 0)
+
+    def test_reservation_never_clips_erase_to_force_a_fit(self):
+        with Image.open(self.f.image) as source:
+            plan = a.derive_plan(source, json.loads(n.canonical(self.f.preview['ocr']['raw_detections'][0])), list(self.unit.member_ids))
+        with self.assertRaises(a.AutomaticSkip):
+            a.reserve_layout(plan, plan.erase.copy())
+
 
 class ConfidencePipelineTests(unittest.TestCase):
     def setUp(self):

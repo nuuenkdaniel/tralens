@@ -20,7 +20,8 @@ WAIVABLE = frozenset({'unknown_region_ownership', 'mixed_region_ownership', 'unk
                      'crop_isolation_unresolved', 'unsafe_crop'})
 INFORMATIONAL_STRUCTURE = frozenset({'automatic_not_human_reviewed', 'complementary_component_ownership',
     'annotation_crosses_original_boundary', 'annotation_geometry_crosses_distinct_regions',
-    'original_glyph_scale_not_smaller_than_main', 'original_glyph_flow_inconsistent_with_reading_annotation'})
+    'original_glyph_scale_not_smaller_than_main', 'original_glyph_flow_inconsistent_with_reading_annotation',
+    'automatic_terminal_row_hypothesis'})
 
 
 def validate_policy(policy):
@@ -89,21 +90,31 @@ def rejection_reasons(unit):
     return tuple(dict.fromkeys(reasons))
 
 
-def provenance(unit):
-    return dict(policy=POLICY, input_kind=KIND, original_unit_revision=unit.revision,
+def provenance(unit, reading_revision=None):
+    result = dict(policy=POLICY, input_kind=KIND, original_unit_revision=unit.revision,
         source_reading_revision=unit.selected_revision, source_ids=list(unit.member_ids),
         waived_blocking_reasons=list(unit.blocking_reasons),
         complete_utterance_claimed=False, source_readability_verified=False,
         scope='exact raw main text; no crop/image input or source correction; best-effort local replacement only')
+    if reading_revision is not None:
+        from ..ocr.quality_reread import preferred_reading, POLICY as reread_policy
+        candidate = preferred_reading(unit)
+        if candidate is None or candidate.revision != reading_revision:
+            raise ValueError('reread selection is not the exact corroborated source-bound candidate')
+        result.update(reread_selected_revision=reading_revision, reread_policy=reread_policy,
+            scope='exact unverified paired-reread candidate; original raw reading retained; no source truth or erasure certification')
+    return result
 
 
-def derive(unit):
+def derive(unit, reading_revision=None):
     rejected = rejection_reasons(unit)
     if rejected:
         raise ValueError('coverage input rejected: '+', '.join(rejected))
+    bound = provenance(unit, reading_revision)
     return replace(unit, blocked_reasons=(), completeness=COMPLETENESS,
+        selected_revision=reading_revision or unit.selected_revision,
         lexical_reasons=tuple(dict.fromkeys(unit.lexical_reasons+('coverage_spatial_uncertainty',))),
-        evidence_revision=revision(provenance(unit)))
+        evidence_revision=revision(bound))
 
 
 def priority(unit):
@@ -116,12 +127,13 @@ def priority(unit):
 
 def bound_result(record, original):
     """Re-derive every permission/binding from the unchanged original utterance."""
-    derived = derive(original)
+    reading_revision = record.get('coverage', {}).get('reread_selected_revision')
+    derived = derive(original, reading_revision)
     request = TranslationRequest((derived,), (derived.unit_id,))
     if (record.get('input_kind') != KIND or record.get('status') != 'preview'
             or record.get('binding_current') is not True or record.get('unit_revision') != original.revision
             or canonical(record.get('unit')) != canonical(asdict(original))
-            or canonical(record.get('coverage')) != canonical(provenance(original))
+            or canonical(record.get('coverage')) != canonical(provenance(original, reading_revision))
             or canonical(record.get('translation_input')) != canonical(asdict(derived))
             or canonical(record.get('request')) != canonical(asdict(request))
             or record.get('request_revision') != request.revision):
@@ -139,6 +151,9 @@ def bound_result(record, original):
             or metadata.get('complete_utterance_claimed') is not False
             or metadata.get('source_readability_verified') is not False):
         raise ValueError('coverage replacement requires an explicitly uncertain bound translation')
-    return dict(unit_id=original.unit_id, member_ids=list(original.member_ids), order=list(original.order),
+    binding = dict(unit_id=original.unit_id, member_ids=list(original.member_ids), order=list(original.order),
         unit_revision=original.revision, request_revision=request.revision,
         result_sha256=revision(record['result']), text=result.translations[0][1], input_kind=KIND)
+    if reading_revision is not None:
+        binding['reread_selected_revision'] = reading_revision
+    return binding

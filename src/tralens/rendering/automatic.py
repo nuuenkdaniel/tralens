@@ -3,7 +3,7 @@
 Flat fill first; bounded classical restoration is a separate automatic fallback.
 No semantic balloon partition, human approval, model/provider or font lookup.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 import html
 import json
@@ -107,6 +107,24 @@ def apply_cleanup(pixels, plan):
         n.require(plan.restored_pixels.dtype == np.uint8
             and plan.restored_pixels.shape == (int(plan.erase.sum()), 3), 'restoration sample shape/type mismatch')
         pixels[plan.erase] = plan.restored_pixels
+
+
+def reserve_layout(plan, reserved):
+    """Trim only unused layout space; never clip a stroke or cleanup permission.
+
+    A neighboring accepted output can reserve whitespace shared by two local
+    layout windows. Rejecting that overlap needlessly forces coarse cleanup.
+    Keep the complete native erase/foreground and protect every reserved pixel.
+    Actual exact-glyph fitting still decides whether the remaining space works.
+    """
+    check(not (plan.erase & reserved).any(), 'region_collision', 'native cleanup touches accepted output')
+    layout = plan.layout & ~reserved
+    check(layout.any(), 'region_collision', 'no native layout space remains outside accepted output')
+    evidence = {**plan.evidence, 'layout_reservation': {
+        'method': 'subtract_reserved_layout_only', 'original_layout_pixels': int(plan.layout.sum()),
+        'retained_layout_pixels': int(layout.sum()), 'cleanup_pixels_discarded': 0,
+        'source_foreground_discarded': 0, 'scope': 'layout support only, not new erase permission'}}
+    return replace(plan, layout=layout, obstacles=plan.obstacles | reserved, evidence=evidence)
 
 
 def grow_rectangle(safe, seed, window):
@@ -302,7 +320,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', '../translation/coverage.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', '../translation/coverage.py', '../translation/contracts.py', '../ocr/quality_reread.py')})
 
 
 def _report_html(report):
@@ -552,7 +570,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             if max_units is not None and eligible+coverage_eligible > max_units:
                 raise AutomaticSkip('evaluation_cap', 'explicit evaluation cap reached; candidate preserved, not rendered')
             if confidence_settings is not None:
-                assessment = rc.assess_source(unit, binding['text'], confidence_settings['minimum_main_line_score'])
+                confidence_unit = tc.derive(unit, binding['reread_selected_revision']) if binding.get('reread_selected_revision') else unit
+                assessment = rc.assess_source(confidence_unit, binding['text'], confidence_settings['minimum_main_line_score'])
                 row['replacement_confidence'] = assessment
                 if not assessment['allowed']:
                     raise AutomaticSkip(assessment['reason_code'], assessment['reason'])
@@ -692,6 +711,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                             raise n.ResourceLimit(context_error)
                         plan = derive_plan(rgb, raw, row['binding']['member_ids'], context=context)
                         method = 'flat_fill_uncertain_region'
+                        if confidence_settings is not None:
+                            plan = reserve_layout(plan, reserved)
                         check(not ((plan.layout | plan.erase) & reserved).any(), 'region_collision', 'uncertain region touches reserved strict output')
                     elif reuse:
                         plan = existing
@@ -700,7 +721,10 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                         extra_work = pixels*len(row['binding']['member_ids'])
                         n.budget_check(work+extra_work <= MAX_WORK, 'best-effort native raster budget')
                         work += extra_work
-                        plan = best_effort.native_plan(rgb, raw, row['binding']['member_ids'], reserved=reserved)
+                        plan = best_effort.native_plan(rgb, raw, row['binding']['member_ids'],
+                            reserved=None if confidence_settings is not None else reserved)
+                        if confidence_settings is not None:
+                            plan = reserve_layout(plan, reserved)
                         method = plan.evidence['cleanup_method']
                     else:
                         # Geometry/source checks are reused, not weakened. The

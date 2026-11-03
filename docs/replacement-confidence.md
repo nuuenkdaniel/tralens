@@ -5,6 +5,12 @@ translation filter. Default `all` retains the existing best-effort behavior.
 Coverage-first translation, original OCR records, source bindings, exact targets,
 alternatives and saved intermediate layers are unchanged.
 
+Later development adds [paired quality rereads and layout reservation](ocr-rendering-quality-iterations.md).
+That separately enabled route can use a corroborated **unscored** reread without
+inheriting Paddle's numeric confidence. Its image edits still require native
+cleanup and readable fitting; agreement is not semantic approval. The figures
+below describe the initial raw-reading confidence checkpoint, not those later runs.
+
 The policy uses the minimum bound raw **main-line** OCR score, not a mean that can
 hide a bad line. Only raw readings can use those scores; other recognizer readings
 do not inherit Paddle confidence. Missing, malformed or out-of-range scores defer

@@ -6,6 +6,7 @@ cleanup support and requested-size lettering are separate requirements. No text,
 script, source ID, visual-review label or expected word is special-cased here.
 """
 import math
+from dataclasses import replace
 
 from ..translation.contracts import canonical, strict_json
 
@@ -66,6 +67,15 @@ def assess_source(unit, target, minimum):
                         if score >= minimum else 'At least one bound main-line OCR score is below the replacement threshold.'))
         except (ValueError, TypeError, KeyError):
             pass
+    elif unit.selected.origin == 'paired_visual_reread_unverified':
+        from ..ocr.quality_reread import preferred_reading
+        raw = [reading for reading in unit.readings if reading.origin == 'raw_main_reading']
+        if len(raw) == 1:
+            candidate = preferred_reading(replace(unit, selected_revision=raw[0].revision))
+            if candidate is not None and candidate.revision == unit.selected_revision:
+                assessment.update(allowed=True, reason_code=None,
+                    score_kind='unscored paired visual/line reread; no raw Paddle score inherited',
+                    reason='Explicitly enabled, source-bound paired-reader hypothesis; semantic correctness remains unverified.')
     # Exact string identity justifies preserving source pixels, not certifying OCR.
     if assessment['source_target_exact_match']:
         assessment.update(allowed=False, reason_code='replacement_unchanged_text',

@@ -21,7 +21,7 @@ import cv2
 from PIL import Image, ImageDraw, ImageFont, features, __version__ as pillow_version
 
 from ..translation.contracts import (TranslationRequest, TranslationResult, UnitOutcome,
-                                     automatic_units, canonical, revision, strict_json)
+                                      automatic_units, canonical, revision, strict_json, flatten_candidates)
 from .styles import PRESETS, face_metadata, resolve_style
 
 
@@ -643,6 +643,11 @@ def bind(preview, image_path, rgb, image_bytes, preview_bytes, selection, fonts_
             and batch["page"]["image_path"] == source["path"], "foreign batch page")
     candidates = preview["ocr"].get("automatic_recognition_results", [])
     units = automatic_units(batch, candidates[0] if candidates else ())
+    if candidates:
+        from ..ocr.quality_reread import ENGINE as reread_engine, validate_pixels
+        for candidate in flatten_candidates(candidates[0]):
+            if candidate.get('engine') == reread_engine:
+                validate_pixels(candidate, rgb, preview['ocr']['raw_detections'][0])
     records = preview["units"]
     require([r["unit"] for r in records] == [json.loads(canonical(asdict(u))) for u in units], "saved unit/source evidence drift")
     by_id = {r["unit"]["unit_id"]: (r, u) for r, u in zip(records, units)}

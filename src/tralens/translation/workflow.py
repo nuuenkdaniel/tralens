@@ -135,7 +135,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 timeout=120, keep_alive=60, num_predict=1024, selected_ids=(), ocr_factory=None, runtime=None,
                 allow_fragment_previews=False, review_ocr=False, review_model="qwen3.8:latest",
                 max_review_attempts=4, review_timeout=90, review_runtime=None, cancelled=lambda:False,
-                translation_policy='coverage-first'):
+                translation_policy='coverage-first', ocr_refine=None):
     """Injected OCR factory is workflow-owned; an injected translation runtime is caller-owned.
 
     Invalid arguments/paths are rejected before creating any engine. Runtime/engine
@@ -151,6 +151,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
         raise ValueError("allow_fragment_previews must be a boolean")
     if type(review_ocr) is not bool or not callable(cancelled):
         raise ValueError("review_ocr must be a boolean and cancelled must be callable")
+    if ocr_refine is not None and not callable(ocr_refine):
+        raise ValueError('OCR refinement must be an explicit callback')
     if review_ocr and not run_local_model:
         raise ValueError("--review-ocr requires --run-local-model; no image review in OCR-only mode")
     from . import coverage
@@ -257,6 +259,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
             engine = ocr_factory(str(image), device=device, model_root=str(Path(model_root).expanduser()),
                                  model_profile=DEFAULT_PROFILE, enable_manga_ocr=False)
             engine.process_images(propose_units=True, complementary_ownership=True, regroup_companions=True)
+            if ocr_refine is not None:
+                ocr_refine(engine, output=output)
         except Exception as error:
             ocr_error = error
         finally:
@@ -268,7 +272,10 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                         for page in getattr(engine, "raw_detections", ())], "batches": batches,
                         "automatic_recognition_results": recognition,
                         "prediction_contract_reports": getattr(engine, "prediction_contract_reports", ()),
-                        "model_provenance": getattr(engine, "paddle_provenance", {})})
+                         "model_provenance": getattr(engine, "paddle_provenance", {})})
+                    if ocr_refine is not None:
+                        state['ocr']['original_unit_proposals'] = _snapshot(getattr(engine, 'original_unit_proposals', ()))
+                        state['ocr']['quality_rereads'] = _snapshot(getattr(engine, 'quality_rereads', {}))
                     if len(batches) == 1 and batches[0] is not None and len(engine.raw_detections) == 1:
                         raw_bound = snapshot_detections(engine.raw_detections[0], batches[0].page)
                 except Exception as error:
@@ -315,10 +322,15 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
             if unit.disposition == "preview":
                 state["strict_eligible_units"] += 1
             elif translation_policy == 'coverage-first' and not coverage.rejection_reasons(unit):
-                derived = coverage.derive(unit)
+                reading_revision = None
+                if ocr_refine is not None:
+                    from ..ocr.quality_reread import preferred_reading
+                    preferred = preferred_reading(unit)
+                    reading_revision = preferred.revision if preferred is not None else None
+                derived = coverage.derive(unit, reading_revision)
                 request = TranslationRequest((derived,), (derived.unit_id,))
                 record.update(input_kind=coverage.KIND, translation_input=_snapshot(derived),
-                    coverage=coverage.provenance(unit), request=_snapshot(request), request_revision=request.revision,
+                    coverage=coverage.provenance(unit, reading_revision), request=_snapshot(request), request_revision=request.revision,
                     status='not_selected' if selected_ids and unit.unit_id not in selected_ids else 'pending',
                     scheduling={'reason': 'explicit_selected_ids_order' if selected_ids else 'coverage_weak_text_hints',
                         'priority': list(coverage.priority(unit)), 'certifies_readability_or_dialogue': False})

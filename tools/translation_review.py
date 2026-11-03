@@ -461,9 +461,10 @@ def validate(preview, image_path, rgb, image_hash, image_bytes):
             raise ValueError("structurally blocked source cannot become output")
         if is_coverage:
             require(schema == 4 and coverage_policy == 'coverage-first', 'coverage outside policy/schema')
-            derived = coverage.derive(unit)
+            reading_revision = record.get('coverage', {}).get('reread_selected_revision')
+            derived = coverage.derive(unit, reading_revision)
             same(record['translation_input'], asdict(derived), 'coverage input drift')
-            same(record['coverage'], coverage.provenance(unit), 'coverage provenance drift')
+            same(record['coverage'], coverage.provenance(unit, reading_revision), 'coverage provenance drift')
             request = TranslationRequest((derived,), (derived.unit_id,))
             if record['status'] == 'preview':
                 coverage.bound_result(record, unit)

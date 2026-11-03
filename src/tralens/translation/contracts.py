@@ -273,6 +273,25 @@ STRUCTURAL_BLOCKS = frozenset({
 })
 
 
+def flatten_candidates(candidates):
+    """Accept retained per-proposal results or the older flat candidate snapshots."""
+    result = []
+    for candidate in candidates:
+        candidate = strict_json(canonical(asdict(candidate) if is_dataclass(candidate) else candidate))
+        if type(candidate) is dict and 'candidates' in candidate and 'crop' not in candidate:
+            if (type(candidate['candidates']) is not list or type(candidate.get('attempts')) is not int
+                    or candidate.get('attempts') not in (0, 1)
+                    or (candidate['candidates'] and candidate.get('attempts') != 1)):
+                raise ValueError('invalid retained recognition result')
+            for reading in candidate['candidates']:
+                if reading.get('crop', {}).get('proposal_id') != candidate.get('proposal_id'):
+                    raise ValueError('recognition result/candidate proposal drift')
+                result.append(reading)
+        else:
+            result.append(candidate)
+    return result
+
+
 def automatic_units(batch, candidates=()):
     """Snapshot automatic batch/candidates without selecting OCR truth or mutating inputs.
 
@@ -281,7 +300,7 @@ def automatic_units(batch, candidates=()):
     This checks saved evidence consistency, not original pixels or semantic quality.
     """
     batch = strict_json(canonical(asdict(batch) if is_dataclass(batch) else batch))
-    candidates = [strict_json(canonical(asdict(c) if is_dataclass(c) else c)) for c in candidates]
+    candidates = flatten_candidates(candidates)
     batch_revision = revision(batch)
     detections = batch["detections"]
     ids = [d["source_id"] for d in detections]
