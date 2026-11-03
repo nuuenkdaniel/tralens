@@ -46,6 +46,9 @@ class WorkflowTests(unittest.TestCase):
         self.factory = Mock(return_value=self.engine)
 
     def run_flow(self, name="out", **kwargs):
+        # Preserve conservative fragment/visual-review regression coverage.
+        # Coverage-first defaults and scheduling have dedicated tests.
+        kwargs.setdefault('translation_policy', 'conservative')
         return w.run_preview(self.image, self.root / name, device="cpu", model_root=self.weights,
             run_local_ocr=True, ocr_factory=self.factory, **kwargs)
 
@@ -199,7 +202,7 @@ class WorkflowTests(unittest.TestCase):
         self.engine.ocr.close.assert_called_once()
 
     def test_constructor_failure_artifact_and_argument_rejection_before_factory(self):
-        for kwargs in ({"max_attempts": 21}, {"timeout": float("nan")}, {"model": "qwen3.8:latest"},
+        for kwargs in ({"max_attempts": 65}, {"translation_policy": []}, {"timeout": float("nan")}, {"model": "qwen3.8:latest"},
                        {"profile": "generalist"}, {"model": None}, {"endpoint": "http://example.com"}, {"num_predict": 0}):
             with self.assertRaises(ValueError):
                 self.run_flow(**kwargs)

@@ -45,7 +45,8 @@ class _CountedRuntime:
             raise RuntimeError("global model call budget exhausted")
         self.state["attempts"] += 1
         kind = ("alternate_attempts" if self.record.get("input_kind") == "unverified_visual_alternate" else
-                "fragment_attempts" if self.record.get("input_kind") == "unverified_text_fragment" else "strict_attempts")
+                "fragment_attempts" if self.record.get("input_kind") == "unverified_text_fragment" else
+                "coverage_attempts" if self.record.get("input_kind") == "coverage_text_region" else "strict_attempts")
         self.state[kind] = self.state.get(kind,0) + 1
         self.record["attempts_started"] += 1
         return self.provider.generate(**kwargs)
@@ -133,7 +134,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 model="translategemma:27b", profile="translategemma", endpoint="http://127.0.0.1:11434", max_attempts=2,
                 timeout=120, keep_alive=60, num_predict=1024, selected_ids=(), ocr_factory=None, runtime=None,
                 allow_fragment_previews=False, review_ocr=False, review_model="qwen3.8:latest",
-                max_review_attempts=4, review_timeout=90, review_runtime=None, cancelled=lambda:False):
+                max_review_attempts=4, review_timeout=90, review_runtime=None, cancelled=lambda:False,
+                translation_policy='coverage-first'):
     """Injected OCR factory is workflow-owned; an injected translation runtime is caller-owned.
 
     Invalid arguments/paths are rejected before creating any engine. Runtime/engine
@@ -151,8 +153,10 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
         raise ValueError("review_ocr must be a boolean and cancelled must be callable")
     if review_ocr and not run_local_model:
         raise ValueError("--review-ocr requires --run-local-model; no image review in OCR-only mode")
-    if type(max_attempts) is not int or not 0 <= max_attempts <= 20:
-        raise ValueError("max_attempts must be 0..20 globally")
+    from . import coverage
+    coverage.validate_policy(translation_policy)
+    if type(max_attempts) is not int or not 0 <= max_attempts <= coverage.MAX_CALLS:
+        raise ValueError(f"max_attempts must be 0..{coverage.MAX_CALLS} globally")
     if type(timeout) not in (int, float) or not 0 < timeout <= 300:
         raise ValueError("timeout must be finite and 0..300 seconds")
     if (type(selected_ids) is not tuple or any(type(i) is not str or not i for i in selected_ids)
@@ -207,6 +211,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
             "selected_ids": list(selected_ids), "context": "utterance text only; no image sent to translator"},
         "ocr": None, "units": [], "attempts": 0, "strict_attempts": 0, "fragment_attempts": 0,
         "strict_eligible_units": 0, "fragment_candidate_inputs": 0, "cleanup": None, "error": None}
+    state['settings']['translation_policy'] = translation_policy
+    state.update(coverage_attempts=0, coverage_eligible_units=0)
     if allow_fragment_previews:
         state["settings"]["call_order"] = ("selected strict inputs first; explicit fragment selection order"
             if selected_ids else "strict inputs first; automatic singleton fragments Kana/Han hint first, stable within tiers")
@@ -217,6 +223,11 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                                  review_timeout=review_timeout,visual_alternates="unverified proposed readings; original base paths retained")
         state["ocr_review"] = {"endpoint":endpoint,"status":"not_started","attempts":0,"control_calls":0,"units":[]}
         state["alternate_attempts"] = 0
+    if translation_policy == 'coverage-first':
+        state['schema_version'] = 4
+        state['settings']['call_order'] = ('strict inputs first, then source-bound uncertain text regions, then optional fragments; '
+            'explicit selection order within each kind' if selected_ids else
+            'strict inputs first, then uncertain text regions with weak grouped-text/script/length hints, then optional fragments')
     checkpoint = output / "preview.json"
     _atomic_json(checkpoint, state)
 
@@ -303,7 +314,16 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
             if review_ocr: record["visual_alternates"] = []
             if unit.disposition == "preview":
                 state["strict_eligible_units"] += 1
-            elif allow_fragment_previews:
+            elif translation_policy == 'coverage-first' and not coverage.rejection_reasons(unit):
+                derived = coverage.derive(unit)
+                request = TranslationRequest((derived,), (derived.unit_id,))
+                record.update(input_kind=coverage.KIND, translation_input=_snapshot(derived),
+                    coverage=coverage.provenance(unit), request=_snapshot(request), request_revision=request.revision,
+                    status='not_selected' if selected_ids and unit.unit_id not in selected_ids else 'pending',
+                    scheduling={'reason': 'explicit_selected_ids_order' if selected_ids else 'coverage_weak_text_hints',
+                        'priority': list(coverage.priority(unit)), 'certifies_readability_or_dialogue': False})
+                state['coverage_eligible_units'] += 1
+            if unit.disposition == 'blocked' and record['input_kind'] != coverage.KIND and allow_fragment_previews:
                 derived,rejected = fragment_plan(unit,allow_fragment_previews=True)
                 record["fragment_rejection_reasons"] = list(rejected)
                 for fragment in derived:
@@ -316,6 +336,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                         "scheduling":fragment_scheduling_info(fragment.selected.text,explicit_selection=bool(selected_ids)),
                         "binding_current":True,"result":None,"attempts_started":0,"generation_evidence":[]})
                     state["fragment_candidate_inputs"] += 1
+            if translation_policy == 'coverage-first' and unit.disposition == 'blocked' and record['input_kind'] != coverage.KIND:
+                record['coverage_rejection_reasons'] = list(coverage.rejection_reasons(unit))
             state["units"].append(record)
             records[unit.unit_id] = (record, request)
         if not set(selected_ids) <= set(records):
@@ -337,15 +359,20 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                     records[row["unit_id"]][0]["ocr_review"] = row
         state["stage"] = "translation"
         translator = None
-        strict_jobs,fragment_jobs = [],[]
+        strict_jobs,coverage_jobs,fragment_jobs = [],[],[]
         for index,unit_id in enumerate(selected_ids or tuple(records)):
             record,request = records[unit_id]
             if record["status"] != "blocked":
-                strict_jobs.append((record,request,request.units[0],f"unit-{index:03d}",False))
+                original = next(u for u in units if u.unit_id == unit_id)
+                if record['input_kind'] == coverage.KIND:
+                    coverage_jobs.append((record,request,original,f"unit-{index:03d}",'coverage'))
+                else:
+                    strict_jobs.append((record,request,original,f"unit-{index:03d}",False))
             for n,(entry,fragment_request) in enumerate(zip(record["fragment_previews"],fragment_requests[unit_id])):
                 fragment_jobs.append((entry,fragment_request,request.units[0],f"unit-{index:03d}-fragment-{n:02d}",True))
         if not selected_ids:
             fragment_jobs.sort(key=lambda job:job[0]["scheduling"]["priority_tier"])
+            coverage_jobs.sort(key=lambda job:coverage.priority(job[2]))
         if review_ocr:
             strict_alternates,fragment_alternates = [],{}
             for base_record,base_request,original,prefix,is_fragment in strict_jobs+fragment_jobs:
@@ -363,9 +390,10 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
             fragment_jobs = [candidate for job in fragment_jobs
                 for candidate in ([fragment_alternates[job[2].unit_id],job] if job[2].unit_id in fragment_alternates else [job])]
             strict_jobs += strict_alternates
-        if allow_fragment_previews or review_ocr:
+        jobs = strict_jobs+coverage_jobs+fragment_jobs
+        if allow_fragment_previews or review_ocr or translation_policy == 'coverage-first':
             state["input_schedule"] = []
-            for position,(entry,request,original,_,kind) in enumerate(strict_jobs+fragment_jobs,1):
+            for position,(entry,request,original,_,kind) in enumerate(jobs,1):
                 if kind:
                     entry["scheduling"]["planned_position"] = position
                 state["input_schedule"].append({"planned_position":position,"input_kind":entry["input_kind"],
@@ -374,7 +402,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                     "reason":entry["scheduling"]["reason"] if kind else "strict_inputs_first"})
         persist()  # Persist every candidate and planned order before provider entry.
         with (output / "results.jsonl").open("x", encoding="utf-8") as journal:
-            for record,request,original,prefix,kind in strict_jobs+fragment_jobs:
+            for record,request,original,prefix,kind in jobs:
                 is_fragment,is_alternate = kind is True,kind == "alternate"
                 status_prefix = "alternate_" if is_alternate else "fragment_" if is_fragment else ""
                 unit_id = request.target_ids[0]
@@ -442,7 +470,9 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
         for s in sorted({r["status"] for r in state["units"]})}
     fragments = [f for r in state["units"] for f in r["fragment_previews"]]
     state["fragment_status_counts"] = {s:sum(f["status"] == s for f in fragments) for s in sorted({f["status"] for f in fragments})}
-    state["strict_preview_count"] = sum(r["status"] == "preview" for r in state["units"])
+    state["strict_preview_count"] = sum(r["status"] == "preview" and r['input_kind'] == 'strict_utterance' for r in state["units"])
+    state['coverage_preview_count'] = sum(r['status'] == 'preview' and r['input_kind'] == coverage.KIND for r in state['units'])
+    state['translation_preview_count'] = state['strict_preview_count']+state['coverage_preview_count']
     state["fragment_preview_count"] = sum(f["status"] == "fragment_preview" for f in fragments)
     if review_ocr:
         alternates = [a for r in state["units"] for a in r["visual_alternates"]]
