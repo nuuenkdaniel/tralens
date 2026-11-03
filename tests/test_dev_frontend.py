@@ -4,6 +4,7 @@ import http.client
 from io import BytesIO
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -215,6 +216,51 @@ main(['--help'])
             capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('--fonts', result.stdout)
+
+    def test_stage_view_states_never_invent_an_unpublished_page(self):
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('optional local evidence unavailable; Node.js for frontend state checks')
+        script = r'''
+const assert = require('node:assert/strict');
+const {previewStates, progressView, outputReady, missingOutputMessage} = require(process.argv[1]);
+const base = {status: 'running', stage: 'ocr', preview_stage: 'ocr', options: {mode: 'render'},
+  detections: [], units: [], artifacts: [], rendering_coverage: null, error: null};
+assert.equal(previewStates(null, true).original.available, true);
+assert.equal(previewStates(null, true).final.available, false);
+assert.equal(previewStates(base, true).ocr.state, 'running');
+assert.equal(previewStates(base, true).translation.available, false);
+const translating = {...base, stage: 'translation', preview_stage: 'translation',
+  detections: [{source_id: 1}], units: [{status: 'preview', target: 'Hello'}]};
+assert.equal(previewStates(translating).translation.state, 'running');
+assert.equal(progressView(translating), 'translation');
+// The PNG may still be being written: the rendering manifest must be present.
+const pending = {...translating, artifacts: ['run/rendering/composite.png']};
+assert.equal(outputReady(pending, 'final'), false);
+const finished = {...pending, status: 'partial', stage: 'finished', preview_stage: 'finished',
+  rendering_coverage: {rendered: 1, saved_units: 2}};
+assert.equal(outputReady(finished, 'final'), true);
+assert.equal(progressView(finished), 'final');
+assert.equal(previewStates(finished).final.label, '1 replacement');
+const skipped = {...finished, artifacts: [], rendering_coverage: null, units: [],
+  rendering_skipped: 'no_strict_translations'};
+assert.equal(previewStates(skipped).final.state, 'skipped');
+assert.equal(progressView(skipped), 'translation');
+assert.match(missingOutputMessage(skipped, 'final').copy, /No complete, source-bound translations/);
+const ocrOnly = {...finished, artifacts: [], rendering_coverage: null, options: {mode: 'ocr'}};
+assert.equal(previewStates(ocrOnly).translation.state, 'skipped');
+assert.equal(previewStates(ocrOnly).clean.state, 'skipped');
+const failed = {...base, status: 'failed', error: {message: 'OCR failed'}};
+assert.equal(previewStates(failed).ocr.state, 'failed');
+assert.equal(previewStates(failed).translation.state, 'skipped');
+assert.match(missingOutputMessage(failed, 'final').copy, /run stopped/);
+const startupFailed = {...failed, preview_stage: null};
+assert.equal(previewStates(startupFailed).ocr.state, 'skipped');
+assert.equal(previewStates(startupFailed).ocr.label, 'Setup failed');
+assert.equal(previewStates(startupFailed).translation.state, 'skipped');
+'''
+        result = subprocess.run([node, '-e', script, str(s.STATIC/'app.js')], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == '__main__':

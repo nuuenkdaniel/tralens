@@ -15,6 +15,15 @@ Open **http://127.0.0.1:7860**, choose a PNG/JPEG, select how far to run, and cl
 status, then the cleanplate/text/composite layers and masks. Click a unit to
 highlight its source boxes. Blocked, budget-limited and failed units remain visible.
 
+The image-first stage strip lets you switch between **Original → Detected text →
+Translation → Cleaned page → Final**. Each stage has a thumbnail and a large
+preview, with **Compare with original** and **Actual size** controls. Clicking a
+stage pauses automatic following so it stays selected while processing continues.
+Translation is a text-only phase: the source page highlights available previews,
+with the English text alongside it; only Final shows actual replaced lettering.
+Stages without output explain why instead of showing a fake or unchanged final.
+Run settings, masks and raw artifacts are tucked into expandable sections.
+
 The default OCR export root is `~/.cache/tralens/paddle-v6-models`; override with
 `--model-root PATH` if needed. Translation uses the existing local Ollama service
 and `translategemma:27b`; no models are downloaded. Without `--fonts`, OCR and
@@ -41,10 +50,10 @@ path traversal, and accepts only bounded PNG/JPEG uploads (32 MiB, 4M pixels,
 4096px side; opaque source required). Do not expose this Python development server
 as a public upload service. Native engine setup/model failures are shown in the UI.
 
-Verification: 10 offline viewer tests cover HTTP upload through the real pipeline
+Verification: 11 offline viewer tests cover HTTP upload through the real pipeline
 with injected engines/providers, checkpoint visibility, mode dispatch, errors,
 source retention and request/path guards. A headless Firefox smoke test also
-exercised browser file upload, results/layers, unit highlighting and page refresh;
+exercised browser file upload, five stage views, comparison, zoom, highlighting and page refresh;
 it used the same synthetic pipeline fixtures, not live inference.
 
 ## One-command image pipeline
