@@ -5,6 +5,7 @@ Coordinates address source pixels (polygon vertices inclusive); no color managem
 is performed. The RGB fingerprint is distinct from the original file hash.
 """
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from io import BytesIO
 import hashlib
 import html
@@ -345,14 +346,19 @@ class LayoutWork:
     rasterized_pixels: int = 0
 
 
-def layout(text, font_data, coverage, mask, style, *, work=None, line_rank=None):
-    budget_check(mask.mode == "L" and mask.width*mask.height <= MAX_PAGE_PIXELS, "layout page pixel budget")
+def validate_text(text, coverage):
+    """Check exact target support before cleanup backends or layout search."""
     require(type(text) is str and 0 < len(text) <= 1000 and text.strip(), "text budget/blank")
     require(all(c == "\n" or (32 <= ord(c) < 127) or
                 (unicodedata.category(c)[0] in ("L", "M") and
                  ("LATIN" in unicodedata.name(c, "") or unicodedata.category(c)[0] == "M")) or
                 unicodedata.category(c)[0] == "P" for c in text), "baseline English horizontal text only")
     require(all(ord(c) in coverage for c in text if c != "\n"), "missing glyph coverage")
+
+
+def layout(text, font_data, coverage, mask, style, *, work=None, line_rank=None):
+    budget_check(mask.mode == "L" and mask.width*mask.height <= MAX_PAGE_PIXELS, "layout page pixel budget")
+    validate_text(text, coverage)
     require(features.check_feature("raqm"), "RAQM unavailable")
     resolved, approximation = resolve_style(style, face_metadata(font_data))
     lo, hi, stroke = (resolved[k] for k in ("min_size", "max_size", "outline"))
@@ -367,7 +373,10 @@ def layout(text, font_data, coverage, mask, style, *, work=None, line_rank=None)
     search_budget = work.search
     for size in range(hi, lo-1, -1):
         font = ImageFont.truetype(BytesIO(font_data), size, layout_engine=ImageFont.Layout.RAQM)
-        measure = lambda s: probe.textlength(s, font=font, direction="ltr", language="en")
+        # Exact strings at a fixed font size shape identically. Repeated dialogue
+        # can otherwise re-shape thousands of identical indexed segments. Bound
+        # this size-local cache; keep logical search budgets and ordering intact.
+        measure = lru_cache(maxsize=1024)(lambda s: probe.textlength(s, font=font, direction="ltr", language="en"))
         # A retained original space before an inserted newline has advance but
         # no ink. Ignore that blank advance for screening, never in drawn text.
         fit_measure = lambda s: measure(s.rstrip(' '))

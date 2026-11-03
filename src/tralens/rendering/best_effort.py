@@ -152,7 +152,8 @@ def derive_plan(rgb, detections, member_ids, *, context=None, reserved=None, bac
         'candidate_selection': 'bounded seam/color heuristic; not ground-truth reconstruction',
         'layout_scope': layout_scope,
         'warnings': ['Uncertain OCR-footprint erasure may remove artwork or outlines.',
-                     'Background reconstruction and complete source-text removal are unverified.']}
+                     'Background reconstruction and complete source-text removal are unverified.']
+                    +(['Translated lettering may overlay original artwork.'] if np.array_equal(layout, overlay) else [])}
     return AutomaticPlan(full_erase.copy(), full_erase, layout, obstacles, None, evidence,
                          restored_pixels=restored)
 
@@ -185,7 +186,7 @@ def emergency_wrap(text, font_data, width, *, size=MIN_SIZE, outline=1):
             end += 1
         advance = probe.textlength(text[start:end].rstrip(' '), font=font, direction='ltr', language='en')
         if advance > width-2*outline:
-            n.require(index > start, 'one target grapheme cannot fit the best-effort layout')
+            n.require(index > start, 'overflow: one target grapheme cannot fit the best-effort layout')
             offsets.append(index)
             start = index
             continue

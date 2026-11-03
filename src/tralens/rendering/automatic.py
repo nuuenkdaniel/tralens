@@ -469,14 +469,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     'evidence': getattr(error, 'evidence', {})})
         raise original_error
     work, eligible, attempts = pixels*len(raw), 0, 0
-    try:
-        context = OriginalComponents(rgb)
-        n.budget_check(work+pixels*len(raw) <= MAX_WORK, 'automatic source geometry raster work budget')
-        context.bind_geometry(raw)
-        work += pixels*len(raw)
-        context_error = None
-    except n.ResourceLimit as error:
-        context, context_error = None, str(error)
+    context, context_error, context_initialized = None, None, False
     for index, (record, unit) in enumerate(zip(preview_doc['units'], units)):
         saved_result = record.get('result')
         review_needed = saved_result.get('review_needed') if type(saved_result) is dict else None
@@ -496,6 +489,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             eligible += 1
             if max_units is not None and eligible > max_units:
                 raise AutomaticSkip('evaluation_cap', 'explicit evaluation cap reached; candidate preserved, not rendered')
+            n.validate_text(binding['text'], coverage)
             unit_work = pixels*len(binding['member_ids'])
             if attempts >= MAX_SLOTS or (attempts+1)*pixels > n.MAX_UNIT_PIXELS or work+unit_work > MAX_WORK:
                 raise AutomaticSkip('resource_budget', 'automatic per-job mask/raster-work budget reached')
@@ -503,6 +497,15 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             work += unit_work
             row['attempted'] = True
             row['background_attempts'] = []
+            if not context_initialized:
+                context_initialized = True
+                try:
+                    n.budget_check(work+pixels*len(raw) <= MAX_WORK, 'automatic source geometry raster work budget')
+                    context = OriginalComponents(rgb)
+                    context.bind_geometry(raw)
+                    work += pixels*len(raw)
+                except n.ResourceLimit as error:
+                    context, context_error = None, str(error)
             try:
                 if context_error is not None:
                     raise n.ResourceLimit(context_error)
@@ -555,12 +558,17 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             plate = Image.fromarray(plate_pixels, 'RGB')
             composed = Image.alpha_composite(plate.convert('RGBA'), layer).convert('RGB')
             row['candidate_pixel_audit'] = n.pixel_audit(rgb, plate, composed, plan.erase, alpha, plan.obstacles)
-            n.verify_pixel_audit(row['candidate_pixel_audit'])
+            try:
+                n.verify_pixel_audit(row['candidate_pixel_audit'])
+            except ValueError as error:
+                raise AutomaticSkip('runtime_locality', str(error)) from error
             row['candidate_audit_scope'] = 'isolated proposed operation before symmetric collision rejection; final global audit/masks describe committed pixels'
             row.update(status='ready', reason_code=None, reason=None, layout=provenance)
             tiles[index] = (layer.crop(box), box[:2])
         except AutomaticSkip as error:
             row.update(reason_code=error.code, reason=str(error), skip_evidence=error.evidence)
+        except n.ResourceLimit as error:
+            row.update(reason_code='resource_budget', reason=str(error))
         except (ValueError, OSError, KeyError, TypeError) as error:
             row.update(reason_code='source_or_layout_validation', reason=str(error))
     # Symmetric rejection, never reading-order priority or geometric ownership
@@ -646,7 +654,10 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     plate = Image.fromarray(plate_pixels)
                     composed = Image.alpha_composite(plate.convert('RGBA'), layer).convert('RGB')
                     audit = n.pixel_audit(rgb, plate, composed, plan.erase, alpha, plan.obstacles)
-                    n.verify_pixel_audit(audit)
+                    try:
+                        n.verify_pixel_audit(audit)
+                    except ValueError as error:
+                        raise AutomaticSkip('runtime_locality', str(error)) from error
                     plans[i], content_masks[i], tiles[i] = plan, content, (layer.crop(box), box[:2])
                     if not reuse:
                         row.pop('text_mask_method', None)
@@ -671,6 +682,9 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     row['best_effort_attempts'].append({'method': {'reuse': 'reuse_cleanup', 'native_hint': 'native_contrast_hint',
                         'footprint': 'ocr_footprint_replacement'}[route],
                         'status': 'failed', 'reason_code': getattr(error, 'code', 'validation'), 'reason': str(error)})
+                    if isinstance(error, AutomaticSkip) and error.code in ('runtime_locality', 'alpha_containment', 'erasure_obstacle'):
+                        row.update(reason_code=error.code, reason=str(error))
+                        break
                     if isinstance(error, n.ResourceLimit) and (work+pixels*len(row['binding']['member_ids']) > MAX_WORK
                             or fallback_work.rasterized_pixels >= 64_000_000
                             or fallback_work.search['measures'] >= 65536

@@ -1,5 +1,6 @@
 """Coverage-first fallbacks; originals/locality/bindings remain hard requirements."""
 from pathlib import Path
+from dataclasses import asdict
 from types import SimpleNamespace
 import json
 import subprocess
@@ -127,6 +128,21 @@ class BestEffortWorkflowTests(unittest.TestCase):
         self.assertEqual(meta['typography']['probes'][-1]['method'], 'emergency_character_wrap')
         self.assertEqual(layer.size, content.size)
 
+    def test_bounded_measurement_cache_preserves_pixels_offsets_and_logical_budgets(self):
+        data, coverage = n.load_fonts(self.f.fonts)['dialogue']
+        text = 'Repeat this exact sentence. '*5
+        mask = Image.new('L', (320, 180), 255)
+        style = dict(min_size=16, max_size=28, outline=1)
+        original = ImageDraw.ImageDraw.textlength
+        with patch.object(ImageDraw.ImageDraw, 'textlength', autospec=True, side_effect=original) as cached:
+            layer, meta = n.layout(text, data, coverage, mask, style)
+        with patch.object(n, 'lru_cache', side_effect=lambda **kwargs: lambda function: function), \
+                patch.object(ImageDraw.ImageDraw, 'textlength', autospec=True, side_effect=original) as uncached:
+            reference, expected = n.layout(text, data, coverage, mask, style)
+        self.assertEqual(layer.tobytes(), reference.tobytes())
+        self.assertEqual(meta, expected)
+        self.assertLess(cached.call_count, .75*uncached.call_count)
+
     def test_combining_marks_are_not_split_from_their_base_during_emergency_wrap(self):
         data, _ = n.load_fonts(self.f.fonts)['dialogue']
         text = 'a\u0301b\u0301c\u0301d\u0301'*8
@@ -154,6 +170,49 @@ class BestEffortWorkflowTests(unittest.TestCase):
             if name.endswith('.png'):
                 self.assertEqual((self.f.root/'conservative'/name).read_bytes(), (self.f.root/'best'/name).read_bytes())
 
+    def test_dense_page_publishes_maximum_slots_and_explicitly_reports_remaining_units(self):
+        from tralens.ocr.automatic_units import propose_page_from_boxes
+        from tralens.ocr.types import Text_Box
+        from tralens.translation.contracts import TranslationRequest, TranslationResult, UnitOutcome
+        with Image.open(self.f.image) as opened:
+            tile = opened.convert('RGB')
+        image = Image.new('RGB', (tile.width*4, tile.height*4), 'white')
+        boxes = []
+        for row in range(4):
+            for col in range(4):
+                x, y = col*tile.width, row*tile.height
+                image.paste(tile, (x, y))
+                for detection in self.f.preview['ocr']['raw_detections'][0]:
+                    boxes.append(Text_Box(len(boxes), .99,
+                        [[px+x, py+y] for px, py in detection['polygon']], detection['text']))
+        image.save(self.f.image)
+        batch = asdict(propose_page_from_boxes(boxes, str(self.f.image)))
+        units = n.automatic_units(batch)
+        self.assertEqual(len(units), 32)
+        records = []
+        for unit in units:
+            self.assertEqual(unit.disposition, 'preview', unit.blocking_reasons)
+            request = TranslationRequest((unit,), (unit.unit_id,))
+            outcome = UnitOutcome(unit.unit_id, 'preview', 'Hi!', (), 'unverified', unit.selected_revision)
+            result = TranslationResult(request.revision, 'preview', ((unit.unit_id, 'Hi!'),), outcomes=(outcome,))
+            records.append(dict(unit=asdict(unit), unit_revision=unit.revision, request=asdict(request),
+                request_revision=request.revision, status='preview', binding_current=True,
+                input_kind='strict_utterance', result=asdict(result)))
+        raw = [{**{k: v for k, v in d.items() if k not in ('page', 'metadata_json')}, 'ocr_metadata': {}}
+               for d in batch['detections']]
+        preview = dict(schema_version=1, preview_only=True, units=records,
+            input=dict(path=str(self.f.image), sha256=n.digest(self.f.image.read_bytes()), size=list(image.size),
+                pixels_sha256=n.digest(f'RGB:{image.width}:{image.height}:'.encode()+image.tobytes())),
+            ocr=dict(batches=[batch], raw_detections=[raw]))
+        (self.f.root/'preview.json').write_text(n.canonical(preview))
+        report = self.run_render()
+        self.assertEqual(report['coverage']['rendered'], a.MAX_SLOTS)
+        self.assertEqual(report['coverage']['strict_eligible'], 32)
+        self.assertEqual(sum(row['reason_code'] == 'resource_budget' for row in report['units']), 16)
+        self.assertTrue(report['coverage']['partial_output'])
+        self.assertLessEqual(len(report['artifacts'])+1, report['limits']['artifact_count'])
+        n.verify_pixel_audit(report['pixel_audit'])
+
     def test_missing_translation_and_resource_caps_are_not_bypassed(self):
         self.helper.recolor()
         with patch.object(a, 'MAX_SLOTS', 0), patch.object(b, 'derive_plan', side_effect=AssertionError('no budget')):
@@ -166,6 +225,65 @@ class BestEffortWorkflowTests(unittest.TestCase):
             report = self.run_render('untranslated')
         self.assertEqual(report['coverage']['rendered'], 0)
         self.assertEqual(report['pixel_audit']['clean_changed_pixels'], 0)
+
+    def test_untranslated_page_does_not_allocate_component_geometry(self):
+        self.helper.recolor()
+        for row in self.f.preview['units']:
+            row['status'] = 'blocked'
+        (self.f.root/'preview.json').write_text(n.canonical(self.f.preview))
+        with patch.object(a, 'OriginalComponents', side_effect=AssertionError('no renderable target')):
+            report = self.run_render()
+        self.assertEqual(report['coverage']['attempted'], 0)
+
+    def test_missing_glyphs_fail_before_cleanup_or_component_allocation(self):
+        self.helper.recolor()
+        for row in self.f.preview['units']:
+            uid = row['unit']['unit_id']
+            row['result']['translations'] = ((uid, 'caf\u00e9'),)
+            row['result']['outcomes'][0]['translation'] = 'caf\u00e9'
+        (self.f.root/'preview.json').write_text(n.canonical(self.f.preview))
+        with patch.object(a, 'OriginalComponents', side_effect=AssertionError('missing target glyph')):
+            report = self.run_render()
+        self.assertEqual(report['coverage']['strict_eligible'], 2)
+        self.assertEqual(report['coverage']['attempted'], 0)
+        self.assertTrue(all('missing glyph' in row['reason'] for row in report['units']))
+
+    def test_typography_resource_failure_is_not_mislabeled_as_input_drift(self):
+        self.helper.recolor()
+        with patch.object(a.typography, 'layout_dialogue', side_effect=n.ResourceLimit('test raster budget')):
+            report = self.run_render(render_policy='conservative')
+        self.assertTrue(all(row['reason_code'] == 'resource_budget' for row in report['units']))
+
+    def test_first_candidate_locality_failure_cannot_be_retried_as_artistic_uncertainty(self):
+        self.helper.recolor()
+        original = Image.alpha_composite
+        calls = 0
+        def corrupt_first(*args):
+            nonlocal calls
+            result = original(*args)
+            calls += 1
+            if calls == 1:
+                result.putpixel((0, 0), (255, 0, 0, 255))
+            return result
+        with patch.object(Image, 'alpha_composite', side_effect=corrupt_first):
+            report = self.run_render()
+        self.assertEqual(report['coverage']['rendered'], 1)
+        self.assertEqual(report['units'][0]['reason_code'], 'runtime_locality')
+        self.assertNotIn('best_effort_attempts', report['units'][0])
+        n.verify_pixel_audit(report['pixel_audit'])
+
+    def test_fallback_locality_failure_stops_remaining_fallback_routes(self):
+        self.helper.recolor()
+        original = Image.alpha_composite
+        def corrupt(*args):
+            result = original(*args)
+            result.putpixel((0, 0), (255, 0, 0, 255))
+            return result
+        with self.force_failures(), patch.object(r, 'derive_plan', side_effect=r.RestorationSkip('complex', 'forced')), \
+                patch.object(Image, 'alpha_composite', side_effect=corrupt), \
+                patch.object(b, 'derive_plan', side_effect=AssertionError('integrity failures cannot reach footprint')):
+            report = self.run_render()
+        self.assertTrue(all(row['reason_code'] == 'runtime_locality' for row in report['units']))
 
     def test_best_effort_does_not_publish_a_compositor_locality_failure(self):
         self.helper.recolor()
