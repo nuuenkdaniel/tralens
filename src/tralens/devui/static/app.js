@@ -82,11 +82,11 @@ if (typeof document !== "undefined") {
     $("run").textContent = value ? "Running…" : retry ? "Retry pipeline ↻" : "Run pipeline →";
     $("run").title = retry ? "Rerun this saved upload with the current settings. Previous results are kept." : "Start a new run with the selected image.";
     $("jobs").disabled = value;
-    for (const id of ["file", "mode", "budget", "policy", "fragments"]) $(id).disabled = value;
+    for (const id of ["file", "mode", "budget", "policy", "translation-policy", "fragments"]) $(id).disabled = value;
   }
   function settingsSummary() {
     const mode = {ocr: "OCR only", translate: "Through translation", render: "Through final rendering"}[$("mode").value];
-    $("settings-summary").textContent = mode + ($("mode").value === "ocr" ? " · no model calls" : ` · up to ${$("budget").value} translation calls`);
+    $("settings-summary").textContent = mode + ($("mode").value === "ocr" ? " · no model calls" : ` · ${$("translation-policy").value === "coverage-first" ? "coverage first" : "conservative translation"} · up to ${$("budget").value} translation calls`);
   }
   function ownership() {
     const result = new Map();
@@ -204,7 +204,7 @@ if (typeof document !== "undefined") {
       if (unit.render_status === "automatic_composed") return [unit.quality === "best_effort" ? "Best effort" : selectedView === "clean" ? "Cleaned" : "Replaced", unit.quality === "best_effort" ? "warning" : "ready"];
       return ["Not replaced", "warning"];
     }
-    if (unit.status === "preview" && unit.target) return ["Translated", "ready"];
+    if (unit.status === "preview" && unit.target) return unit.input_kind === "coverage_text_region" ? ["Translated · uncertain", "warning"] : ["Translated", "ready"];
     if (unit.status.includes("budget")) return ["Call budget reached", "warning"];
     if (unit.status === "blocked") return ["Blocked by OCR", "warning"];
     if (unit.status.includes("failed")) return ["Translation failed", "failed"];
@@ -246,6 +246,7 @@ if (typeof document !== "undefined") {
         if (unit.target) box.append(node("pre", unit.target, "target"));
         else if (selectedView === "translation") box.append(node("p", unit.status.includes("budget") ? "Not attempted: increase the call budget for a new run." : unit.status === "blocked" ? "OCR grouping or source ownership needs review; no complete translation was produced." : "No English preview for this region.", "note"));
       }
+      if (unit.input_kind === "coverage_text_region" && unit.target) box.append(node("p", "Coverage-first OCR region: ownership, reading order and sentence completeness are not verified.", "note"));
       if (["clean", "final"].includes(selectedView) && unit.warnings.length) box.append(node("p", unit.warnings.join("\n"), "warning"));
       if (unit.reasons.length || unit.render_reason || unit.fragments.length) {
         const details = node("details"); details.open = open.has(unit.id); details.append(node("summary", "Why / details"));
@@ -299,6 +300,7 @@ if (typeof document !== "undefined") {
     if (settingsJob !== data.id) {
       $("mode").value = data.options.mode; $("budget").value = data.options.max_attempts;
       $("policy").value = data.options.render_policy; $("fragments").checked = data.options.allow_fragments;
+      $("translation-policy").value = data.options.translation_policy || "conservative";
       settingsJob = data.id; settingsSummary();
     }
     if (!pendingFile) $("filename").textContent = `Saved run · ${data.id.slice(0, 8)}`;
@@ -356,7 +358,7 @@ if (typeof document !== "undefined") {
     const retry = current && snapshot && snapshot.status !== "running";
     if ((!pendingFile && !retry) || busy) return;
     const file = pendingFile, parent = current;
-    const settings = {mode: $("mode").value, max_attempts: Number($("budget").value), allow_fragments: $("fragments").checked, render_policy: $("policy").value};
+    const settings = {mode: $("mode").value, max_attempts: Number($("budget").value), allow_fragments: $("fragments").checked, render_policy: $("policy").value, translation_policy: $("translation-policy").value};
     setBusy(true); showError(""); $("status").textContent = retry ? "Starting a fresh run with the saved image…" : "Uploading original image…";
     try {
       const result = retry
@@ -390,7 +392,7 @@ if (typeof document !== "undefined") {
       if (context.isPointInPath(path, x, y)) { const owner = owners.get(JSON.stringify(detection.source_id)); if (owner) chooseUnit(owner.unit.id, true); break; }
     }
   });
-  for (const id of ["mode", "budget"]) $(id).addEventListener("input", settingsSummary);
+  for (const id of ["mode", "budget", "translation-policy"]) $(id).addEventListener("input", settingsSummary);
   for (const eventName of ["dragenter", "dragover"]) document.addEventListener(eventName, event => {
     if (event.dataTransfer?.types.includes("Files")) { event.preventDefault(); if (!busy) document.body.classList.add("dragging"); }
   });

@@ -18,6 +18,7 @@ from tralens.translation.contracts import (Reading, Utterance, TranslationReques
     TranslationResult, UnitOutcome, FragmentRequest, FragmentResult, fragment_plan,
     automatic_units, canonical, strict_json, revision, FRAGMENT_POLICY_REVISION)
 from tralens.translation import ocr_review as visual
+from tralens.translation import coverage
 from tralens.translation.runtime import (GENERALIST, TRANSLATEGEMMA, GenerationOptions, execution_metadata)
 from tralens.translation.workflow import fragment_scheduling_info
 
@@ -237,12 +238,18 @@ def check_schedule(preview, entries):
         return
     selected = preview["settings"]["selected_ids"]
     by_id = {e["unit"].unit_id: e for e in entries}
-    originals, alternates, fragments = [], [], []
+    originals, alternates, regions, fragments = [], [], [], []
     for identifier in selected or tuple(by_id):
         entry = by_id[identifier]
         unit, record = entry["unit"], entry["record"]
         if unit.disposition != "blocked":
             originals.append((unit, record, "strict_inputs_first"))
+        elif record.get('input_kind') == coverage.KIND:
+            reason = 'explicit_selected_ids_order' if selected else 'coverage_weak_text_hints'
+            same({k: v for k, v in record['scheduling'].items() if k != 'planned_position'},
+                {'reason': reason, 'priority': list(coverage.priority(unit)), 'certifies_readability_or_dialogue': False},
+                'coverage scheduling evidence drift')
+            regions.append((unit, record, reason))
         for child in record.get("visual_alternates", []):
             if unit.disposition == "preview":
                 alternates.append((unit, child, "visual_alternate_after_strict_originals"))
@@ -253,7 +260,8 @@ def check_schedule(preview, entries):
             fragments.append((unit, child, expected["reason"]))
     if not selected:
         fragments.sort(key=lambda job: job[1]["scheduling"]["priority_tier"])
-    jobs = originals + alternates
+        regions.sort(key=lambda job: coverage.priority(job[0]))
+    jobs = originals + alternates + regions
     for job in fragments:
         for child in by_id[job[0].unit_id]["record"].get("visual_alternates", []):
             jobs.append((job[0], child, "visual_alternate_before_original_fragment"))
@@ -309,7 +317,7 @@ def validate(preview, image_path, rgb, image_hash, image_bytes):
     source = preview["input"]
     bounded_tree(preview)
     schema = preview["schema_version"]
-    require(type(schema) is int and schema in (1, 2, 3), "unsupported preview schema")
+    require(type(schema) is int and schema in (1, 2, 3, 4), "unsupported preview schema")
     require(preview["status"] in ("running", "complete", "complete_with_failures", "failed", "interrupted"),
             "unknown workflow status")
     require(preview["stage"] in ("ocr", "ocr_review", "translation", "finished"), "unknown workflow stage")
@@ -324,13 +332,18 @@ def validate(preview, image_path, rgb, image_hash, image_bytes):
     require(type(settings["run_local_model"]) is bool, "model opt-in must be boolean")
     fragments_enabled = settings.get("allow_fragment_previews", False)
     require(type(fragments_enabled) is bool and (schema != 1 or not fragments_enabled), "schema/fragment opt-in contradiction")
-    require((schema == 3) == settings.get("review_ocr", False), "schema/review opt-in contradiction")
-    require(schema == 3 or "ocr_review" not in preview, "review evidence outside schema 3")
+    review_enabled = settings.get('review_ocr', False)
+    require(type(review_enabled) is bool and (schema != 3 or review_enabled)
+            and (not review_enabled or schema in (3, 4)), "schema/review opt-in contradiction")
+    require(review_enabled or "ocr_review" not in preview, "review evidence without opt-in")
+    coverage_policy = settings.get('translation_policy', 'conservative')
+    coverage.validate_policy(coverage_policy)
+    require(schema != 4 or coverage_policy == 'coverage-first', 'schema/coverage policy contradiction')
     selected = settings["selected_ids"]
     require(type(selected) is list and all(type(i) is str and i for i in selected)
             and len(set(selected)) == len(selected), "invalid selected IDs")
-    limit = count(settings["max_attempts"])
-    count(preview["attempts"])
+    limit = count(settings["max_attempts"], coverage.MAX_CALLS)
+    count(preview["attempts"], coverage.MAX_CALLS)
     ocr = preview["ocr"]
     if not isinstance(ocr, dict) or len(ocr["batches"]) != 1 or len(ocr["raw_detections"]) != 1:
         raise ValueError("review needs a retained single OCR page")
@@ -347,11 +360,12 @@ def validate(preview, image_path, rgb, image_hash, image_bytes):
         require(preview["attempts"] == 0, "empty OCR cannot have translation calls")
         require(not selected, "empty OCR has selected source IDs")
         for key in ("strict_eligible_units", "fragment_candidate_inputs", "strict_attempts", "fragment_attempts",
-                    "alternate_attempts", "strict_preview_count", "fragment_preview_count", "alternate_preview_count"):
+                    "alternate_attempts", "strict_preview_count", "fragment_preview_count", "alternate_preview_count",
+                    'coverage_attempts', 'coverage_eligible_units', 'coverage_preview_count', 'translation_preview_count'):
             check_count(preview, key, 0)
         for key in ("unit_status_counts", "fragment_status_counts", "alternate_status_counts"):
             check_count(preview, key, {})
-        if schema == 3:
+        if review_enabled:
             check_review(preview["ocr_review"], (), {}, preview, rgb, image_bytes)
         return [], {"scope": "saved source-ID coverage, not detection/translation accuracy", "raw_detections": 0,
                     "main_detections": 0, "annotation_detections": 0, "unassigned_detections": 0,
@@ -432,7 +446,7 @@ def validate(preview, image_path, rgb, image_hash, image_bytes):
         raise ValueError("unit/proposal IDs or saved order differ; no units may disappear")
     require(set(selected) <= {u.unit_id for u in units}, "foreign selected unit IDs")
     records = {r["unit"]["unit_id"]: r for r in preview["units"]}
-    reviews = check_review(preview["ocr_review"], units, records, preview, rgb, image_bytes) if schema == 3 else {}
+    reviews = check_review(preview["ocr_review"], units, records, preview, rgb, image_bytes) if review_enabled else {}
     entries = []
     all_fragments, all_alternates = [], []
     for index, (record, expected, proposal) in enumerate(zip(retained_records, units, batch["proposals"]), 1):
@@ -442,18 +456,28 @@ def validate(preview, image_path, rgb, image_hash, image_bytes):
             raise ValueError("unit/source revision drift")
         if record["blocking_reasons"] != list(unit.blocking_reasons):
             raise ValueError("blocking reasons do not match source evidence")
-        if unit.disposition == "blocked" and record["status"] != "blocked":
+        is_coverage = record.get('input_kind') == coverage.KIND
+        if unit.disposition == "blocked" and not is_coverage and record["status"] != "blocked":
             raise ValueError("structurally blocked source cannot become output")
-        same(record.get("input_kind", "strict_utterance"), "strict_utterance", "strict input kind mismatch")
-        request = TranslationRequest((unit,), (unit.unit_id,))
+        if is_coverage:
+            require(schema == 4 and coverage_policy == 'coverage-first', 'coverage outside policy/schema')
+            derived = coverage.derive(unit)
+            same(record['translation_input'], asdict(derived), 'coverage input drift')
+            same(record['coverage'], coverage.provenance(unit), 'coverage provenance drift')
+            request = TranslationRequest((derived,), (derived.unit_id,))
+            if record['status'] == 'preview':
+                coverage.bound_result(record, unit)
+        else:
+            same(record.get("input_kind", "strict_utterance"), "strict_utterance", "strict input kind mismatch")
+            request = TranslationRequest((unit,), (unit.unit_id,))
         result = check_execution(record, request, unit, settings=settings)
-        if unit.disposition != "blocked":
+        if unit.disposition != "blocked" or is_coverage:
             if selected and unit.unit_id not in selected:
                 require(record["status"] == "not_selected", "nonselected strict input executed")
             else:
                 require(record["status"] not in ("blocked", "not_selected"), "eligible selected strict input incorrectly blocked")
         fragment_records = record.get("fragment_previews", [])
-        derived, rejected = fragment_plan(unit, allow_fragment_previews=True) if fragments_enabled and unit.disposition == "blocked" else ((), ())
+        derived, rejected = fragment_plan(unit, allow_fragment_previews=True) if fragments_enabled and unit.disposition == "blocked" and not is_coverage else ((), ())
         if not source_only:
             same(record.get("fragment_rejection_reasons", []), rejected, "fragment rejection reasons drift")
             require(len(fragment_records) == len(derived), "fragment candidate coverage drift")
@@ -469,7 +493,7 @@ def validate(preview, image_path, rgb, image_hash, image_bytes):
             bases.append(base)
             all_fragments.append(child)
         alternate_records = record.get("visual_alternates", [])
-        require(schema == 3 or not alternate_records, "visual alternates outside schema 3")
+        require(review_enabled or not alternate_records, "visual alternates without review opt-in")
         review_request, verdict = reviews.get(unit.unit_id, (None, None))
         expected_alternates = []
         if verdict is not None and verdict.decision == "proposed_correction":
@@ -503,11 +527,19 @@ def validate(preview, image_path, rgb, image_hash, image_bytes):
     if not source_only:
         check_count(preview, "strict_eligible_units", sum(u.disposition == "preview" for u in units))
         check_count(preview, "fragment_candidate_inputs", len(all_fragments))
+        region_records = [r for r in retained_records if r.get('input_kind') == coverage.KIND]
+        check_count(preview, 'coverage_eligible_units', len(region_records))
+        check_count(preview, 'coverage_preview_count', sum(r['status'] == 'preview' for r in region_records))
+        check_count(preview, 'translation_preview_count', sum(r['status'] == 'preview' for r in retained_records))
         for key, rows, suffix in (("unit", retained_records, ""), ("fragment", all_fragments, "fragment_"),
                                    ("alternate", all_alternates, "alternate_")):
             check_count(preview, key + "_status_counts", dict(Counter(r["status"] for r in rows)))
-            check_count(preview, ("strict" if key == "unit" else key) + "_preview_count", sum(r["status"] == suffix + "preview" for r in rows))
-    for key, rows in (("strict_attempts", retained_records), ("fragment_attempts", all_fragments), ("alternate_attempts", all_alternates)):
+            check_count(preview, ("strict" if key == "unit" else key) + "_preview_count",
+                sum(r["status"] == suffix + "preview" and (key != 'unit' or r.get('input_kind', 'strict_utterance') == 'strict_utterance') for r in rows))
+    strict_records = [r for r in retained_records if r.get('input_kind', 'strict_utterance') == 'strict_utterance']
+    region_records = [r for r in retained_records if r.get('input_kind') == coverage.KIND]
+    for key, rows in (("strict_attempts", strict_records), ('coverage_attempts', region_records),
+                      ("fragment_attempts", all_fragments), ("alternate_attempts", all_alternates)):
         check_count(preview, key, sum(r["attempts_started"] for r in rows))
     same(preview["attempts"], sum(r["attempts_started"] for r in retained_records + all_fragments + all_alternates), "global attempt counter drift")
     require(preview["attempts"] <= limit and (settings["run_local_model"] or preview["attempts"] == 0), "translation budget/opt-in contradiction")
@@ -594,7 +626,8 @@ def build_html(preview, entries, summary, rgb, *, crops=False):
             + '<h3>Original OCR → proposed correction → translation previews</h3>'
             + '<p>Original selected OCR (preserved):</p><pre>' + escape(unit.selected.text) + '</pre>'
             + '<p>Visual review / proposed correction (unverified; never replaces original OCR):</p>' + correction
-            + '<h3>Original strict utterance translation</h3>' + output(record, "translations")
+            + ('<h3>Uncertain OCR-region translation (not a certified full utterance)</h3>' if record.get('input_kind') == coverage.KIND
+               else '<h3>Original strict utterance translation</h3>') + output(record, "translations")
             + '<h3>Original blocked-source fragment translations</h3><p>Unverified text fragments; original blockers retained.</p>'
             + (''.join(output(child, "fragments") for child in record.get("fragment_previews", [])) or '<p>No fragment input.</p>')
             + '<h3>Alternate translations of proposed readings</h3><p>Unverified visual alternates.</p>'
@@ -650,7 +683,7 @@ def build_html(preview, entries, summary, rgb, *, crops=False):
         + details("Full execution schedule, review evidence and counters", {
             "workflow_status": preview["status"], "error": preview.get("error"),
             "translation_limit": settings["max_attempts"],
-            **{k: preview.get(k) for k in ("attempts", "strict_attempts", "fragment_attempts", "alternate_attempts")},
+            **{k: preview.get(k) for k in ("attempts", "strict_attempts", 'coverage_attempts', "fragment_attempts", "alternate_attempts")},
             "review_limit": settings.get("max_review_attempts"), "review": review_stage,
             "input_schedule": preview.get("input_schedule", [])}, identifier="execution-details")
         + details("Full coverage JSON — retained source IDs, not accuracy", summary, identifier="coverage-details")

@@ -293,8 +293,11 @@ class ViewerTests(unittest.TestCase):
                 app.artifact(identity, path)
 
     def test_run_options_are_bounded_and_cannot_supply_filesystem_paths(self):
+        defaults = s.options({}, render_enabled=True)
+        self.assertEqual(defaults['translation_policy'], 'coverage-first')
+        self.assertEqual(defaults['max_attempts'], 64)
         for value in ([], {'fonts': '/etc/passwd'}, {'mode': 'render'}, {'max_attempts': True},
-                      {'max_attempts': 21}, {'allow_fragments': 'yes'}, {'render_policy': []}):
+                      {'max_attempts': 65}, {'allow_fragments': 'yes'}, {'render_policy': []}, {'translation_policy': []}):
             with self.subTest(value=value), self.assertRaises(s.RequestError):
                 s.options(value, render_enabled=False)
 
@@ -303,7 +306,7 @@ class ViewerTests(unittest.TestCase):
         from tralens.translation import workflow
         for mode in ('ocr', 'translate', 'render'):
             job = dict(image=self.root/'image.png', directory=self.root/'job',
-                options=dict(mode=mode, max_attempts=3, allow_fragments=True, render_policy='conservative'))
+                options=dict(mode=mode, max_attempts=3, allow_fragments=True, render_policy='conservative', translation_policy='coverage-first'))
             config = replace(self.config, fonts=self.root/'fonts.json')
             with patch.object(main, 'run_pipeline', return_value=dict(status='partial')) as pipeline, \
                     patch.object(workflow, 'run_preview', return_value=dict(status='complete')) as preview:
@@ -314,6 +317,7 @@ class ViewerTests(unittest.TestCase):
             self.assertTrue(call.call_args.kwargs['run_local_ocr'])
             self.assertEqual(call.call_args.kwargs['max_attempts'], 3)
             self.assertTrue(call.call_args.kwargs['allow_fragment_previews'])
+            self.assertEqual(call.call_args.kwargs['translation_policy'], 'coverage-first')
             if mode == 'render':
                 preview.assert_not_called()
                 self.assertEqual(call.call_args.kwargs['fonts'], config.fonts)

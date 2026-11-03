@@ -24,6 +24,13 @@ with the English text alongside it; only Final shows actual replaced lettering.
 Stages without output explain why instead of showing a fake or unchanged final.
 Run settings, masks and raw artifacts are tucked into expandable sections.
 
+New uploads default to **Coverage first** translation and a **64-call** budget.
+Readable OCR regions are attempted despite uncertain ownership/crop/orientation;
+their translations and replacements are explicitly marked uncertain/best-effort.
+Older saved runs retain their previous settings: select Coverage first and raise
+the budget before retrying. See [translation coverage](docs/translation-coverage.md)
+for retained integrity checks and the separate conservative options.
+
 After any completed, partial or failed run, **Run pipeline** becomes **Retry
 pipeline**. It reuses the saved upload with the current Run settings—no file
 selection is needed, including after refresh. A retry reruns the pipeline in a
@@ -143,9 +150,9 @@ are checked **before OCR**. The pipeline uses the renderer's narrower limit of
 4M pixels/4096px per side. Original image/font bindings are checked again before
 rendering. OCR is closed before translation; rendering makes no model calls.
 
-Budgets remain explicit: translation defaults to **2 calls**, allowed 0–20;
+Budgets remain explicit: CLI translation defaults to **2 calls**, allowed 0–64;
 `--max-attempts 20` above requests a broader bounded pass, not guaranteed full-page
-coverage. Rendering attempts at most 16 units, possibly fewer under raster-work
+coverage. Rendering attempts at most 32 units, possibly fewer under raster-work
 budgets. `--max-units N` is an optional rendering evaluation cap only. Rendering
 size bounds default to 16–28px (`--min-size`/`--max-size`). Guards are not relaxed
 to make a page fit.
@@ -156,7 +163,7 @@ CLI/rendering preflight rejection. These are processing outcomes, not proof of
 language quality or complete detection. Inspect `pipeline.json` for the exact
 status/reasons. Failed/interrupted previews never render. Successful strict results
 from a pass with individual translation failures may still render as partial output.
-With no strict translations (including empty OCR), rendering is explicitly skipped
+With no renderable bound translations (including empty OCR), rendering is explicitly skipped
 and **no composite is produced**. A report can also contain an unchanged composite
 if every attempted rendering was safely rejected. All outputs remain unapproved
 candidates, and skipped units keep original lettering.
@@ -458,12 +465,13 @@ rejected counters. Inputs and local font/license hashes are rechecked before
 exclusive publication. CLI exit 0 means a report/partial candidate was written,
 not that every unit rendered or the language/visual quality is correct.
 
-Bounds: <=4M source pixels/4096px per side, <=512 source units/detections, <=16
-processed mask slots, <=32M aggregate unit-page pixels and <=512M source-binding/
+Bounds: <=4M source pixels/4096px per side, <=512 source units/detections, <=32
+processed mask slots, <=128M aggregate unit-page pixels with bit-packed retained
+masks and <=512M source-binding/
 neighbor raster work. Labelings allow <=8192 components; <=64 seeded components
 per unit, max component side 96px/20,000 ink pixels and bbox area no more than half
 member-mask area (with a 64px floor). Existing font/license, RAQM search and local
-raster budgets apply. At most 256 artifacts/128 MiB total, HTML <=4 MiB, manifest
+raster budgets apply. At most 512 artifacts/128 MiB total, HTML <=4 MiB, manifest
 <=8 MiB, and specimens <=1000px per side. Budget exhaustion is explicit partial
 skipping or preflight rejection, never implicit truncation or unsafe rendering.
 
@@ -3197,13 +3205,14 @@ only fake OCR/providers in offline tests.
   `ocr_only`, `not_selected`, `budget_exhausted`, `blocked`, failed/abstained and
   interrupted/not-executed units remain visible. Generic uncertainty does not cause
   blanket blocking; genuine structural/blank-source faults remain explicit.
-- Default `--max-attempts 2` is a **global 0..20 provider-call budget**, with one
+- Default `--max-attempts 2` is a **global 0..64 provider-call budget**, with one
   attempt per selected unit and no retries/preload calls. Errors and interrupted
   dispatched calls spend the budget. Blocks and capability/input rejection that
-  never dispatch a call do not. Default selection follows saved proposal order;
+  never dispatch a call do not. Strict inputs run before uncertain coverage inputs;
   repeated `--unit-id ID` flags optionally select units and their call order while
   keeping unchosen units in the artifact. No source correction or candidate
-  promotion is performed.
+  promotion is performed. [Coverage-first translation](docs/translation-coverage.md)
+  derives separately bound text-region inputs without modifying original OCR units.
   With the optional fragment mode below, strict inputs run first; automatic
   fragments use stable script-hint tiers, while explicit selection retains its order.
 - Context is fixed at 4096; default `--num-predict 1024` and `--keep-alive 60`
@@ -3515,8 +3524,9 @@ The coder runs only mocked/offline tests; the parent runs this actual model/OCR 
 
 `tools/translation_review.py` turns a **saved** workflow preview into a static,
 self-contained `review.html` and `coverage.json`. It supports schema1 (strict),
-schema2 (separate fragment previews), and schema3 (optional visual review and
-separate proposed-reading alternate translations). It performs no OCR, inference,
+schema2 (separate fragment previews), schema3 (optional visual review and
+separate proposed-reading alternate translations), and schema4 (separately bound
+uncertain OCR-region translations). It performs no OCR, inference,
 provider/network requests, engine initialization or browser launch, including on
 import. It needs only existing Python dependencies and the explicit original image.
 

@@ -45,21 +45,23 @@ class Config:
 
 
 def options(value, *, render_enabled):
-    if type(value) is not dict or set(value) - {'mode', 'max_attempts', 'allow_fragments', 'render_policy'}:
+    if type(value) is not dict or set(value) - {'mode', 'max_attempts', 'allow_fragments', 'render_policy', 'translation_policy'}:
         raise RequestError('Unknown run options.')
-    result = dict(mode='render' if render_enabled else 'ocr', max_attempts=2,
-        allow_fragments=False, render_policy='best-effort')
+    result = dict(mode='render' if render_enabled else 'ocr', max_attempts=64,
+        allow_fragments=False, render_policy='best-effort', translation_policy='coverage-first')
     result.update(value)
     if type(result['mode']) is not str or result['mode'] not in ('ocr', 'translate', 'render'):
         raise RequestError('Choose OCR, translation, or rendering.')
     if result['mode'] == 'render' and not render_enabled:
         raise RequestError('Start the server with --fonts to enable rendering.')
-    if type(result['max_attempts']) is not int or not 0 <= result['max_attempts'] <= 20:
-        raise RequestError('Translation call budget must be 0–20.')
+    if type(result['max_attempts']) is not int or not 0 <= result['max_attempts'] <= 64:
+        raise RequestError('Translation call budget must be 0–64.')
     if type(result['allow_fragments']) is not bool:
         raise RequestError('Fragment preview option must be a boolean.')
     if type(result['render_policy']) is not str or result['render_policy'] not in ('best-effort', 'conservative'):
         raise RequestError('Unknown rendering policy.')
+    if type(result['translation_policy']) is not str or result['translation_policy'] not in ('coverage-first', 'conservative'):
+        raise RequestError('Unknown translation policy.')
     return result
 
 
@@ -95,7 +97,7 @@ def execute_job(config, job):
     kwargs = dict(device=config.device, model_root=config.model_root, run_local_ocr=True,
         run_local_model=settings['mode'] != 'ocr', model=config.model, profile=config.profile,
         endpoint=config.endpoint, max_attempts=settings['max_attempts'],
-        allow_fragment_previews=settings['allow_fragments'])
+        allow_fragment_previews=settings['allow_fragments'], translation_policy=settings['translation_policy'])
     if settings['mode'] == 'render':
         from main import run_pipeline
         return run_pipeline(job['image'], job['directory']/'run', fonts=config.fonts,
@@ -136,7 +138,10 @@ class App:
                     mode='render' if pipeline else 'translate' if preview.get('settings', {}).get('run_local_model') else 'ocr',
                     max_attempts=preview.get('settings', {}).get('max_attempts', 2),
                     allow_fragments=preview.get('settings', {}).get('allow_fragment_previews', False),
-                    render_policy=pipeline.get('render_policy', 'best-effort'))
+                    render_policy=pipeline.get('render_policy', 'best-effort'),
+                    translation_policy=preview.get('settings', {}).get('translation_policy', 'conservative'))
+                if 'translation_policy' not in settings:
+                    settings = {**settings, 'translation_policy': preview.get('settings', {}).get('translation_policy', 'conservative')}
                 settings = options(settings, render_enabled=True)  # View old jobs even without a current font manifest.
                 images = [directory/name for name in ('input.png', 'input.jpg') if (directory/name).is_file()]
                 if len(images) != 1 or images[0].is_symlink():
@@ -312,6 +317,7 @@ class App:
             fragments = [dict(status=f['status'], translations=(f.get('result') or {}).get('fragments', []))
                 for f in record.get('fragment_previews', [])]
             units.append(dict(id=unit['unit_id'], member_ids=unit['member_ids'],
+                input_kind=record.get('input_kind', 'strict_utterance'),
                 source=selected_text(unit), status=record['status'],
                 target=dict(result.get('translations', [])).get(unit['unit_id']),
                 reasons=record.get('blocking_reasons', []) +
@@ -333,8 +339,8 @@ class App:
                     and not any(p.startswith('.') for p in relative.parts)
                     and not any(p.is_symlink() for p in (path, *path.parents))):
                 artifacts.append(path.relative_to(directory).as_posix())
-            if len(artifacts) >= 512:
-                notices.append('Artifact list truncated at 512 files.')
+            if len(artifacts) >= 768:
+                notices.append('Artifact list truncated at 768 files.')
                 break
         return dict(id=identity, status=job['status'], stage=stage, options=job['options'],
             retry_of=job.get('retry_of'), restored=job.get('restored', False),

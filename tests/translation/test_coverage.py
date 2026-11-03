@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from PIL import Image
+
 from tests.translation import test_workflow as fixtures
 from tests.local_evidence import local_evidence
 from tralens.translation import coverage as c, workflow as w
@@ -182,6 +184,21 @@ class CoverageTests(unittest.TestCase):
             self.f.engine.ocr.close.reset_mock()
             state = self.f.run_flow('zero', translation_policy='coverage-first', run_local_model=True, max_attempts=0)
             self.assertEqual(state['unit_status_counts'], {'budget_exhausted': 2})
+
+    def test_offline_review_accepts_schema_four_without_promoting_original_ocr(self):
+        from tools import translation_review as review
+        state = self.flow(max_attempts=64)
+        with patch('socket.socket', side_effect=AssertionError('offline review only')):
+            summary = review.run(self.f.root/'out/preview.json', self.f.image, self.f.root/'review')
+        self.assertEqual(summary['unit_count'], 2)
+        html = (self.f.root/'review/review.html').read_text()
+        self.assertIn('Uncertain OCR-region translation', html)
+        self.assertIn('unknown_region_ownership', html)
+        self.assertEqual(state['units'][0]['unit']['blocked_reasons'], ['unknown_region_ownership'])
+        damaged = copy.deepcopy(state)
+        damaged['coverage_attempts'] = 0
+        with Image.open(self.f.image) as image, self.assertRaisesRegex(ValueError, 'coverage_attempts'):
+            review.validate(damaged, self.f.image, image, state['input']['sha256'], self.f.content)
 
 
 SAVED = 'test-results/dev-frontend/7d151a7fa33e473e9901d4e709cb3912/run/preview/preview.json'
