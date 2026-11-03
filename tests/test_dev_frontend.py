@@ -3,6 +3,7 @@ from dataclasses import replace
 import http.client
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -63,6 +64,7 @@ class ViewerTests(unittest.TestCase):
         status, _, data = self.request(http, 'GET', '/api/config')
         self.assertEqual(status, 200)
         self.assertFalse(json.loads(data)['render_enabled'])
+        self.assertEqual(json.loads(data)['endpoint'], self.config.endpoint)
         self.assertEqual(app.jobs, {})
         runner.assert_not_called()
 
@@ -198,6 +200,28 @@ class ViewerTests(unittest.TestCase):
                 self.assertEqual(call.call_args.kwargs['fonts'], config.fonts)
             else:
                 pipeline.assert_not_called()
+
+    def test_frontend_respects_ollama_host_and_explicit_endpoint_override(self):
+        from tools.dev_frontend import configured_endpoint
+        for host, expected in (
+            ('', 'http://127.0.0.1:11434'),
+            ('100.100.1.2', 'http://100.100.1.2:11434'),
+            ('localhost:11435', 'http://127.0.0.1:11435'),
+            ('::1', 'http://[::1]:11434'),
+            ('[::1]:11435', 'http://[::1]:11435'),
+            ('http://10.0.0.2:11434/', 'http://10.0.0.2:11434'),
+        ):
+            with self.subTest(host=host), patch.dict(os.environ, {'OLLAMA_HOST': host}):
+                self.assertEqual(configured_endpoint(), expected)
+                self.assertEqual(configured_endpoint('http://127.0.0.1:11436'), 'http://127.0.0.1:11436')
+
+    def test_invalid_environment_endpoint_is_not_silently_used_or_replaced(self):
+        from tools.dev_frontend import configured_endpoint
+        for host in ('https://example.com', '8.8.8.8', 'localhost/path', 'http://user:pass@localhost:11434'):
+            with self.subTest(host=host), patch.dict(os.environ, {'OLLAMA_HOST': host}):
+                with self.assertRaises(ValueError):
+                    configured_endpoint()
+                self.assertEqual(configured_endpoint('http://127.0.0.1:11434'), 'http://127.0.0.1:11434')
 
     def test_import_and_help_are_engine_free(self):
         script = '''

@@ -1,10 +1,33 @@
 """Run the minimal, local-only pipeline development viewer. No new dependencies."""
 import argparse
+import ipaddress
+import os
 from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT/'src'))
+
+
+def configured_endpoint(explicit=None):
+    """Respect the operator's Ollama client address without probing/fallbacks."""
+    from tralens.translation.runtime import local_endpoint
+    from urllib.parse import urlsplit
+    if explicit is not None:
+        return local_endpoint(explicit)
+    host = os.environ.get('OLLAMA_HOST', '').strip()
+    if not host:
+        return 'http://127.0.0.1:11434'
+    if '://' in host:
+        return local_endpoint(host)
+    try:
+        address = ipaddress.ip_address(host)
+        if address.version == 6:
+            host = '['+host+']'
+    except ValueError:
+        pass
+    endpoint = local_endpoint('http://'+host)
+    return endpoint if urlsplit(endpoint).port is not None else endpoint+':11434'
 
 
 def main(argv=None):
@@ -18,16 +41,21 @@ def main(argv=None):
     parser.add_argument('--font-id')
     parser.add_argument('--model', default='translategemma:27b')
     parser.add_argument('--profile', choices=('generalist', 'translategemma'), default='translategemma')
-    parser.add_argument('--endpoint', default='http://127.0.0.1:11434')
+    parser.add_argument('--endpoint', help='explicit local Ollama origin; default: OLLAMA_HOST, otherwise http://127.0.0.1:11434')
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error('port must be 1–65535')
+    try:
+        endpoint = configured_endpoint(args.endpoint)
+    except ValueError as error:
+        parser.error(str(error))
     from tralens.devui.server import App, Config, create_server
     app = App(Config(root=args.output_root, model_root=args.model_root.expanduser().absolute(),
         device=args.device, fonts=args.fonts.expanduser().absolute() if args.fonts else None,
-        font_id=args.font_id, model=args.model, profile=args.profile, endpoint=args.endpoint))
+        font_id=args.font_id, model=args.model, profile=args.profile, endpoint=endpoint))
     with create_server(app, args.port) as server:
         print(f'Pipeline viewer: http://127.0.0.1:{args.port}', flush=True)
+        print(f'Ollama endpoint: {endpoint}', flush=True)
         print(f'Job artifacts: {app.root}\nNo inference until you upload and click Run. Ctrl+C stops the server.', flush=True)
         try:
             server.serve_forever()

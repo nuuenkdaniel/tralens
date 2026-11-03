@@ -26,7 +26,12 @@ Run settings, masks and raw artifacts are tucked into expandable sections.
 
 The default OCR export root is `~/.cache/tralens/paddle-v6-models`; override with
 `--model-root PATH` if needed. Translation uses the existing local Ollama service
-and `translategemma:27b`; no models are downloaded. Without `--fonts`, OCR and
+and `translategemma:27b`; no models are downloaded. The viewer respects
+`OLLAMA_HOST` (including a bare local IP, with port 11434); `--endpoint http://IP:PORT`
+overrides it. Otherwise it uses `http://127.0.0.1:11434`. The selected endpoint is
+printed at startup and shown in Run settings. A working OCR stage does not prove
+Ollama is reachable: connection failures leave no translation to render.
+Without `--fonts`, OCR and
 translation still work, but rendering is disabled. For another checkout, supply
 your own explicit licensed font manifest using the schema below.
 
@@ -50,7 +55,7 @@ path traversal, and accepts only bounded PNG/JPEG uploads (32 MiB, 4M pixels,
 4096px side; opaque source required). Do not expose this Python development server
 as a public upload service. Native engine setup/model failures are shown in the UI.
 
-Verification: 11 offline viewer tests cover HTTP upload through the real pipeline
+Verification: 13 offline viewer tests cover HTTP upload through the real pipeline
 with injected engines/providers, checkpoint visibility, mode dispatch, errors,
 source retention and request/path guards. A headless Firefox smoke test also
 exercised browser file upload, five stage views, comparison, zoom, highlighting and page refresh;

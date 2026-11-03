@@ -390,7 +390,7 @@ if (typeof document !== "undefined") {
   });
   request("/api/config").then(async value => {
     config = value;
-    $("configuration").textContent = `${config.device} · ${config.model} · OCR: ${config.model_root}${config.fonts ? " · Fonts: " + config.fonts : " · No --fonts: rendering disabled"}`;
+    $("configuration").textContent = `${config.device} · ${config.model} · Ollama: ${config.endpoint || "configured local service"} · OCR: ${config.model_root}${config.fonts ? " · Fonts: " + config.fonts : " · No --fonts: rendering disabled"}`;
     $("mode").querySelector('[value="render"]').disabled = !config.render_enabled; $("mode").value = config.render_enabled ? "render" : "ocr"; settingsSummary(); setBusy(false);
     const jobs = await request("/api/jobs");
     for (const job of jobs) { const choice = node("option", `Run ${job.id.slice(0, 8)} · ${friendly(job.status)}`); choice.value = job.id; $("jobs").append(choice); }

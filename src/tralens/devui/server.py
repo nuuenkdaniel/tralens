@@ -114,6 +114,7 @@ class App:
 
     def public_config(self):
         return dict(token=self.token, device=self.config.device, model=self.config.model,
+            endpoint=self.config.endpoint,
             model_root=str(self.config.model_root), fonts=str(self.config.fonts) if self.config.fonts else None,
             render_enabled=self.config.fonts is not None, max_upload_bytes=MAX_UPLOAD,
             page_pixel_limit=4_000_000, max_jobs=MAX_JOBS)
