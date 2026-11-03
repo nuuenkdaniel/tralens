@@ -327,6 +327,12 @@ provider calls, training, user editing or changes to existing environments.
 
 ### Automatic outputs and provenance
 
+Follow-up native-mask trials recovered **8/8 eligible saved translations**, while
+preserving the previous six units' pixels. Source-bound mask association, connected
+safe-space layout and phase-locked periodic repair are described in
+[the follow-up trial record](docs/native-background-trials.md). These results do
+not imply that the other untranslated/blocked units or arbitrary artwork are solved.
+
 The output purpose is `automatic_candidate_output`, separate from operator-selected
 `candidate_only` jobs. It includes:
 
