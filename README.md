@@ -1,4 +1,96 @@
-# OCR review
+# Tralens
+
+## One-command image pipeline
+
+The stage implementations stay separate; **`src/main.py` connects them**:
+
+```text
+src/
+  main.py                    CLI and job coordination only
+  tralens/
+    ocr/                     detection, grouping, recognition and source evidence
+    translation/             bound translation previews and provider runtime
+    rendering/               cleanup, typography, composition and pixel checks
+tools/                       standalone diagnostics and saved-artifact commands
+```
+
+The coordinator reuses the existing image-to-OCR/translation preview workflow,
+then passes its exact saved preview to the automatic renderer. No OCR/grouping,
+translation eligibility, font selection or erasure algorithm is implemented in
+`main.py`. Neither the OCR nor translation package imports the renderer.
+
+Use the validated `.venv-paddle6` runtime, existing local OCR exports, an installed
+translation model, and an explicit licensed font manifest (schema below). Choose a
+fresh output directory whose parent already exists:
+
+```sh
+.venv-paddle6/bin/python src/main.py \
+  --image images/ubunchu-ja-test/ubunchu01_04.png \
+  --output test-results/pipeline-page-v1 \
+  --device cpu --model-root "$HOME/.paddlex/official_models" \
+  --run-local-ocr --run-local-model \
+  --render --fonts test-results/render-parent-input-v1/fonts.json \
+  --max-attempts 20
+```
+
+With multiple manifest faces, also supply one global `--font-id`. The default
+translator remains `translategemma:27b` on `http://127.0.0.1:11434`; existing
+`--model`, `--profile` and explicit private `--endpoint` overrides still apply.
+No model/font download, fallback, mask drawing or per-balloon confirmation occurs.
+
+Outputs are:
+
+* `pipeline.json`: job status, original source/font hashes, bound preview/render
+  manifest hashes, coverage, upstream blockers, translation budget skips and
+  rendering skip reasons.
+* `preview/`: unchanged OCR/translation evidence, `preview.json`, journal and any
+  bounded provider/review sidecars.
+* `rendering/`: `composite.png`, original/clean/text layers, masks, `manifest.json`
+  and `review.html`, using the existing automatic rendering policy.
+
+Rendering now defaults to `--background-method auto`: flat fill first, then a
+separately validated classical-inpainting fallback for remaining strict translated
+candidates. No per-region manual selection is needed. `--background-method flat`
+preserves white/off-white-only behavior. This option is also available on the
+standalone `auto-compose` command. Unsupported/missing translations or uncertain
+text-versus-art masks remain explicit skips, not guessed replacements.
+
+Image format/dimensions, fonts/licenses, shaping availability and rendering options
+are checked **before OCR**. The pipeline uses the renderer's narrower limit of
+4M pixels/4096px per side. Original image/font bindings are checked again before
+rendering. OCR is closed before translation; rendering makes no model calls.
+
+Budgets remain explicit: translation defaults to **2 calls**, allowed 0–20;
+`--max-attempts 20` above requests a broader bounded pass, not guaranteed full-page
+coverage. Rendering attempts at most 16 units, possibly fewer under raster-work
+budgets. `--max-units N` is an optional rendering evaluation cap only. Rendering
+size bounds default to 16–28px (`--min-size`/`--max-size`). Guards are not relaxed
+to make a page fit.
+
+Exit **0** means every saved unit was composed and the preview pass completed;
+**1** means partial coverage or a failed job; **130** means interrupted; **2** means
+CLI/rendering preflight rejection. These are processing outcomes, not proof of
+language quality or complete detection. Inspect `pipeline.json` for the exact
+status/reasons. Failed/interrupted previews never render. Successful strict results
+from a pass with individual translation failures may still render as partial output.
+With no strict translations (including empty OCR), rendering is explicitly skipped
+and **no composite is produced**. A report can also contain an unchanged composite
+if every attempted rendering was safely rejected. All outputs remain unapproved
+candidates, and skipped units keep original lettering.
+
+Existing output paths and symlink inputs/output ancestors are rejected. Jobs never
+resume or overwrite earlier evidence. Failures after job reservation retain their
+checkpoints; abrupt termination/storage failure can leave the last `running`
+checkpoint or partial artifacts. Use a new output name to retry.
+
+Without `--render`, the original OCR-only/translation-preview CLI and output layout
+remain unchanged. The standalone saved-preview rendering tools below also remain
+available. Offline integration verification uses synthetic pages/fonts and injected
+OCR/providers only:
+
+```sh
+.venv/bin/python -m unittest tests.test_pipeline -v
+```
 
 ## Automatic saved-preview rendering: input → output
 
@@ -28,7 +120,11 @@ translation, provider, model initialization or network request occurs.
 
 ### Automatic tight-mask policy
 
-`automatic_original_tight_flat_v1` does not need a complete white-balloon partition:
+The first stage, `automatic_original_tight_flat_v3`, does not need a complete white-balloon partition.
+Its erasure/background checks are unchanged from v1; v2 added a bounded irregular
+layout fallback, and v3 adds comfortable typesetting. Neither grants more erasure
+permission. The default `automatic_flat_then_classical_v1` coordinator tries the
+separate restoration policy below only when this flat-stage mask cannot be derived:
 
 1. Seed original **whole 8-connected dark components** from member polygons using
    RGB-to-gray `<180`. Every component must remain within the original member
@@ -37,7 +133,8 @@ translation, provider, model initialization or network request occurs.
 2. Measure original RGB background from a local collar 2–4px outside the dark
    silhouette. Require >=32 samples, light neutral white/off-white (minimum
    channel 180, maximum channel spread 16), and maximum channel deviation **2**.
-   Colored/gradient/texture/neighbor contamination does not receive a fallback.
+   Colored/gradient/texture/neighbor contamination never receives a looser flatness
+   threshold; any restoration must independently establish its own source mask.
 3. Re-label full original RGB contrast `>2` relative to that measured background,
    retaining whole components seeded by the dark ink. This audits antialias
    coverage instead of assuming a one-pixel dilation of the 180-threshold mask
@@ -50,23 +147,183 @@ translation, provider, model initialization or network request occurs.
 5. Separately derive a bounded source-local layout rectangle using original flat
    whitespace and 2px clearance from all unrelated original contrast and all
    nonmember geometry. Expansion is limited to the source bbox plus <=32px
-   horizontally/24px vertically. Shared white regions can have disjoint local
-   layouts; this is not semantic ownership, a Voronoi partition or a claimed
-   speech boundary. Obstructed complete-ink seeds, colliding layouts/erasures or
-   RAQM overflow skip the unit. Both colliding units reject symmetrically.
+   horizontally/24px vertically. The previous rectangular result remains the
+   preferred path, with identical pixels when it succeeds.
+6. If **only the seed's rectangular box** is obstructed, but the actual complete
+   foreground plus 2px collar is unobstructed and wholly inside that same bounded
+   window, use the single **4-connected safe whitespace component** containing
+   every seed pixel. Unrelated contrast/nonmember clearance remains excluded,
+   including holes. No hull, hole filling, trimmed seed, diagonal bridge or
+   disconnected pocket is permitted. The existing renderer checks every final
+   alpha pixel against the resulting irregular mask; it may still overflow.
+   Shared white regions can have disjoint local layouts; this is not semantic
+   ownership, a Voronoi partition or a claimed speech boundary. Actual obstructed
+   or disconnected complete-ink seeds, colliding layouts/erasures or RAQM overflow
+   skip the unit. Both colliding units reject symmetrically.
 
 All effects/full-resolution alpha checks use the existing measured RAQM renderer.
 No text rewrite, clipping, squashing or size below the supplied bound is allowed.
 Cleanup is committed only after successful typography and per-unit pixel checks;
 skips leave source ink untouched. The manual/assisted flat-interior cleanup guard
-is unchanged. OpenCV Telea/Navier–Stokes are not used in this production policy;
-the parent's spike/comparison is feasibility evidence, not automatic permission
-for textured restoration. Learned segmentation remains outside this method.
+is unchanged. The flat stage does not use inpainting; its rejection is not erase
+permission for the separate fallback. Learned segmentation is not used in production;
+the optional CTD/LaMa feasibility experiment below is separate.
 
 Original source masks are raster-counted once per job; exact per-pixel counts
 preserve coincident/contained nonmember annotations when subtracting a member's
 contribution. Whole-component/color/collar checks still run per unit. No global
 white ownership or shared-outline condition is required for tight erasure.
+
+`mask_evidence.layout_derivation` records rectangle versus connected-safe-mask
+placement. The fallback retains the original rectangle rejection, connectivity,
+required seed count, zero discarded seed pixels and local component/pixel counts.
+The additional labeling is bounded to the existing source-local window and 8192
+components. Text placement changes do not change the source-derived erasure mask.
+
+The irregular-layout regression improved **5/8 to 6/8 strict translated candidates** on
+the same `ubunchu01_04.png` preview. The newly fitted long balloon previously had
+two obstructed *empty box-corner* pixels and zero obstructed actual seed pixels;
+its complete original lettering is removed. V2 fitted it at 27px within the existing
+16–28px bounds, preserving all five previous erasure/layout/text rasters. V3 keeps
+all six erasures and the cleanplate identical while improving the text layers.
+The remaining `component_spill` and
+`unassigned_contrast` units stay skipped; fragments/blocked units are not promoted.
+This is still partial output (6 of 29 saved units), not full-page coverage.
+Fresh typeset output: `test-results/automatic-typography-v3/review.html` and
+`composite.png`; the earlier tight-mask/irregular-layout baselines are retained.
+Runtime and independent
+pixel comparisons find zero changes outside erasure/translated alpha or inside
+protected pixels. These are locality checks, not semantic or aesthetic approval.
+
+### Comfortable automatic typesetting
+
+`rendering/typography.py` owns `comfortable_dialogue_v1`; no typesetting algorithm
+is added to the main coordinator, OCR or translation. Automatic text now uses:
+
+* **Inner margins:** shrink only the text-placement mask by 2–8px, scaled to its
+  smaller dimension and the supplied maximum size. Constant-zero erosion preserves
+  holes and source/page-edge clearance. No erased pixel or outer layout permission
+  changes; `unit-NNN-content-mask.png` retains the actual inset mask.
+* **A shared preferred size:** 90% of the explicit maximum, clamped to the explicit
+  minimum (25px with default 16–28px bounds). Narrow regions may require smaller
+  sizes; the policy does not force uniform text or infer a source font.
+* **Readable line breaks:** presentation scores penalize isolated 1–2-character
+  words in longer utterances, a disproportionately short final line, ragged line
+  widths and excess lines. Existing explicit newlines and short/name inputs are
+  not treated as accidental short-word orphans. No character, punctuation, space
+  or original hyphen is added/removed except legal inserted line breaks.
+* **Bounded size comparison:** at most four descending caps (100%, 90%, 80%, 65%
+  of the supplied maximum, clamped to the minimum). Each probe finds a contained
+  RAQM fit; the best presentation/size score wins. Repeated caps/fits are avoided.
+  All probes share the existing 65,536 measurement, 1M DP-transition and 64M local
+  raster-pixel limits, not fresh budgets per attempt. Resource, coverage, shaping
+  and containment failures stay failures; no retry with weaker margins or bounds.
+
+The review displays chosen/preferred size, margin, line count and a padded-mask
+link. Manifest `layout.typography` retains all probe scores, chosen probe, content
+bounds and margins. Search/raster work records the total spent, including probes
+that were not selected. This is a deterministic bounded aesthetic heuristic, not
+linguistic assessment, a globally optimal layout or exact source-font matching.
+Manual/assisted `natural.layout(...)` calls keep their existing size-first behavior
+unless the optional shared-work/ranking API is explicitly supplied.
+
+On the saved page, all **6/8 eligible** units still compose with an identical
+cleanplate. Four use the shared 25px preference; the narrower units use 19/18px.
+In particular, `I don't need it.` changes from four stacked lines to two while
+remaining within the original size bounds and padded mask.
+
+Two additional saved originals have no strict translated previews. Their tests
+therefore use the literal QA string **`Sample dialogue.`**, never a fabricated
+translation or composed page: `ubunchu01_02.png` has 6 safe mask plans/5 sample
+fits from 15 saved groups (one explicit overflow), and `ubunchu02_04.png` has 8/8
+from 14 groups. Uncertain geometry remains skipped; no source pixels are erased.
+These 29 cases broaden geometry/typesetting checks, **not** end-to-end translated
+page coverage. See `tests/rendering/test_typography.py` and local diagnostic
+specimens in `test-results/automatic-typography-multipage-v1/`.
+
+### Automatic nonwhite background restoration
+
+`rendering/restoration.py` implements `source_bound_classical_inpaint_v1`. Both
+`src/main.py --render` and `tools/render_preview.py auto-compose` automatically try
+it after flat-mask rejection, under the same strict translation bindings and job
+budgets. Existing white fills remain the first choice. Typography failures do not
+trigger unnecessary inpainting or silently reduce the minimum font size.
+
+Supported initial cases are **strongly contrasting lettering on solid colors,
+dark backgrounds, smooth RGB gradients, and mild low-amplitude texture**. This is
+not universal restoration of screentones, photographs, or detailed manga artwork:
+
+1. Reuse original member/nonmember geometry and exact overlapping-annotation counts.
+   Fit a local affine RGB background from an original 2–6px collar around the member
+   geometry, using every sample (no outlier discarding). Require at least 64 and at
+   most 65,536 samples, maximum channel deviation 12, RMSE 6, bounded slopes and
+   plausible RGB predictions. Neighboring detections or clipped support reject.
+2. Seed high-contrast foreground inside source polygons and trace **whole original
+   contrast components**, including supported antialias pixels. The residual floor
+   is 2–14 channel levels according to measured background variation; the strong
+   seed threshold is at least 48. Require complete component containment within the
+   member neighborhood, bounded glyph extents, no unassigned contrast, and an
+   independent clear collar outside the 1px erasure dilation. Foreground and its
+   clearance cannot touch nonmembers. Never paint the OCR rectangle or cut a
+   connected art stroke to manufacture a text mask.
+3. Run bounded OpenCV **Navier–Stokes** inpainting for smooth support, or **Telea**
+   for mild texture, with radius 3. If its result fails background-model consistency,
+   try the other method once. Original RGB/BGR conversions are explicit. The raw
+   backend result must leave every unmasked pixel exact; backend drift rejects the
+   operation rather than being concealed by a subsequent masked copy.
+4. Derive placement from original obstacles and nonmember geometry, not from the
+   invented cleanplate. Fit English using the same comfortable typography checks.
+   Dark restored regions use white text with a black 1px outline; lighter regions
+   use black text with a white 1px outline. Only after typography, collisions and
+   independent pixel audits succeed are restored mask pixels and text committed.
+
+Every unit records the flat/restoration attempts, skip reasons, actual cleanup
+method, foreground/model evidence and restoration consistency metrics. The review
+shows those attempts. `background_summary` counts actual flat/restored outputs and
+attempts; the main `pipeline.json` includes it in the rendering summary. On failure,
+both stages leave source pixels untouched. A restoration failure never promotes
+fragments, visual alternates, structurally blocked or untranslated entries.
+
+Additional bounds: local restoration <=262,144 pixels/1024px per side, <=8192
+contrast components, <=64 seeded components, <=96px component sides, <=20,000 ink
+pixels/component, component ink occupancy <=half the member-mask area (64px floor),
+and <=one-third masked local pixels. Joined-letter bounding boxes are not treated
+as solid ink; whole foreground components are still retained. At most two backend calls
+per attempted unit within the existing <=16-unit job/raster budgets. No provider,
+model weights, downloads or dependency changes are required.
+
+**Restoration quality stays unverified.** A consistent background model is not
+ground truth for hidden artwork. Texture below the measured noise floor cannot
+be distinguished perfectly from faint antialiasing; oversized OCR regions can
+also contain artwork. Dense/complex texture, low-contrast text, crossing strokes
+and insufficient evidence remain unsupported rather than bypassing the guards.
+Truly general artwork restoration still needs stronger text segmentation and a
+learned inpainting backend; none is silently downloaded or substituted here.
+
+Known-background synthetic regressions verify color, dark, gradient and mild-noise
+cases against the actual pre-lettering pixels, not merely plausible output. They
+also verify automatic fallback, dark-text contrast selection, both backend methods,
+explicit flat-only mode, locality, nonmember protection and no erasure when typography
+fails. The existing saved white page still renders 6/8 eligible translations; its
+remaining ownership/ink problems are not solved by changing background methods.
+See `test-results/classical-restoration-benchmark-v2/` for labelled synthetic
+specimens and measured reconstruction errors; these are not real translated-page
+quality claims.
+
+### Learned-mask and background-restoration experiment
+
+The optional local CTD/LaMa experiment is separate from production routing.
+It freezes source hashes and development/held-out memberships, compares raw and
+source-bound refined CTD masks, and compares classical methods against a pinned
+LaMa ONNX conversion **using identical masks and native-resolution contexts**.
+No model adapter was added to the production renderer. A real standalone CTD
+output was obtained before the experiment runner was built.
+
+See [the evaluation/provenance record](docs/learned-restoration-evaluation.md) for
+exact artifacts, licensing uncertainty, preprocessing corrections, reproducible
+commands, results and limitations. Models/dependencies require separate scoped
+acquisition; these tools never download them automatically. They do not need
+provider calls, training, user editing or changes to existing environments.
 
 ### Automatic outputs and provenance
 
@@ -119,7 +376,7 @@ preserved and constrain layout. The parent independently checks actual generated
 page outputs; product generation has no operator confirmation gate.
 
 ```sh
-.venv/bin/python -m unittest tests.rendering.test_automatic -v
+.venv/bin/python -m unittest tests.rendering.test_automatic tests.rendering.test_automatic_layout tests.rendering.test_typography tests.rendering.test_restoration -v
 .venv/bin/python -m unittest discover -s tests -q
 .venv/bin/python -m unittest tests.source_only_check -v
 .venv/bin/python -m compileall -q src/tralens/rendering tests/rendering tools/render_preview.py
@@ -989,9 +1246,11 @@ src/tralens/
   ocr/          types.py, detection.py, grouping.py, review.py,
                 recognition_units.py, transcription_selection.py, automatic_units.py,
                 automatic_evidence.py, automatic_recognition.py, manga_adapter.py
-  translation/  translator.py
-  rendering/    renderer.py
-tools/          diagnostics.py
+  translation/  contracts.py, workflow.py, runtime.py, ocr_review.py, translator.py
+  rendering/    automatic.py, restoration.py, typography.py, natural.py, preparation.py,
+                review.py, styles.py, renderer.py
+src/main.py     preview CLI and optional end-to-end rendering coordinator
+tools/          standalone OCR/translation/rendering diagnostics
 tests/          ocr/, translation/, rendering/, tools/
 ```
 
@@ -1011,8 +1270,8 @@ from tralens.rendering import cover_text, draw_text
 algorithms and provenance are unchanged. Paddle's import-time host check is
 deferred until explicit OCR construction, through `detection.create_paddle_ocr`.
 The OCR facade loads detection only when `OCR` is requested, so unit diagnostics
-do not import an engine. No legacy source-path wrappers remain. The empty
-`src/main.py` remains untouched; there is no speculative pipeline module.
+do not import an engine. No legacy source-path wrappers remain. `src/main.py`
+connects the existing stages; there is no separate pipeline package.
 
 Paddle text, confidence, polygon and box ID remain in `paddle_*` fields.
 `selected_text` (also available as legacy `text`), `selected_engine`, `status`,
@@ -2745,7 +3004,7 @@ Source-only verification:
 
 ## Normal image-to-unit preview workflow
 
-`src/main.py` is the normal **preview-only** image entrypoint. It uses the current
+Without `--render`, `src/main.py` is the normal **preview-only** image entrypoint. It uses the current
 OCR facade with `propose_units=True`, `complementary_ownership=True`, and
 `regroup_companions=True`, then snapshots automatic utterances and optionally
 translates them. It never imports a renderer/erasure implementation, writes on the
