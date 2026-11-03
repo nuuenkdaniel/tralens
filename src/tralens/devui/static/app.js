@@ -56,7 +56,7 @@ if (typeof document !== "undefined") {
     translation: "Translated regions are highlighted. Read the English text alongside the original page.",
     clean: "The actual cleanup layer, before translated lettering is added.", final: "The actual composite: cleanup and translated lettering together."
   };
-  let config, current = null, snapshot = null, sourceImage = null, sourceURL = null;
+  let config, current = null, snapshot = null, sourceImage = null, sourceURL = null, settingsJob = null;
   let selected = null, selectedView = "original", timer, busy = false, pendingFile = null, localURL = null;
   const outputImages = new Map();
   const node = (tag, text, className) => {
@@ -77,8 +77,10 @@ if (typeof document !== "undefined") {
   }
   function setBusy(value) {
     busy = value;
-    $("run").disabled = value || !config || !pendingFile;
-    $("run").textContent = value ? "Running…" : "Run pipeline →";
+    const retry = Boolean(current && snapshot && snapshot.status !== "running");
+    $("run").disabled = value || !config || (!pendingFile && !retry);
+    $("run").textContent = value ? "Running…" : retry ? "Retry pipeline ↻" : "Run pipeline →";
+    $("run").title = retry ? "Rerun this saved upload with the current settings. Previous results are kept." : "Start a new run with the selected image.";
     $("jobs").disabled = value;
     for (const id of ["file", "mode", "budget", "policy", "fragments"]) $(id).disabled = value;
   }
@@ -294,10 +296,17 @@ if (typeof document !== "undefined") {
   }
   function display(data) {
     snapshot = data;
+    if (settingsJob !== data.id) {
+      $("mode").value = data.options.mode; $("budget").value = data.options.max_attempts;
+      $("policy").value = data.options.render_policy; $("fragments").checked = data.options.allow_fragments;
+      settingsJob = data.id; settingsSummary();
+    }
+    if (!pendingFile) $("filename").textContent = `Saved run · ${data.id.slice(0, 8)}`;
+    $("file-info").textContent = data.size.join(" × ") + " px · " + (data.status === "running" ? "using the saved upload" : "same upload · retry creates a fresh run");
     $("results").hidden = false; $("empty-state").hidden = true;
     const translations = data.units.filter(unit => unit.status === "preview" && unit.target).length;
     $("status").textContent = data.status === "running" ? `${{starting: "Starting local pipeline", ocr: "Finding and grouping text", translation: "Translating text", rendering: "Cleaning and lettering the page", finalizing: "Finishing outputs"}[data.stage] || "Processing"}… · ${data.elapsed_seconds}s`
-      : `${data.status === "partial" || data.status === "complete_with_failures" ? "Finished with partial results" : data.status === "complete" ? "Ready to inspect" : "Run stopped"} · ${data.elapsed_seconds}s`;
+      : `${data.status === "partial" || data.status === "complete_with_failures" ? "Finished with partial results" : data.status === "complete" ? "Ready to inspect" : "Run stopped"} · ${data.restored ? "saved run" : data.elapsed_seconds + "s"}`;
     $("status-dot").dataset.state = data.status;
     $("summary").textContent = `${data.detections.length} regions · ${translations} translations${data.rendering_coverage ? ` · ${data.rendering_coverage.rendered} replacements` : ""}`;
     const coverage = data.rendering_coverage;
@@ -326,16 +335,16 @@ if (typeof document !== "undefined") {
     for (const id of ["ocr-text", "output-directory", "notices"]) $(id).textContent = "";
   }
   function selectJob(identity, keepFile = false) {
-    clearTimeout(timer); revokeLocal(); current = identity; snapshot = null; sourceImage = null; sourceURL = null; selected = null; outputImages.clear();
+    clearTimeout(timer); revokeLocal(); current = identity; snapshot = null; settingsJob = null; sourceImage = null; sourceURL = null; selected = null; outputImages.clear();
     selectedView = "original"; $("follow").checked = true;
     clearArtifacts(); showError(""); $("results").hidden = true;
-    if (!keepFile) { pendingFile = null; $("file").value = ""; $("filename").textContent = `Saved run · ${identity.slice(0, 8)}`; $("file-info").textContent = "Original upload preserved on disk"; }
+    if (!keepFile) { pendingFile = null; $("file").value = ""; $("filename").textContent = `Saved run · ${identity.slice(0, 8)}`; $("file-info").textContent = "Original upload preserved on disk"; setBusy(false); }
     poll(identity);
   }
   function chooseFile(file) {
     if (busy || !file) return;
     if (file.size > (config?.max_upload_bytes || 32 * 1024 * 1024)) return showError("Upload limit is 32 MiB.");
-    clearTimeout(timer); revokeLocal(); current = null; snapshot = null; selected = null; pendingFile = file; outputImages.clear();
+    clearTimeout(timer); revokeLocal(); current = null; snapshot = null; settingsJob = null; selected = null; pendingFile = file; outputImages.clear();
     clearArtifacts(); $("follow").checked = true; selectedView = "original";
     $("filename").textContent = file.name; $("file-info").textContent = "Loading image preview…";
     $("results").hidden = false; $("empty-state").hidden = true; $("summary").textContent = ""; $("render-note").textContent = "";
@@ -344,13 +353,16 @@ if (typeof document !== "undefined") {
   }
   $("run-form").addEventListener("submit", async event => {
     event.preventDefault();
-    if (!pendingFile || busy) return;
-    const file = pendingFile;
+    const retry = current && snapshot && snapshot.status !== "running";
+    if ((!pendingFile && !retry) || busy) return;
+    const file = pendingFile, parent = current;
     const settings = {mode: $("mode").value, max_attempts: Number($("budget").value), allow_fragments: $("fragments").checked, render_policy: $("policy").value};
-    setBusy(true); showError(""); $("status").textContent = "Uploading original image…";
+    setBusy(true); showError(""); $("status").textContent = retry ? "Starting a fresh run with the saved image…" : "Uploading original image…";
     try {
-      const result = await request("/api/jobs", {method: "POST", headers: {"Content-Type": "application/octet-stream", "X-Tralens-Token": config.token, "X-Tralens-Options": JSON.stringify(settings)}, body: file});
-      const choice = node("option", `${file.name} · ${result.id.slice(0, 8)}`); choice.value = result.id; $("jobs").append(choice); $("jobs").value = result.id; selectJob(result.id, true);
+      const result = retry
+        ? await request(`/api/jobs/${parent}/retry`, {method: "POST", headers: {"Content-Type": "application/json", "X-Tralens-Token": config.token}, body: JSON.stringify(settings)})
+        : await request("/api/jobs", {method: "POST", headers: {"Content-Type": "application/octet-stream", "X-Tralens-Token": config.token, "X-Tralens-Options": JSON.stringify(settings)}, body: file});
+      const choice = node("option", `${retry ? "Retry " + parent.slice(0, 8) : file.name} · ${result.id.slice(0, 8)}`); choice.value = result.id; $("jobs").append(choice); $("jobs").value = result.id; selectJob(result.id, true);
     } catch (error) { showError(error.message); $("status").textContent = "Run was not started."; setBusy(false); }
   });
   $("file").addEventListener("change", () => chooseFile($("file").files[0]));

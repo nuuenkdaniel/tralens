@@ -24,6 +24,12 @@ with the English text alongside it; only Final shows actual replaced lettering.
 Stages without output explain why instead of showing a fake or unchanged final.
 Run settings, masks and raw artifacts are tucked into expandable sections.
 
+After any completed, partial or failed run, **Run pipeline** becomes **Retry
+pipeline**. It reuses the saved upload with the current Run settings—no file
+selection is needed, including after refresh. A retry reruns the pipeline in a
+fresh directory with a fresh call budget; it does not resume or overwrite the
+previous run. Choosing a different image switches the button back to Run pipeline.
+
 The default OCR export root is `~/.cache/tralens/paddle-v6-models`; override with
 `--model-root PATH` if needed. Translation uses the existing local Ollama service
 and `translategemma:27b`; no models are downloaded. The viewer respects
@@ -31,13 +37,13 @@ and `translategemma:27b`; no models are downloaded. The viewer respects
 overrides it. Otherwise it uses `http://127.0.0.1:11434`. The selected endpoint is
 printed at startup and shown in Run settings. A working OCR stage does not prove
 Ollama is reachable: connection failures leave no translation to render.
-Without `--fonts`, OCR and
-translation still work, but rendering is disabled. For another checkout, supply
+Without `--fonts`, OCR and translation still work, but rendering is disabled.
+For another checkout, supply
 your own explicit licensed font manifest using the schema below.
 
 The translation call budget defaults to **2**; increase it to at most **20** in the
 page for a broader pass. Existing rendering/eligibility limits still apply. No
-inference happens on server startup, page load or refresh—only on **Run**.
+inference happens on server startup, page load or refresh—only on **Run** or **Retry**.
 
 Status comes from real saved checkpoints, polled once a second. OCR/grouping
 details appear when that phase publishes evidence, translations appear as units
@@ -45,20 +51,24 @@ finish, and rendering layers appear when published. There is no fake percentage
 progress, token streaming, mask editing or manual source correction in this viewer.
 
 Jobs keep their uploads and pipeline artifacts under `test-results/dev-frontend/`.
-One job runs at a time, with eight runs per server session; refresh preserves the
-session list, but restarting the server resets that in-memory list without deleting
-files. Retries create new jobs. Ctrl+C stops the server; it does not guarantee a
-running native OCR/model operation finished or its last checkpoint is final.
+One job runs at a time, with eight new runs per server session. Refresh preserves
+the run list; restarting restores up to 24 recent saved runs for inspection and
+retry, including older pipeline runs without viewer metadata. Restore never starts
+inference, resumes a running checkpoint, or rewrites old evidence. Interrupted
+runs are marked as such and can be retried explicitly. Ctrl+C stops the server;
+it does not guarantee a running native OCR/model operation finished or its last
+checkpoint is final.
 
 **Local development only:** binds to loopback, rejects cross-origin requests and
 path traversal, and accepts only bounded PNG/JPEG uploads (32 MiB, 4M pixels,
 4096px side; opaque source required). Do not expose this Python development server
 as a public upload service. Native engine setup/model failures are shown in the UI.
 
-Verification: 13 offline viewer tests cover HTTP upload through the real pipeline
+Verification: 20 offline viewer tests cover HTTP upload through the real pipeline
 with injected engines/providers, checkpoint visibility, mode dispatch, errors,
-source retention and request/path guards. A headless Firefox smoke test also
-exercised browser file upload, five stage views, comparison, zoom, highlighting and page refresh;
+source retention, retries, saved-run recovery and request/path guards. A headless
+Firefox smoke test also exercised browser file upload, five stage views,
+comparison, zoom, highlighting, page refresh and retry without re-uploading;
 it used the same synthetic pipeline fixtures, not live inference.
 
 ## One-command image pipeline

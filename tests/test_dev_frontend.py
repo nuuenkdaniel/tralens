@@ -143,6 +143,125 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(app.artifact(identity, view['input']).read_bytes(), original)
         self.assertIsNone(app.active)
 
+    def test_retry_reuses_upload_in_a_fresh_job_and_keeps_previous_results(self):
+        runner = Mock(side_effect=[RuntimeError('first run failed'), dict(status='complete')])
+        app = s.App(self.config, runner=runner)
+        first = app.start(image_bytes(), dict(mode='ocr', max_attempts=3))
+        self.assertTrue(app.job(first)['done'].wait(5))
+        previous = app.job(first)
+        before = {p.name: p.read_bytes() for p in previous['directory'].iterdir() if p.is_file()}
+        second = app.retry(first, dict(max_attempts=7))
+        self.assertTrue(app.job(second)['done'].wait(5))
+        current = app.job(second)
+        self.assertNotEqual(first, second)
+        self.assertEqual(current['image'].read_bytes(), previous['image'].read_bytes())
+        self.assertEqual(current['options']['mode'], 'ocr')
+        self.assertEqual(current['options']['max_attempts'], 7)
+        self.assertEqual(current['retry_of'], first)
+        self.assertEqual(app.job(first)['status'], 'failed')
+        self.assertEqual(before, {p.name: p.read_bytes() for p in previous['directory'].iterdir() if p.is_file()})
+        self.assertEqual(runner.call_count, 2)
+
+    def test_http_retry_works_without_upload_and_requires_session_token(self):
+        app = s.App(self.config, runner=lambda *args: dict(status='complete'))
+        identity = app.start(image_bytes(), dict(mode='ocr'))
+        self.assertTrue(app.job(identity)['done'].wait(5))
+        http = self.serve(app)
+        path = f'/api/jobs/{identity}/retry'
+        self.assertEqual(self.request(http, 'POST', path, b'{}')[0], 403)
+        status, _, content = self.request(http, 'POST', path, b'{"max_attempts":4}',
+            {'X-Tralens-Token': app.token, 'Content-Type': 'application/json'})
+        self.assertEqual(status, 202, content)
+        new = json.loads(content)['id']
+        self.assertTrue(app.job(new)['done'].wait(5))
+        self.assertEqual(app.snapshot(new)['retry_of'], identity)
+        self.assertEqual(app.snapshot(new)['options']['max_attempts'], 4)
+        self.assertEqual(self.request(http, 'POST', '/api/jobs/'+'0'*32+'/retry', b'{}',
+            {'X-Tralens-Token': app.token})[0], 404)
+
+    def test_retry_rejects_changed_or_symlinked_upload_without_dispatching(self):
+        runner = Mock(return_value=dict(status='complete'))
+        app = s.App(self.config, runner=runner)
+        identity = app.start(image_bytes(), dict(mode='ocr'))
+        self.assertTrue(app.job(identity)['done'].wait(5))
+        image = app.job(identity)['image']
+        image.write_bytes(image_bytes(size=(99, 99)))
+        with self.assertRaisesRegex(s.RequestError, 'changed'):
+            app.retry(identity, {})
+        self.assertEqual(runner.call_count, 1)
+        image.unlink()
+        image.symlink_to(self.root/'outside.png')
+        with self.assertRaises(s.RequestError):
+            app.retry(identity, {})
+        self.assertEqual(runner.call_count, 1)
+
+    def test_restart_restores_retry_targets_without_running_models(self):
+        app = s.App(self.config, runner=Mock(side_effect=RuntimeError('saved failure')))
+        identity = app.start(image_bytes(), dict(mode='ocr', max_attempts=3))
+        self.assertTrue(app.job(identity)['done'].wait(5))
+        runner = Mock(return_value=dict(status='complete'))
+        restored = s.App(self.config, runner=runner)
+        self.assertEqual(restored.snapshot(identity)['status'], 'failed')
+        self.assertTrue(restored.snapshot(identity)['restored'])
+        self.assertEqual(restored.snapshot(identity)['options']['max_attempts'], 3)
+        runner.assert_not_called()
+        fresh = restored.retry(identity, {})
+        self.assertTrue(restored.job(fresh)['done'].wait(5))
+        self.assertEqual(restored.job(fresh)['image'].read_bytes(), app.job(identity)['image'].read_bytes())
+        runner.assert_called_once()
+
+    def test_legacy_pipeline_runs_are_available_to_retry_after_restart(self):
+        directory = self.config.root/('a'*32)
+        (directory/'run/preview').mkdir(parents=True)
+        data = image_bytes()
+        (directory/'input.png').write_bytes(data)
+        (directory/'run/pipeline.json').write_text(json.dumps(dict(status='partial', render_policy='conservative',
+            source=dict(sha256=s.hashlib.sha256(data).hexdigest(), size=[100, 100]),
+            rendering=dict(status='skipped', reason='no_strict_translations'))))
+        (directory/'run/preview/preview.json').write_text(json.dumps(dict(status='complete', stage='finished', units=[],
+            settings=dict(max_attempts=5, run_local_model=True), ocr=None)))
+        runner = Mock()
+        app = s.App(self.config, runner=runner)
+        runner.assert_not_called()
+        job = app.job('a'*32)
+        self.assertEqual(job['status'], 'partial')
+        self.assertEqual(job['options']['mode'], 'render')
+        self.assertEqual(job['options']['render_policy'], 'conservative')
+        self.assertEqual(job['options']['max_attempts'], 5)
+        self.assertFalse((directory/'viewer.json').exists(), 'restoration must not rewrite old evidence')
+
+    def test_interrupted_history_is_not_resumed_and_does_not_spend_session_slots(self):
+        app = s.App(self.config, runner=lambda *args: dict(status='complete'))
+        identity = app.start(image_bytes(), dict(mode='ocr'))
+        self.assertTrue(app.job(identity)['done'].wait(5))
+        metadata = app.job(identity)['directory']/'viewer.json'
+        value = json.loads(metadata.read_text())
+        value['status'] = 'running'
+        metadata.write_text(json.dumps(value))
+        runner = Mock(return_value=dict(status='complete'))
+        restored = s.App(self.config, runner=runner)
+        self.assertEqual(restored.job(identity)['status'], 'interrupted')
+        runner.assert_not_called()
+        with patch.object(s, 'MAX_JOBS', 1):
+            fresh = restored.retry(identity, {})
+            self.assertTrue(restored.job(fresh)['done'].wait(5))
+            with self.assertRaises(s.RequestError) as caught:
+                restored.retry(identity, {})
+            self.assertEqual(caught.exception.status, 429)
+
+    def test_busy_run_cannot_be_retried(self):
+        release = threading.Event()
+        app = s.App(self.config, runner=lambda *args: (release.wait(5), dict(status='complete'))[1])
+        identity = app.start(image_bytes(), dict(mode='ocr'))
+        try:
+            with self.assertRaises(s.RequestError) as caught:
+                app.retry(identity, {})
+            self.assertEqual(caught.exception.status, 409)
+            self.assertEqual(len(app.jobs), 1)
+        finally:
+            release.set()
+            self.assertTrue(app.job(identity)['done'].wait(5))
+
     def test_upload_validation_precedes_worker_dispatch(self):
         runner = Mock(side_effect=AssertionError('invalid upload'))
         app = s.App(self.config, runner=runner)

@@ -4,10 +4,12 @@ Polls the real pipeline's atomic checkpoints; no duplicate stage algorithms and
 no simulated progress. Models are initialized only by an explicit uploaded run.
 """
 from dataclasses import dataclass
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 import json
 import mimetypes
+import math
 from pathlib import Path
 import re
 import secrets
@@ -20,6 +22,7 @@ import uuid
 STATIC = Path(__file__).with_name('static')
 MAX_UPLOAD = 32*1024*1024
 MAX_JOBS = 8
+MAX_HISTORY = 24
 ARTIFACT_SUFFIXES = {'.png', '.jpg', '.jpeg', '.json', '.jsonl', '.txt', '.html', '.bin'}
 
 
@@ -63,7 +66,7 @@ def options(value, *, render_enabled):
 def checkpoint(path, notices):
     """Read published checkpoints only; never interpret missing data as success."""
     try:
-        if path.is_symlink():
+        if any(p.is_symlink() for p in (path, *path.parents)):
             raise ValueError('symlink checkpoint')
         with path.open('rb') as stream:
             content = stream.read(16*1024*1024+1)
@@ -111,6 +114,72 @@ class App:
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.Lock()
         self.jobs, self.active = {}, None
+        self.started_jobs = 0
+        self._restore_jobs()
+
+    def _restore_jobs(self):
+        """Restore inspection/retry targets, never resume work or rewrite evidence."""
+        directories = [p for p in self.root.iterdir() if re.fullmatch('[0-9a-f]{32}', p.name)
+                       and not p.is_symlink() and p.is_dir()]
+        for directory in sorted(directories, key=lambda p: p.stat().st_mtime)[-MAX_HISTORY:]:
+            notices = []
+            meta = checkpoint(directory/'viewer.json', notices)
+            pipeline = checkpoint(directory/'run/pipeline.json', notices) or {}
+            preview = checkpoint(directory/'run/preview/preview.json', notices) or {}
+            if not meta and not pipeline and not preview:
+                continue
+            try:
+                if meta and (meta.get('purpose') != 'development_viewer_job' or meta.get('id') != directory.name):
+                    continue
+                source = pipeline.get('source') or preview.get('input') or {}
+                settings = (meta or {}).get('options') or dict(
+                    mode='render' if pipeline else 'translate' if preview.get('settings', {}).get('run_local_model') else 'ocr',
+                    max_attempts=preview.get('settings', {}).get('max_attempts', 2),
+                    allow_fragments=preview.get('settings', {}).get('allow_fragment_previews', False),
+                    render_policy=pipeline.get('render_policy', 'best-effort'))
+                settings = options(settings, render_enabled=True)  # View old jobs even without a current font manifest.
+                images = [directory/name for name in ('input.png', 'input.jpg') if (directory/name).is_file()]
+                if len(images) != 1 or images[0].is_symlink():
+                    continue
+                with images[0].open('rb') as stream:
+                    data = stream.read(MAX_UPLOAD+1)
+                expected = (meta or {}).get('source_sha256') or source.get('sha256')
+                if len(data) > MAX_UPLOAD or not expected or hashlib.sha256(data).hexdigest() != expected:
+                    continue
+                size = (meta or {}).get('size') or source.get('size')
+                if (type(size) is not list or len(size) != 2 or
+                        any(type(v) is not int or not 0 < v <= 4096 for v in size) or size[0]*size[1] > 4_000_000):
+                    continue
+                report = pipeline or preview
+                status = (meta or {}).get('status', report.get('status', 'interrupted'))
+                error = (meta or {}).get('error') or report.get('error')
+                if status == 'running':
+                    status = report.get('status', 'running')
+                    if status == 'running':
+                        status, error = 'interrupted', dict(type='ServerRestart',
+                            message='The server stopped before this run finished. Retry starts a fresh run.')
+                if status not in ('complete', 'partial', 'complete_with_failures', 'failed', 'interrupted'):
+                    continue
+                elapsed = (meta or {}).get('elapsed_seconds', 0)
+                if type(elapsed) not in (int, float) or not math.isfinite(elapsed) or elapsed < 0:
+                    continue
+                done = threading.Event()
+                done.set()
+                now = time.monotonic()
+                self.jobs[directory.name] = dict(id=directory.name, directory=directory, image=images[0],
+                    size=size, source_sha256=expected, options=settings, status=status, error=error,
+                    started=now-elapsed, ended=now, done=done, restored=True,
+                    retry_of=(meta or {}).get('retry_of'))
+            except (ValueError, OSError, KeyError, TypeError):
+                continue
+
+    def _save_job(self, job, *, replace_owned=False):
+        from ..translation.workflow import _atomic_json
+        value = {key: job.get(key) for key in
+                 ('id', 'size', 'source_sha256', 'options', 'status', 'error', 'retry_of')}
+        value.update(purpose='development_viewer_job', schema_version=1,
+            elapsed_seconds=round(job.get('ended', time.monotonic())-job['started'], 1))
+        _atomic_json(job['directory']/'viewer.json', value, replace_owned=replace_owned)
 
     def public_config(self):
         return dict(token=self.token, device=self.config.device, model=self.config.model,
@@ -123,14 +192,14 @@ class App:
         with self.lock:
             return [dict(id=job['id'], status=job['status'], mode=job['options']['mode']) for job in self.jobs.values()]
 
-    def start(self, data, supplied):
+    def start(self, data, supplied, *, retry_of=None):
         settings = options(supplied, render_enabled=self.config.fonts is not None)
         if not 0 < len(data) <= MAX_UPLOAD:
             raise RequestError('Upload must be 1 byte–32 MiB.')
         with self.lock:
             if self.active is not None:
                 raise RequestError('A job is already running. Wait for it to finish.', 409)
-            if len(self.jobs) >= MAX_JOBS:
+            if self.started_jobs >= MAX_JOBS:
                 raise RequestError('Session job limit reached. Restart the server to run more jobs.', 429)
             from PIL import Image
             from ..rendering.preparation import source_rgb
@@ -153,8 +222,11 @@ class App:
             if settings['mode'] != 'render':
                 (directory/'run').mkdir(mode=0o700)
             job = dict(id=identity, directory=directory, image=image, size=size,
-                options=settings, status='running', started=time.monotonic(), error=None, done=threading.Event())
+                options=settings, status='running', started=time.monotonic(), error=None, done=threading.Event(),
+                source_sha256=hashlib.sha256(data).hexdigest(), retry_of=retry_of, restored=False)
+            self._save_job(job)
             self.jobs[identity] = job
+            self.started_jobs += 1
             self.active = identity
             thread = threading.Thread(target=self._run, args=(job,), daemon=True)
             try:
@@ -166,6 +238,21 @@ class App:
                 raise
         return identity
 
+    def retry(self, identity, supplied):
+        previous = self.job(identity)
+        if type(supplied) is not dict:
+            raise RequestError('Run options must be an object.')
+        if previous['status'] == 'running':
+            raise RequestError('This run is still active. Wait before retrying.', 409)
+        image = self.artifact(identity, previous['image'].name)
+        with image.open('rb') as stream:
+            data = stream.read(MAX_UPLOAD+1)
+        if len(data) > MAX_UPLOAD or hashlib.sha256(data).hexdigest() != previous['source_sha256']:
+            raise RequestError('The retained upload changed. Choose the original image again.', 409)
+        # No previous preview/results are promoted or overwritten. The coordinator
+        # receives a fresh source path and uses the current server configuration.
+        return self.start(data, {**previous['options'], **supplied}, retry_of=identity)
+
     def _run(self, job):
         try:
             report = self.runner(self.config, job)
@@ -175,6 +262,10 @@ class App:
             status, error = 'failed', dict(type=type(failure).__name__, message=str(failure)[:2000])
         with self.lock:
             job.update(status=status, error=error, ended=time.monotonic())
+            try:
+                self._save_job(job, replace_owned=True)
+            except (OSError, ValueError, TypeError) as failure:
+                job['history_warning'] = 'Could not save viewer history: '+str(failure)[:500]
             self.active = None
             job['done'].set()
 
@@ -202,6 +293,8 @@ class App:
         job = self.job(identity)
         directory = job['directory']
         notices = []
+        if job.get('history_warning'):
+            notices.append(job['history_warning'])
         pipeline = checkpoint(directory/'run/pipeline.json', notices)
         preview = checkpoint(directory/'run/preview/preview.json', notices)
         rendering = checkpoint(directory/'run/rendering/manifest.json', notices)
@@ -244,6 +337,7 @@ class App:
                 notices.append('Artifact list truncated at 512 files.')
                 break
         return dict(id=identity, status=job['status'], stage=stage, options=job['options'],
+            retry_of=job.get('retry_of'), restored=job.get('restored', False),
             elapsed_seconds=round(job.get('ended', time.monotonic())-job['started'], 1),
             preview_stage=preview.get('stage'),
             rendering_skipped=(pipeline or {}).get('rendering', {}).get('reason'),
@@ -319,7 +413,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             self.local_request()
-            if self.path != '/api/jobs':
+            retry = re.fullmatch('/api/jobs/([0-9a-f]{32})/retry', self.path)
+            if self.path != '/api/jobs' and retry is None:
                 raise RequestError('Not found.', 404)
             if not secrets.compare_digest(self.headers.get('X-Tralens-Token', ''), self.server.app.token):
                 raise RequestError('Invalid session token; reload the page.', 403)
@@ -327,19 +422,20 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get('Transfer-Encoding') or len(lengths) != 1 or not re.fullmatch('[0-9]{1,10}', lengths[0]):
                 raise RequestError('A single Content-Length is required.', 411)
             length = int(lengths[0])
-            if not 0 < length <= MAX_UPLOAD:
-                raise RequestError('Upload limit is 32 MiB.', 413)
-            supplied = self.headers.get('X-Tralens-Options', '{}')
+            if not 0 < length <= (4096 if retry else MAX_UPLOAD):
+                raise RequestError('Retry options must be 1–4096 bytes.' if retry else 'Upload limit is 32 MiB.', 413)
+            data = self.rfile.read(length)
+            if len(data) != length:
+                raise RequestError('Incomplete request.')
+            supplied = data if retry else self.headers.get('X-Tralens-Options', '{}')
             if len(supplied) > 2048:
                 raise RequestError('Run options too large.')
             try:
                 supplied = json.loads(supplied)
             except ValueError as error:
                 raise RequestError('Invalid run options JSON.') from error
-            data = self.rfile.read(length)
-            if len(data) != length:
-                raise RequestError('Incomplete upload.')
-            self.json(202, dict(id=self.server.app.start(data, supplied)))
+            identity = self.server.app.retry(retry.group(1), supplied) if retry else self.server.app.start(data, supplied)
+            self.json(202, dict(id=identity))
         except RequestError as error:
             self.json(error.status, dict(error=str(error)))
         except (OSError, ValueError, RuntimeError) as error:
