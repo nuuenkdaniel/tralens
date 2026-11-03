@@ -366,10 +366,7 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
     with Image.open(BytesIO(content)) as opened:
         n.budget_check(opened.width*opened.height <= p.MAX_PIXELS and max(opened.size) <= p.MAX_SIDE,
                        'automatic source pixel/side budget')
-        n.require(opened.mode in ('RGB', 'L') and getattr(opened, 'n_frames', 1) == 1
-                  and not opened.info.get('icc_profile') and opened.getexif().get(274, 1) == 1,
-                  'unsupported source mode/frame/profile/orientation')
-        with opened.convert('RGB') as rgb:
+        with p.source_rgb(opened) as rgb:
             source = {'path': str(image.resolve()), 'sha256': n.digest(content),
                 'pixels_sha256': n.digest(f'RGB:{rgb.width}:{rgb.height}:'.encode()+rgb.tobytes()),
                 'size': list(rgb.size)}

@@ -167,7 +167,7 @@ class AutomaticRestorationTests(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
 
-    def recolor(self, gradient=False, dark=False):
+    def recolor(self, gradient=False, dark=False, source_mode='RGB'):
         """Preserve synthetic source shapes and regenerate genuine bound contracts."""
         f = self.fixture
         from tralens.ocr.automatic_units import propose_page_from_boxes
@@ -181,7 +181,9 @@ class AutomaticRestorationTests(unittest.TestCase):
         pixels = background.clip(0, 255).astype(np.uint8)
         pixels[np.any(original != 255, axis=2)] = 255-original[np.any(original != 255, axis=2)] if dark else original[np.any(original != 255, axis=2)]
         image = Image.fromarray(pixels)
-        image.save(f.image)
+        encoded = image.convert(source_mode)
+        encoded.save(f.image)
+        image = encoded.convert('RGB')
         raw = f.preview['ocr']['raw_detections'][0]
         batch = asdict(propose_page_from_boxes([Text_Box(d['source_id'], d['confidence'], d['polygon'], d['text']) for d in raw], str(f.image)))
         if dark:

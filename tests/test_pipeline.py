@@ -254,6 +254,7 @@ class PipelineTests(unittest.TestCase):
             image = Image.new('RGB', (4097, 2) if kind == 'size' else (180, 130), 'white')
             if kind == 'mode':
                 image = image.convert('RGBA')
+                image.putpixel((0, 0), (255, 255, 255, 254))
             if kind == 'profile':
                 options['icc_profile'] = b'synthetic unsupported profile'
             if kind == 'orientation':

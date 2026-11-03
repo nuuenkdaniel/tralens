@@ -694,6 +694,7 @@ def run(mode, *, preview, image, selection, fonts, output, parent=None, compare=
         require(opened.mode in ("RGB", "L") and getattr(opened, "n_frames", 1) == 1
                 and opened.width*opened.height <= MAX_PAGE_PIXELS, "unsupported source mode/frame/pixel budget")
         require(not opened.info.get("icc_profile"), "embedded color profile unsupported; no silent color conversion")
+        require('transparency' not in opened.info, 'unsupported source transparency; no implicit matte')
         require(opened.getexif().get(274, 1) == 1, "EXIF orientation unsupported; source coordinates must be explicit")
         rgb = opened.convert("RGB")
         source_mode = opened.mode

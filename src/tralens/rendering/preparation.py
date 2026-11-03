@@ -585,6 +585,24 @@ def propose_geometry(rgb, detections, member_ids, options=None, *, context=None)
         return result
 
 
+def source_rgb(opened):
+    """Expand only explicit opaque channels; never guess a transparency matte.
+
+    The caller checks dimensions before decoding. Alpha-bearing originals are
+    accepted only if EVERY alpha sample is 255. Original bytes remain evidence;
+    canonical RGB values do not depend on a chosen display background.
+    """
+    n.budget_check(opened.width*opened.height <= MAX_PIXELS and max(opened.size) <= MAX_SIDE,
+                   'preparation source pixel/side budget')
+    n.require(opened.mode in ('RGB', 'L', 'RGBA', 'LA') and getattr(opened, 'n_frames', 1) == 1
+              and 'transparency' not in opened.info and not opened.info.get('icc_profile')
+              and opened.getexif().get(274, 1) == 1, 'unsupported source mode/frame/profile/orientation/transparency')
+    if 'A' in opened.getbands():
+        n.require(opened.getchannel('A').getextrema() == (255, 255),
+                  'unsupported source transparency; an explicit opaque source is required')
+    return opened.convert('RGB')
+
+
 def _sources(preview, image, fonts):
     paths = [Path(value).absolute() for value in (preview, image, fonts)]
     contents = [n.read_explicit(path, limit) for path, limit in zip(paths, (16*1024*1024, 32*1024*1024, 256*1024))]
@@ -592,10 +610,7 @@ def _sources(preview, image, fonts):
     with Image.open(BytesIO(contents[1])) as opened:
         n.budget_check(opened.width*opened.height <= MAX_PIXELS and max(opened.size) <= MAX_SIDE,
                        'preparation source pixel/side budget')
-        n.require(opened.mode in ('RGB', 'L') and getattr(opened, 'n_frames', 1) == 1
-                  and not opened.info.get('icc_profile') and opened.getexif().get(274, 1) == 1,
-                  'unsupported source mode/frame/profile/orientation')
-        rgb = opened.convert('RGB')
+        rgb = source_rgb(opened)
     source = {'path': str(paths[1].resolve()), 'sha256': n.digest(contents[1]),
               'pixels_sha256': n.digest(f'RGB:{rgb.width}:{rgb.height}:'.encode()+rgb.tobytes()), 'size': list(rgb.size)}
     n.require(type(p['schema_version']) is int and p['schema_version'] in (1, 2, 3) and p['preview_only'] is True

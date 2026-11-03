@@ -322,6 +322,13 @@ class CommandTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'orientation'):
             self.run_render()
 
+    def test_rgb_transparent_color_is_not_silently_dropped(self):
+        with Image.open(self.image) as opened:
+            image = opened.convert('RGB')
+        image.save(self.image, transparency=(255, 255, 255))
+        with self.assertRaisesRegex(ValueError, 'transparency'):
+            self.run_render()
+
     def test_import_and_cli_do_not_load_ocr_or_providers(self):
         tool = Path(__file__).resolve().parents[2]/'tools/render_preview.py'
         # A real subprocess renders a synthetic candidate with forbidden engine

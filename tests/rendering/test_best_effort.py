@@ -107,6 +107,32 @@ class BestEffortWorkflowTests(unittest.TestCase):
         self.assertEqual(report['quality_summary']['best_effort_rendered'], 0)
         self.assertEqual(report['pixel_audit']['clean_changed_pixels'], 0)
 
+    def test_fully_opaque_alpha_sources_keep_original_bytes_and_canonical_rgb_binding(self):
+        for mode in ('LA', 'RGBA'):
+            self.helper.recolor(source_mode=mode)
+            original = self.f.image.read_bytes()
+            preflight = a.preflight_automatic(image=self.f.image, fonts=self.f.root/'fonts.json')
+            report = self.run_render(mode)
+            self.assertEqual(report['coverage']['rendered'], 2)
+            self.assertEqual(report['source'], preflight['source'])
+            self.assertEqual((self.f.root/mode/'original-file.bin').read_bytes(), original)
+            self.assertEqual(self.f.image.read_bytes(), original)
+            n.verify_pixel_audit(report['pixel_audit'])
+            # Return to RGB before the fixture's next source recoloring.
+            Image.open(self.f.image).convert('RGB').save(self.f.image)
+
+    def test_one_nonopaque_pixel_or_rgb_transparency_key_is_not_silently_discarded(self):
+        for kind in ('alpha', 'transparent_color'):
+            image = Image.new('RGBA' if kind == 'alpha' else 'RGB', (180, 130), 'white')
+            options = {}
+            if kind == 'alpha':
+                image.putpixel((179, 129), (255, 255, 255, 254))
+            else:
+                options['transparency'] = (255, 255, 255)
+            image.save(self.f.image, **options)
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, 'transparency'):
+                a.preflight_automatic(image=self.f.image, fonts=self.f.root/'fonts.json')
+
     def test_typesetting_failure_reuses_cleanup_and_reports_smaller_type(self):
         self.helper.recolor()
         report = self.run_render(min_size=144, max_size=144)
