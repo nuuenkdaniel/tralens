@@ -27,7 +27,11 @@ def main(argv=None):
     parser.add_argument('--text-mask-model', type=Path,
                         help='auto-compose: optional acquired CTD ONNX for native-mask/periodic fallback; no download')
     parser.add_argument('--render-policy', choices=('best-effort', 'conservative'),
-                        help='auto-compose: default best-effort attempts risk-labelled replacements; conservative preserves uncertain source')
+                         help='auto-compose: default best-effort attempts risk-labelled replacements; conservative preserves uncertain source')
+    parser.add_argument('--replacement-policy', choices=('all', 'confidence-gated'),
+                        help='auto-compose: opt-in source-score/native-cleanup gate; never suppresses saved translations')
+    parser.add_argument('--min-ocr-confidence', type=float,
+                        help='confidence-gated auto-compose: weakest main-line OCR score 0..1, default 0.70; not accuracy probability')
     for name in ('min-size', 'max-size', 'clearance', 'member-padding', 'glyph-padding', 'layout-inset'):
         parser.add_argument('--'+name, type=int)
     args = parser.parse_args(argv)
@@ -46,10 +50,11 @@ def main(argv=None):
                 font_id=args.font_id, min_size=16 if args.min_size is None else args.min_size,
                 max_size=28 if args.max_size is None else args.max_size, max_units=args.max_units,
                 background_method=args.background_method or 'auto', text_mask_model=args.text_mask_model,
-                render_policy=args.render_policy or 'best-effort')
+                render_policy=args.render_policy or 'best-effort', replacement_policy=args.replacement_policy or 'all',
+                min_ocr_confidence=args.min_ocr_confidence)
         except (ValueError, OSError, KeyError, TypeError) as error:
             parser.exit(2, f'automatic render rejected: {error}\n')
-        print(f"Automatic candidate output: {report['coverage']['rendered']}/{report['coverage']['strict_eligible']} strict candidates rendered; "
+        print(f"Automatic candidate output: {report['coverage']['rendered']}/{report['coverage']['total_eligible']} total candidates rendered; "
               f"{report['quality_summary']['best_effort_rendered']} best-effort; "
               f"{report['coverage']['skipped']} saved units skipped; {args.output}/review.html; no human approval")
         return 0
@@ -61,6 +66,8 @@ def main(argv=None):
         parser.error('--text-mask-model requires auto-compose')
     if args.render_policy is not None:
         parser.error('--render-policy requires auto-compose')
+    if args.replacement_policy is not None or args.min_ocr_confidence is not None:
+        parser.error('replacement confidence options require auto-compose')
     if args.mode in ('prepare', 'confirm-preparation'):
         if args.output is None or args.selection is not None or args.parent is not None or args.compare or any(
                 getattr(args, k) is not None for k in ('candidate', 'review', 'state', 'note')):

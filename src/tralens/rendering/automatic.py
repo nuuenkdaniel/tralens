@@ -18,6 +18,7 @@ from . import natural as n
 from . import preparation as p
 from .review import CSP
 from . import typography
+from . import replacement_confidence as rc
 
 
 POLICY = 'automatic_original_tight_flat_v3'
@@ -301,7 +302,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', '../translation/coverage.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', '../translation/coverage.py')})
 
 
 def _report_html(report):
@@ -318,6 +319,10 @@ def _report_html(report):
         +escape(json.dumps(report['coverage'], indent=2))+'</pre><p>Job '+escape(report['job_revision'])+'</p>'
         '<a href="manifest.json">Exact source, policy, hashes and per-unit reasons</a>')
     rows = []
+    if 'replacement_confidence' in report:
+        rows.append('<p><strong>EXPERIMENTAL CONFIDENCE GATE: some translations remain text-only while their source lettering '
+            'is preserved. OCR scores are not accuracy probabilities; cleanup support is assessed separately.</strong></p><pre>'
+            +escape(json.dumps({'settings': report['replacement_policy'], 'summary': report['replacement_confidence']}, indent=2))+'</pre>')
     if report.get('quality_summary', {}).get('best_effort_rendered'):
         rows.append('<p><strong>BEST-EFFORT OUTPUT: some edits use uncertain OCR footprints, may damage artwork, '
             'or use smaller/emergency-wrapped text. Originals are retained; inspect the marked units below.</strong></p>')
@@ -354,13 +359,15 @@ def _report_html(report):
     return (head+''.join(rows)+'</html>').encode()
 
 
-def _options(min_size, max_size, max_units, background_method, render_policy='best-effort'):
+def _options(min_size, max_size, max_units, background_method, render_policy='best-effort',
+             replacement_policy='all', min_ocr_confidence=None):
     n.integer(min_size, 8, 144)
     n.integer(max_size, min_size, 144)
     if max_units is not None:
         n.integer(max_units, 1, MAX_SLOTS)
     n.require(type(background_method) is str and background_method in ('auto', 'flat'), 'unknown background method')
     n.require(type(render_policy) is str and render_policy in ('best-effort', 'conservative'), 'unknown rendering policy')
+    return rc.settings(replacement_policy, min_ocr_confidence)
 
 
 def _font(fonts_doc, font_id):
@@ -373,13 +380,14 @@ def _font(fonts_doc, font_id):
     return font_id, available[font_id]
 
 
-def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort'):
+def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None):
     """Check rendering prerequisites before upstream inference, without a preview.
 
     This is not erase permission: run_automatic still validates the complete saved
     preview, source bindings, geometry, typography and actual output pixels.
     """
-    _options(min_size, max_size, max_units, background_method, render_policy)
+    confidence_settings = _options(min_size, max_size, max_units, background_method, render_policy,
+                                   replacement_policy, min_ocr_confidence)
     image, fonts = Path(image).absolute(), Path(fonts).absolute()
     content = n.read_explicit(image, 32*1024*1024)
     font_manifest = n.read_explicit(fonts, 256*1024)
@@ -393,15 +401,18 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
     selected, _ = _font(n.document(font_manifest), font_id)
     n.require(n.features.check_feature('raqm'), 'RAQM unavailable')
     checked = {'source': source, 'fonts_sha256': n.digest(font_manifest), 'font_id': selected, 'render_policy': render_policy}
+    if confidence_settings is not None:
+        checked['replacement_policy'] = confidence_settings
     if text_mask_model is not None:
         from . import segmentation
         checked['text_mask_model'] = segmentation.model_spec(text_mask_model)
     return checked
 
 
-def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort'):
+def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None):
     """All current strict translated candidates, with explicit machine skip states."""
-    _options(min_size, max_size, max_units, background_method, render_policy)
+    confidence_settings = _options(min_size, max_size, max_units, background_method, render_policy,
+                                   replacement_policy, min_ocr_confidence)
     from . import restoration
     from ..translation import coverage as tc
     model_spec = None
@@ -454,6 +465,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         'engine': {'pillow': n.pillow_version, 'opencv': cv2.__version__, 'raqm': n.features.version_feature('raqm'),
                    'harfbuzz': n.features.version_feature('harfbuzz'), 'freetype': n.features.version_module('freetype2')}}
     plans, tiles, content_masks = {}, {}, {}
+    if confidence_settings is not None:
+        report['replacement_policy'] = confidence_settings
     restoration_context = None
     text_mask, text_mask_error = None, None
     if model_spec is not None:
@@ -538,6 +551,11 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             row.update(machine_selected=True, binding=binding)
             if max_units is not None and eligible+coverage_eligible > max_units:
                 raise AutomaticSkip('evaluation_cap', 'explicit evaluation cap reached; candidate preserved, not rendered')
+            if confidence_settings is not None:
+                assessment = rc.assess_source(unit, binding['text'], confidence_settings['minimum_main_line_score'])
+                row['replacement_confidence'] = assessment
+                if not assessment['allowed']:
+                    raise AutomaticSkip(assessment['reason_code'], assessment['reason'])
             n.validate_text(binding['text'], coverage)
             if is_coverage:
                 # Delay not just geometry but also its slot/raster budget until
@@ -590,6 +608,9 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 row['text_contrast'] = {'fill': fill, 'outline_fill': outline, 'background_luminance_estimate': luminance}
             layer, provenance, content = typography.layout_dialogue(binding['text'], font_data, coverage,
                 Image.fromarray(plan.layout.astype(np.uint8)*255), unit_style)
+            if confidence_settings is not None:
+                reason = rc.layout_rejection(provenance, min_size)
+                check(reason is None, 'replacement_layout_confidence', reason)
             content_masks[index] = content.convert('1')
             provenance['typography']['content_mask_artifact'] = f'unit-{index:03d}-content-mask.png'
             box = layer.getchannel('A').getbbox()
@@ -658,6 +679,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             existing = plans.get(i)
             fallback_work = n.LayoutWork()
             routes = ('source_local', 'native_hint', 'footprint') if row['input_kind'] == tc.KIND else ('reuse', 'native_hint', 'footprint')
+            if confidence_settings is not None:
+                routes = tuple(route for route in routes if route != 'footprint')
             for route in routes:
                 reuse = route == 'reuse'
                 if reuse and (existing is None or row['reason_code'] == 'region_collision'
@@ -709,6 +732,9 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                         row['best_effort_attempts'].append({'method': 'source_local_art_overlay', 'status': 'attempted'})
                         layer, provenance, content = best_effort.fit(row['binding']['text'], font_data, coverage,
                             Image.fromarray(plan.layout.astype(np.uint8)*255), fallback_style, work=fallback_work)
+                    if confidence_settings is not None:
+                        reason = rc.layout_rejection(provenance, min_size)
+                        check(reason is None, 'replacement_layout_confidence', reason)
                     box = layer.getchannel('A').getbbox()
                     check(box is not None, 'empty_alpha', 'best-effort text has no raster alpha')
                     alpha = np.asarray(layer.getchannel('A')) != 0
@@ -750,14 +776,24 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                         'status': 'failed', 'reason_code': getattr(error, 'code', 'validation'), 'reason': str(error)})
                     if isinstance(error, n.ResourceLimit):
                         row.update(reason_code='resource_budget', reason=str(error))
+                    if isinstance(error, AutomaticSkip) and error.code == 'replacement_layout_confidence':
+                        row.update(reason_code=error.code, reason=str(error))
                     if isinstance(error, AutomaticSkip) and error.code in ('runtime_locality', 'alpha_containment', 'erasure_obstacle'):
                         row.update(reason_code=error.code, reason=str(error))
                         break
                     if isinstance(error, n.ResourceLimit) and (work+pixels*len(row['binding']['member_ids']) > MAX_WORK
                             or fallback_work.rasterized_pixels >= 64_000_000
                             or fallback_work.search['measures'] >= 65536
-                            or fallback_work.search['transitions'] >= 1_000_000):
+                             or fallback_work.search['transitions'] >= 1_000_000):
                         break
+            if confidence_settings is not None and row['status'] == 'skipped':
+                row['best_effort_attempts'].append({'method': 'ocr_footprint_replacement', 'status': 'not_attempted',
+                    'reason_code': 'replacement_cleanup_confidence',
+                    'reason': 'Confidence-gated replacement requires native stroke support, not coarse OCR-footprint erasure.'})
+                if row['reason_code'] not in ('resource_budget', 'runtime_locality', 'alpha_containment',
+                                             'erasure_obstacle', 'replacement_layout_confidence'):
+                    row.update(reason_code='replacement_cleanup_confidence',
+                        reason='Native-mask cleanup/layout routes failed; coarse footprint replacement is disabled. Translation retained.')
     erase_union = np.zeros((rgb.height, rgb.width), bool)
     alpha_union = np.zeros_like(erase_union)
     layout_union = np.zeros_like(erase_union)
@@ -816,6 +852,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                      for row in report['units'])
     report['quality_summary'] = {'conservative_rendered': rendered-best_count, 'best_effort_rendered': best_count,
         'has_degraded_output': bool(best_count), 'best_effort_artwork_preservation': 'not_guaranteed' if best_count else 'not_used'}
+    if confidence_settings is not None:
+        report['replacement_confidence'] = rc.summary(report['units'])
     report['retained_masks'] = {'encoding': 'bitpacked_boolean_v1', 'plans': len(plans),
         'boolean_mask_bytes': sum(mask.nbytes for plan in plans.values() for mask in plan.masks.values()),
         'equivalent_unpacked_mask_bytes': 4*pixels*len(plans),

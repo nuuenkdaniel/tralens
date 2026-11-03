@@ -10,7 +10,8 @@ from pathlib import Path
 
 
 def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28,
-                 max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', **preview_options):
+                 max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort',
+                 replacement_policy='all', min_ocr_confidence=None, **preview_options):
     """Connect the existing OCR/translation preview to automatic rendering.
 
     Source/translation bindings stay strict; rendering quality follows the chosen
@@ -33,6 +34,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
     rendering_options = dict(image=Path(image).expanduser().absolute(), fonts=Path(fonts).expanduser().absolute(),
         font_id=font_id, min_size=min_size, max_size=max_size, max_units=max_units, background_method=background_method,
         text_mask_model=text_mask_model, render_policy=render_policy)
+    if replacement_policy != 'all' or min_ocr_confidence is not None:
+        rendering_options.update(replacement_policy=replacement_policy, min_ocr_confidence=min_ocr_confidence)
     checked = preflight_automatic(**rendering_options)
     report = {'schema_version': 1, 'purpose': 'automatic_pipeline_candidate', 'status': 'running',
         'stage': 'preview', 'source': checked['source'], 'fonts_sha256': checked['fonts_sha256'],
@@ -44,6 +47,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         'rendering': {'status': 'not_started'}, 'coverage': None, 'error': None}
     if 'text_mask_model' in checked:
         report['text_mask_model'] = checked['text_mask_model']
+    if 'replacement_policy' in checked:
+        report['replacement_policy'] = checked['replacement_policy']
     output.mkdir(mode=0o700)
     checkpoint = output/'pipeline.json'
     _atomic_json(checkpoint, report)
@@ -97,7 +102,9 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                     'manifest_sha256': fingerprint(output/'rendering/manifest.json'),
                     'composite': 'rendering/composite.png', 'review': 'rendering/review.html',
                     'coverage': rendered['coverage'], 'background_summary': rendered['background_summary'],
-                    'quality_summary': rendered['quality_summary']}
+                     'quality_summary': rendered['quality_summary']}
+                if 'replacement_confidence' in rendered:
+                    report['rendering']['replacement_confidence'] = rendered['replacement_confidence']
                 report['coverage'].update(rendered=rendered['coverage']['rendered'],
                     strict_rendered=rendered['coverage']['strict_rendered'],
                     coverage_rendered=rendered['coverage']['coverage_rendered'],
@@ -155,7 +162,11 @@ def main(argv=None):
     parser.add_argument('--text-mask-model', type=Path,
                         help='optional acquired CTD ONNX file: automatic native-mask/periodic fallback; no download')
     parser.add_argument('--render-policy', choices=('best-effort', 'conservative'),
-                        help='default best-effort: attempt risk-labelled fallback replacements; conservative leaves uncertain regions unchanged')
+                         help='default best-effort: attempt risk-labelled fallback replacements; conservative leaves uncertain regions unchanged')
+    parser.add_argument('--replacement-policy', choices=('all', 'confidence-gated'),
+                        help='render: optional experimental OCR/native-cleanup confidence gate; translation coverage is unchanged')
+    parser.add_argument('--min-ocr-confidence', type=float,
+                        help='confidence-gated render: weakest raw main-line score 0..1; provisional default 0.70, not an accuracy probability')
     args = parser.parse_args(argv)
     if not args.run_local_ocr:
         parser.error("image processing requires explicit --run-local-ocr; no engine was initialized")
@@ -163,7 +174,7 @@ def main(argv=None):
         parser.error("--review-ocr requires --run-local-model; OCR-only performs no image review")
     if args.render and (not args.run_local_model or args.fonts is None):
         parser.error('--render requires --run-local-model and --fonts; no engine was initialized')
-    if not args.render and any(getattr(args, name) is not None for name in ('fonts', 'font_id', 'min_size', 'max_size', 'max_units', 'background_method', 'text_mask_model', 'render_policy')):
+    if not args.render and any(getattr(args, name) is not None for name in ('fonts', 'font_id', 'min_size', 'max_size', 'max_units', 'background_method', 'text_mask_model', 'render_policy', 'replacement_policy', 'min_ocr_confidence')):
         parser.error('font/rendering options require --render')
     # Keep help/import and missing opt-in paths free of OCR/provider imports.
     from tralens.translation.workflow import run_preview
@@ -180,7 +191,8 @@ def main(argv=None):
                 min_size=16 if args.min_size is None else args.min_size,
                 max_size=28 if args.max_size is None else args.max_size, max_units=args.max_units,
                 background_method=args.background_method or 'auto', text_mask_model=args.text_mask_model,
-                render_policy=args.render_policy or 'best-effort', **preview_options)
+                render_policy=args.render_policy or 'best-effort', replacement_policy=args.replacement_policy or 'all',
+                min_ocr_confidence=args.min_ocr_confidence, **preview_options)
             coverage = report['coverage'] or {}
             print(f"{report['status']}: {args.output / 'pipeline.json'}; "
                   f"strict translations={coverage.get('strict_translations', 0)}; rendered={coverage.get('rendered', 0)}; "
