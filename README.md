@@ -55,6 +55,9 @@ lettering instead of immediately leaving a translated unit unchanged. Edits may
 damage artwork or use smaller type; originals and all layers remain available.
 Use `--render-policy conservative` for the former skip-on-uncertainty policy and
 strict font minimum. See [coverage-first behavior and limits](docs/coverage-first-rendering.md).
+The [rendering readiness review](docs/rendering-production-review.md) records
+additional native/color-page tests, retained fixes, rejected experiments and
+remaining production blockers; best-effort placement is not an art-quality guarantee.
 
 Rendering uses `--background-method auto`: flat fill first, then a
 separately validated classical-inpainting fallback for remaining strict translated
