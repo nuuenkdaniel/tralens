@@ -4,7 +4,7 @@ All file inputs are explicit. JSON geometry is inline, never a sidecar path.
 Coordinates address source pixels (polygon vertices inclusive); no color management
 is performed. The RGB fingerprint is distinct from the original file hash.
 """
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from io import BytesIO
 import hashlib
 import html
@@ -338,7 +338,14 @@ def line_candidates(text, measure, width, *, budget=None):
     return results
 
 
-def layout(text, font_data, coverage, mask, style):
+@dataclass
+class LayoutWork:
+    """One shared search/raster budget, including optional typography probes."""
+    search: dict = field(default_factory=lambda: {"measures": 0, "transitions": 0})
+    rasterized_pixels: int = 0
+
+
+def layout(text, font_data, coverage, mask, style, *, work=None, line_rank=None):
     budget_check(mask.mode == "L" and mask.width*mask.height <= MAX_PAGE_PIXELS, "layout page pixel budget")
     require(type(text) is str and 0 < len(text) <= 1000 and text.strip(), "text budget/blank")
     require(all(c == "\n" or (32 <= ord(c) < 127) or
@@ -354,15 +361,28 @@ def layout(text, font_data, coverage, mask, style):
     require(bounds is not None, "empty layout region")
     left, top, right, bottom = bounds
     probe = ImageDraw.Draw(Image.new("L", (1, 1)))
-    search_budget = {"measures": 0, "transitions": 0}
-    raster_pixels = 0
+    work = LayoutWork() if work is None else work
+    require(isinstance(work, LayoutWork), "layout work budget required")
+    require(line_rank is None or callable(line_rank), "line ranking must be callable")
+    search_budget = work.search
     for size in range(hi, lo-1, -1):
         font = ImageFont.truetype(BytesIO(font_data), size, layout_engine=ImageFont.Layout.RAQM)
         measure = lambda s: probe.textlength(s, font=font, direction="ltr", language="en")
         # A retained original space before an inserted newline has advance but
         # no ink. Ignore that blank advance for screening, never in drawn text.
         fit_measure = lambda s: measure(s.rstrip(' '))
-        for shaped, offsets in line_candidates(text, fit_measure, right-left-2*stroke, budget=search_budget):
+        candidates = line_candidates(text, fit_measure, right-left-2*stroke, budget=search_budget)
+        if line_rank is not None:
+            ranked = []
+            for shaped, offsets in candidates:
+                advances = []
+                for line in shaped.split("\n"):
+                    search_budget["measures"] += 1
+                    budget_check(search_budget["measures"] <= 65536, "line measurement budget")
+                    advances.append(fit_measure(line))
+                ranked.append((line_rank(shaped, advances), offsets, shaped))
+            candidates = [(shaped, offsets) for _, offsets, shaped in sorted(ranked)]
+        for shaped, offsets in candidates:
             spacing = int(size*resolved["leading"])
             box = probe.multiline_textbbox((0, 0), shaped, font=font, spacing=spacing,
                                           align=resolved["align"], stroke_width=stroke, direction="ltr", language="en")
@@ -375,8 +395,8 @@ def layout(text, font_data, coverage, mask, style):
             local_pixels = local_size[0]*local_size[1]
             budget_check(0 < min(local_size) and max(local_size) <= MAX_LOCAL_SIDE
                          and local_pixels <= MAX_LOCAL_PIXELS, "local raster budget")
-            raster_pixels += local_pixels
-            budget_check(raster_pixels <= 64_000_000, "cumulative local raster budget")
+            budget_check(work.rasterized_pixels+local_pixels <= 64_000_000, "cumulative local raster budget")
+            work.rasterized_pixels += local_pixels
             local = Image.new("RGBA", local_size)
             xy = (padding-math.floor(box[0]), padding-math.floor(box[1]))
             ImageDraw.Draw(local).multiline_text(xy, shaped, font=font, fill=tuple(resolved["fill"]), spacing=spacing,
@@ -393,8 +413,8 @@ def layout(text, font_data, coverage, mask, style):
                 rotated_pixels = rotated_size[0]*rotated_size[1]
                 budget_check(max(rotated_size) <= MAX_LOCAL_SIDE and rotated_pixels <= MAX_LOCAL_PIXELS,
                              "rotated local raster budget")
-                raster_pixels += rotated_pixels
-                budget_check(raster_pixels <= 64_000_000, "cumulative local raster budget")
+                budget_check(work.rasterized_pixels+rotated_pixels <= 64_000_000, "cumulative local raster budget")
+                work.rasterized_pixels += rotated_pixels
                 local = local.rotate(resolved["rotation"], resample=Image.Resampling.BICUBIC, expand=True)
             ink = local.getchannel("A").getbbox()
             if not ink:
@@ -421,7 +441,7 @@ def layout(text, font_data, coverage, mask, style):
                     "resolved_style": resolved, "style_approximation": approximation,
                     "pretransform_alpha_pixels": pretransform_count,
                     "ink_bounds": layer.getchannel("A").getbbox(), "local_canvas_size": local_size,
-                    "local_alpha_pixels": local_count, "rasterized_pixels": raster_pixels,
+                    "local_alpha_pixels": local_count, "rasterized_pixels": work.rasterized_pixels,
                     "search_work": dict(search_budget), "line_break_policy": "balanced_legal_hyphen_visible_space_v2",
                     "origin": None if resolved["rotation"] else [xy[0]+x-ink[0], xy[1]+y-ink[1]],
                     "local_draw_origin": list(xy), "posttransform_canvas_size": list(local.size), "spacing": spacing,

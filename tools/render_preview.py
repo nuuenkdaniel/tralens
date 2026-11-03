@@ -1,4 +1,4 @@
-"""Offline candidate typography and flat-interior composition; never initializes OCR."""
+"""Offline candidate rendering with flat fill/restoration; never initializes OCR."""
 import argparse
 from pathlib import Path
 import sys
@@ -22,6 +22,8 @@ def main(argv=None):
     parser.add_argument('--intent')
     parser.add_argument('--font-id')
     parser.add_argument('--max-units', type=int, help='auto-compose evaluation cap only; default processes all strict eligible candidates within resource budgets')
+    parser.add_argument('--background-method', choices=('auto', 'flat'),
+                        help='auto-compose: flat fill then classical restoration (default auto); flat disables restoration')
     for name in ('min-size', 'max-size', 'clearance', 'member-padding', 'glyph-padding', 'layout-inset'):
         parser.add_argument('--'+name, type=int)
     args = parser.parse_args(argv)
@@ -38,7 +40,8 @@ def main(argv=None):
         try:
             report = run_automatic(preview=args.preview, image=args.image, fonts=args.fonts, output=args.output,
                 font_id=args.font_id, min_size=16 if args.min_size is None else args.min_size,
-                max_size=28 if args.max_size is None else args.max_size, max_units=args.max_units)
+                max_size=28 if args.max_size is None else args.max_size, max_units=args.max_units,
+                background_method=args.background_method or 'auto')
         except (ValueError, OSError, KeyError, TypeError) as error:
             parser.exit(2, f'automatic render rejected: {error}\n')
         print(f"Automatic candidate output: {report['coverage']['rendered']}/{report['coverage']['strict_eligible']} strict candidates rendered; "
@@ -46,6 +49,8 @@ def main(argv=None):
         return 0
     if args.max_units is not None:
         parser.error('--max-units is an automatic evaluation cap, not a manual/confirmation option')
+    if args.background_method is not None:
+        parser.error('--background-method requires auto-compose')
     if args.mode in ('prepare', 'confirm-preparation'):
         if args.output is None or args.selection is not None or args.parent is not None or args.compare or any(
                 getattr(args, k) is not None for k in ('candidate', 'review', 'state', 'note')):

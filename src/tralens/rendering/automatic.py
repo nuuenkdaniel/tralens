@@ -1,7 +1,7 @@
-"""Automatic tight-mask flat rendering, separate from operator-confirmed tools.
+"""Automatic source-bound rendering, separate from operator-confirmed tools.
 
-Machine-selected strict candidates only. No semantic balloon partition, human
-approval, textured restoration, inpainting, model/provider or implicit font lookup.
+Flat fill first; bounded classical restoration is a separate automatic fallback.
+No semantic balloon partition, human approval, model/provider or font lookup.
 """
 from dataclasses import dataclass
 from io import BytesIO
@@ -17,9 +17,10 @@ from PIL import Image
 from . import natural as n
 from . import preparation as p
 from .review import CSP
+from . import typography
 
 
-POLICY = 'automatic_original_tight_flat_v1'
+POLICY = 'automatic_original_tight_flat_v3'
 MAX_SLOTS = 16
 MAX_WORK = 512_000_000
 
@@ -71,8 +72,20 @@ class AutomaticPlan:
     erase: np.ndarray
     layout: np.ndarray
     obstacles: np.ndarray
-    background: list
+    background: list | None
     evidence: dict
+    restored_pixels: np.ndarray | None = None
+
+
+def apply_cleanup(pixels, plan):
+    """Commit only source-derived mask pixels, from fill or validated restoration."""
+    if plan.restored_pixels is None:
+        n.require(plan.background is not None, 'missing flat cleanup color')
+        pixels[plan.erase] = plan.background
+    else:
+        n.require(plan.restored_pixels.dtype == np.uint8
+            and plan.restored_pixels.shape == (int(plan.erase.sum()), 3), 'restoration sample shape/type mismatch')
+        pixels[plan.erase] = plan.restored_pixels
 
 
 def grow_rectangle(safe, seed, window):
@@ -114,6 +127,52 @@ def grow_rectangle(safe, seed, window):
     result = np.zeros_like(safe)
     result[top:bottom, left:right] = True
     return result, [left, top, right, bottom], steps
+
+
+def source_local_layout(safe, seed, window):
+    """Prefer the existing rectangle, then retain safe irregular whitespace.
+
+    Erasure and placement are independent. A rectangle's empty corner touching an
+    obstacle does not imply the actual source ink/collar touches it. The fallback
+    keeps the same window, original obstacles and clearance, and must retain the
+    entire seed in one 4-connected safe component. It never fills holes, bridges
+    disconnected pockets or invents balloon ownership.
+    """
+    try:
+        layout, bounds, steps = grow_rectangle(safe, seed, window)
+        return layout, bounds, steps, {'method': 'source_local_rectangle'}
+    except AutomaticSkip as error:
+        if error.code != 'layout_seed_obstructed':
+            raise
+        rejection = {'code': error.code, 'reason': str(error), 'evidence': error.evidence}
+        # Preserve genuine source-ink/obstacle contact as a rejection, not a
+        # reason to cut the offending seed pixels out of a layout mask.
+        if (seed & ~safe).any():
+            raise
+    left, top, right, bottom = window
+    x, y, width, height = cv2.boundingRect(seed.astype(np.uint8))
+    check(width > 0 and height > 0 and left <= x and top <= y
+          and x+width <= right and y+height <= bottom,
+          'layout_window', 'complete source ink/collar lies outside bounded layout window')
+    local_seed = seed[top:bottom, left:right]
+    count, labels, _, _ = cv2.connectedComponentsWithStats(
+        safe[top:bottom, left:right].astype(np.uint8), connectivity=4)
+    n.budget_check(count <= 8192, 'automatic local layout component budget')
+    chosen = np.unique(labels[local_seed])
+    check(len(chosen) == 1 and chosen[0] != 0, 'layout_seed_disconnected',
+          'complete source ink/collar does not share one bounded safe whitespace component',
+          {'rectangular_seed_rejection': rejection, 'seed_component_count': len(chosen)})
+    local = labels == chosen[0]
+    layout = np.zeros_like(safe)
+    layout[top:bottom, left:right] = local
+    n.require(not (seed & ~layout).any() and not (layout & ~safe).any(),
+              'irregular layout lost source clearance or added unsafe pixels')
+    x, y, width, height = cv2.boundingRect(local.astype(np.uint8))
+    bounds = [left+x, top+y, left+x+width, top+y+height]
+    return layout, bounds, 0, {'method': 'source_local_connected_safe_mask', 'connectivity': 4,
+        'rectangular_seed_rejection': rejection, 'local_components': count-1,
+        'required_seed_pixels': int(seed.sum()), 'required_seed_pixels_discarded': 0,
+        'layout_pixels': int(local.sum()), 'scope': 'bounded safe whitespace, not a balloon partition'}
 
 
 def derive_plan(rgb, detections, member_ids, *, context=None):
@@ -205,7 +264,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
     safe[:, :2] = safe[:, -2:] = False
     seed = p.dilate(foreground, 2)
     try:
-        layout, bounds, steps = grow_rectangle(safe, seed, window)
+        layout, bounds, steps, layout_derivation = source_local_layout(safe, seed, window)
     except AutomaticSkip as error:
         error.evidence = {**evidence, **error.evidence}
         raise
@@ -214,14 +273,15 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
         foreground_pixels=int(foreground.sum()), antialias_pixels=int((foreground & ~dark).sum()),
         erase_pixels=int(erase.sum()), clearance_samples=int(collar.sum()),
         source_local_window=window, layout_bounds=bounds, layout_expansion_tests=steps,
-        layout_scope='bounded original whitespace rectangle; not a semantic boundary/partition',
+        layout_derivation=layout_derivation,
+        layout_scope='bounded original safe whitespace; not a semantic boundary/partition',
         unrelated_contrast_obstacles=int((contrast & ~foreground).sum()))
     return AutomaticPlan(foreground, erase, layout, obstacles, color.tolist(), evidence)
 
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py')})
 
 
 def _report_html(report):
@@ -240,24 +300,80 @@ def _report_html(report):
     rows = []
     for index, row in enumerate(report['units']):
         images = ''
+        typography_note = ''
+        background_note = ''
+        if row.get('background_attempts'):
+            background_note = '<ul>'+''.join('<li>'+escape(attempt['method'])+': '+escape(attempt['status'])
+                +(' — '+escape(attempt['reason']) if attempt.get('reason') else '')+'</li>'
+                for attempt in row['background_attempts'])+'</ul>'
+        if row.get('cleanup_method', '').startswith('inpaint_'):
+            background_note += '<p>Classical restoration candidate: hidden background is estimated, not verified original artwork.</p>'
+        if row.get('layout', {}).get('typography'):
+            layout = row['layout']
+            fitted = layout['typography']
+            typography_note = ('<p>Text size: '+str(layout['size'])+'px; preferred: '+str(fitted['preferred_size'])
+                +'px; inner margin: '+str(fitted['margin_pixels'])+'px; '
+                +str(len(layout['draw_text'].split('\n')))+' lines. '
+                +f'<a href="unit-{index:03d}-content-mask.png">Padded text mask</a>.</p>')
         if row.get('specimen'):
             images = '<div class="grid">'+''.join('<figure><figcaption>'+name+'</figcaption><img alt="'+name+'" src="'
                 +f'unit-{index:03d}-specimen-{name}.png'+'"></figure>' for name in ('source', 'clean', 'text', 'composite'))+'</div>'
             images += '<div class="grid">'+''.join('<figure><figcaption>'+name+'</figcaption><img alt="'+name+'" src="'
                 +f'unit-{index:03d}-specimen-{name}.png'+'"></figure>' for name in ('foreground', 'applied-erase', 'layout', 'obstacles'))+'</div>'
         rows.append('<section><h2>'+escape(row['unit_id'])+' — '+escape(row['status'])+'</h2><p>'
-            +escape(row.get('reason') or 'Automatically composed candidate; unverified wording/ownership')+'</p>'+images
+            +escape(row.get('reason') or 'Automatically composed candidate; unverified wording/ownership')+'</p>'+background_note+typography_note+images
             +'<details><summary>Source evidence, settings and checks</summary><pre>'
             +escape(json.dumps(row, ensure_ascii=False, indent=2, allow_nan=False))+'</pre></details></section>')
     return (head+''.join(rows)+'</html>').encode()
 
 
-def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None):
-    """All current strict translated candidates, with explicit machine skip states."""
+def _options(min_size, max_size, max_units, background_method):
     n.integer(min_size, 8, 144)
     n.integer(max_size, min_size, 144)
     if max_units is not None:
         n.integer(max_units, 1, MAX_SLOTS)
+    n.require(type(background_method) is str and background_method in ('auto', 'flat'), 'unknown background method')
+
+
+def _font(fonts_doc, font_id):
+    available = n.load_fonts(fonts_doc)
+    if font_id is None:
+        n.require(len(available) == 1, 'multiple approved faces require a global --font-id; no implicit font matching')
+        font_id = next(iter(available))
+    n.require(type(font_id) is str and re.fullmatch('[A-Za-z0-9_-]{1,64}', font_id), 'bounded automatic font ID required')
+    n.require(font_id in available and not isinstance(available[font_id], n.ResourceLimit), 'unavailable explicit automatic font')
+    return font_id, available[font_id]
+
+
+def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto'):
+    """Check rendering prerequisites before upstream inference, without a preview.
+
+    This is not erase permission: run_automatic still validates the complete saved
+    preview, source bindings, geometry, typography and actual output pixels.
+    """
+    _options(min_size, max_size, max_units, background_method)
+    image, fonts = Path(image).absolute(), Path(fonts).absolute()
+    content = n.read_explicit(image, 32*1024*1024)
+    font_manifest = n.read_explicit(fonts, 256*1024)
+    with Image.open(BytesIO(content)) as opened:
+        n.budget_check(opened.width*opened.height <= p.MAX_PIXELS and max(opened.size) <= p.MAX_SIDE,
+                       'automatic source pixel/side budget')
+        n.require(opened.mode in ('RGB', 'L') and getattr(opened, 'n_frames', 1) == 1
+                  and not opened.info.get('icc_profile') and opened.getexif().get(274, 1) == 1,
+                  'unsupported source mode/frame/profile/orientation')
+        with opened.convert('RGB') as rgb:
+            source = {'path': str(image.resolve()), 'sha256': n.digest(content),
+                'pixels_sha256': n.digest(f'RGB:{rgb.width}:{rgb.height}:'.encode()+rgb.tobytes()),
+                'size': list(rgb.size)}
+    selected, _ = _font(n.document(font_manifest), font_id)
+    n.require(n.features.check_feature('raqm'), 'RAQM unavailable')
+    return {'source': source, 'fonts_sha256': n.digest(font_manifest), 'font_id': selected}
+
+
+def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto'):
+    """All current strict translated candidates, with explicit machine skip states."""
+    _options(min_size, max_size, max_units, background_method)
+    from . import restoration
     output = Path(output).absolute()
     n.require(not output.exists() and output.parent.is_dir() and
               not any(path.is_symlink() for path in (output, *output.parents)), 'automatic output must be fresh without symlinks')
@@ -271,21 +387,18 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     source_contract = {'schema_version': 1, 'purpose': 'automatic_candidate_only', 'source': source,
         'preview_sha256': n.digest(contents[0]), 'fonts_sha256': n.digest(contents[2]), 'units': []}
     n.bind(preview_doc, paths[1], rgb, contents[1], contents[0], source_contract, contents[2], selection_kind='automatic_candidate_only')
-    available = n.load_fonts(fonts_doc)
-    if font_id is None:
-        n.require(len(available) == 1, 'multiple approved faces require a global --font-id; no implicit font matching')
-        font_id = next(iter(available))
-    n.require(type(font_id) is str and re.fullmatch('[A-Za-z0-9_-]{1,64}', font_id), 'bounded automatic font ID required')
-    n.require(font_id in available and not isinstance(available[font_id], n.ResourceLimit), 'unavailable explicit automatic font')
-    font_data, coverage = available[font_id]
+    font_id, (font_data, coverage) = _font(fonts_doc, font_id)
     style = {'min_size': min_size, 'max_size': max_size, 'outline': 0}
     candidates = preview_doc['ocr'].get('automatic_recognition_results', [])
     units = n.automatic_units(preview_doc['ocr']['batches'][0], candidates[0] if candidates else ())
-    report = {'schema_version': 1, 'purpose': 'automatic_candidate_output', 'policy': POLICY,
+    report = {'schema_version': 1, 'purpose': 'automatic_candidate_output',
+        'policy': POLICY if background_method == 'flat' else 'automatic_flat_then_classical_v1',
+        'background_method': background_method,
         'selection_method': 'all current strict translated candidates in saved order; machine geometric/typographic checks',
         'operator_confirmation': None, 'linguistic_approval': 'not_assessed', 'approved_export': False,
         'source': source, 'preview_sha256': n.digest(contents[0]), 'fonts_sha256': n.digest(contents[2]),
         'implementation_sha256': implementation_hash(), 'font_id': font_id, 'style': style,
+        'typography_policy': typography.POLICY,
         'evaluation_cap': max_units, 'units': [],
         'limits': {'page_pixels': p.MAX_PIXELS, 'page_side': p.MAX_SIDE, 'processed_slots': MAX_SLOTS,
             'aggregate_unit_pixels': n.MAX_UNIT_PIXELS, 'binding_neighbor_raster_work': MAX_WORK,
@@ -295,11 +408,17 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             'erase_dilation': 1, 'clearance': 2, 'sample_tolerance': 2, 'minimum_background_samples': 32,
             'background_channel_minimum': 180, 'background_channel_spread': 16,
             'layout_horizontal_expansion': 32, 'layout_vertical_expansion': 24,
+            'irregular_layout_connectivity': 4, 'local_layout_components': 8192,
+            'typography_probes': typography.MAX_PROBES, 'typography_margin_min_max': [2, 8],
+            'typography_shared_raster_pixels': 64_000_000,
+            'restoration_local_pixels': restoration.MAX_LOCAL_PIXELS, 'restoration_local_side': restoration.MAX_LOCAL_SIDE,
+            'restoration_samples': restoration.MAX_SAMPLES, 'restoration_methods_per_unit': 2,
             'artifact_count': 256, 'artifact_bytes': 128*1024*1024, 'report_bytes': 4*1024*1024,
             'manifest_bytes': 8*1024*1024},
         'engine': {'pillow': n.pillow_version, 'opencv': cv2.__version__, 'raqm': n.features.version_feature('raqm'),
                    'harfbuzz': n.features.version_feature('harfbuzz'), 'freetype': n.features.version_module('freetype2')}}
-    plans, tiles = {}, {}
+    plans, tiles, content_masks = {}, {}, {}
+    restoration_context = None
     work, eligible, attempts = pixels*len(raw), 0, 0
     try:
         context = OriginalComponents(rgb)
@@ -333,20 +452,55 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 raise AutomaticSkip('resource_budget', 'automatic per-job mask/raster-work budget reached')
             attempts += 1
             work += unit_work
-            if context_error is not None:
-                raise AutomaticSkip('resource_budget', context_error)
-            plan = derive_plan(rgb, raw, binding['member_ids'], context=context)
+            row['background_attempts'] = []
+            try:
+                if context_error is not None:
+                    raise n.ResourceLimit(context_error)
+                plan = derive_plan(rgb, raw, binding['member_ids'], context=context)
+                row['background_attempts'].append({'method': 'flat_fill', 'status': 'planned'})
+                row['cleanup_method'] = 'flat_fill'
+            except (AutomaticSkip, n.ResourceLimit) as flat_error:
+                row['background_attempts'].append({'method': 'flat_fill', 'status': 'skipped',
+                    'reason_code': getattr(flat_error, 'code', 'resource_budget'), 'reason': str(flat_error)})
+                if background_method == 'flat':
+                    raise
+                try:
+                    if restoration_context is None:
+                        extra_work = pixels*len(raw) if context is None else 0
+                        n.budget_check(work+extra_work <= MAX_WORK, 'restoration geometry raster-work budget')
+                        restoration_context = restoration.OriginalGeometry(rgb, raw, geometry=context)
+                        work += extra_work
+                    plan = restoration.derive_plan(rgb, raw, binding['member_ids'], context=restoration_context)
+                    row['background_attempts'].append({'method': 'classical_inpaint', 'status': 'planned'})
+                    row['cleanup_method'] = 'inpaint_'+plan.evidence['method']
+                except (restoration.RestorationSkip, AutomaticSkip, n.ResourceLimit) as restore_error:
+                    row['background_attempts'].append({'method': 'classical_inpaint', 'status': 'skipped',
+                        'reason_code': getattr(restore_error, 'code', 'resource_budget'), 'reason': str(restore_error),
+                        'evidence': getattr(restore_error, 'evidence', {})})
+                    raise flat_error
             plans[index] = plan
             row['mask_evidence'] = plan.evidence
             check(not (plan.erase & plan.obstacles).any(), 'erasure_obstacle', 'automatic erasure intersects original obstacles')
-            layer, provenance = n.layout(binding['text'], font_data, coverage,
-                Image.fromarray(plan.layout.astype(np.uint8)*255), style)
+            unit_style = style
+            if plan.restored_pixels is not None:
+                luminance = float(np.dot(plan.evidence['background_rgb_at_center'], [.2126, .7152, .0722]))
+                fill = [255, 255, 255] if luminance < 128 else [0, 0, 0]
+                outline = [255-value for value in fill]
+                unit_style = {**style, 'fill': fill, 'outline': 1, 'outline_fill': outline}
+                row['text_contrast'] = {'fill': fill, 'outline_fill': outline, 'background_luminance_estimate': luminance}
+            layer, provenance, content = typography.layout_dialogue(binding['text'], font_data, coverage,
+                Image.fromarray(plan.layout.astype(np.uint8)*255), unit_style)
+            content_masks[index] = content
+            provenance['typography']['content_mask_artifact'] = f'unit-{index:03d}-content-mask.png'
             box = layer.getchannel('A').getbbox()
             check(box is not None, 'empty_alpha', 'automatic text has no raster alpha')
             alpha = np.asarray(layer.getchannel('A')) != 0
+            row['outside_content_alpha_pixels'] = int(np.count_nonzero(alpha & (np.asarray(content) == 0)))
+            check(row['outside_content_alpha_pixels'] == 0, 'typography_containment',
+                  'automatic alpha escapes comfortable text margins')
             check(not (alpha & (~plan.layout | plan.obstacles)).any(), 'alpha_containment', 'automatic alpha escapes local layout/obstacle checks')
             plate_pixels = np.asarray(rgb).copy()
-            plate_pixels[plan.erase] = plan.background
+            apply_cleanup(plate_pixels, plan)
             plate = Image.fromarray(plate_pixels, 'RGB')
             composed = Image.alpha_composite(plate.convert('RGBA'), layer).convert('RGB')
             row['candidate_pixel_audit'] = n.pixel_audit(rgb, plate, composed, plan.erase, alpha, plan.obstacles)
@@ -376,7 +530,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         if i in collisions:
             continue
         plan = plans[i]
-        plate_pixels[plan.erase] = plan.background
+        apply_cleanup(plate_pixels, plan)
         erase_union |= plan.erase
         layout_union |= plan.layout
         report['units'][i]['status'] = 'automatic_composed'
@@ -417,6 +571,12 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     report['coverage'] = {'saved_units': len(report['units']), 'strict_eligible': eligible, 'attempted': attempts,
         'rendered': rendered, 'skipped': len(report['units'])-rendered, 'partial_output': rendered < len(report['units']),
         'strict_coverage_fraction': rendered/eligible if eligible else None, 'has_rendered_output': bool(rendered)}
+    report['background_summary'] = {'flat_rendered': sum(row['status'] == 'automatic_composed'
+            and row.get('cleanup_method') == 'flat_fill' for row in report['units']),
+        'restored_rendered': sum(row['status'] == 'automatic_composed'
+            and row.get('cleanup_method', '').startswith('inpaint_') for row in report['units']),
+        'restoration_attempted': sum(any(attempt['method'] == 'classical_inpaint'
+            for attempt in row.get('background_attempts', [])) for row in report['units'])}
     report['job_revision'] = n.revision({k: v for k, v in report.items() if k not in ('job_revision', 'artifacts')})
     blobs, total = {}, 0
     def add(name, value):
@@ -448,6 +608,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             png(f'unit-{i:03d}-specimen-{name}.png', raster)
         for name, mask in (('proposed-erase', plan.erase), ('applied-erase', applied), ('foreground', plan.foreground), ('layout-mask', plan.layout)):
             png(f'unit-{i:03d}-{name}.png', Image.fromarray(mask.astype(np.uint8)*255))
+        if i in content_masks:
+            png(f'unit-{i:03d}-content-mask.png', content_masks[i])
         if i in tiles:
             layer = Image.new('RGBA', rgb.size)
             layer.paste(tiles[i][0], tiles[i][1])
