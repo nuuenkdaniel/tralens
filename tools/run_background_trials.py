@@ -19,7 +19,7 @@ from tools.learned_restoration_experiment import CTD_SHA, document, load_inputs,
 from tralens.rendering import automatic as a, restoration as r
 
 RUNNER_SOURCE = Path(__file__).read_bytes()
-TRIAL_SOURCE = Path(trial.__file__).read_bytes()
+TRIAL_SOURCE = Path(trial.derive.__code__.co_filename).read_bytes()
 
 
 def predict(net, source, variant):

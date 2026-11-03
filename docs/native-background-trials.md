@@ -78,6 +78,49 @@ Artifacts:
   6/8; `v2/`: 7/8, last unit blocked by layout; `v3/`: 8/8 with connected safe space.
 - [Saved-page review](../test-results/native-mask-saved-page-v3/review.html).
 
+## Automatic use of the retained methods
+
+`src/tralens/rendering/segmentation.py` now contains the retained implementation.
+`tools/background_trials.py` is a compatibility import for the earlier trials;
+historical evidence retains the exact old executed source snapshots.
+
+Pass a **globally configured model file**, not user-drawn masks or region approvals:
+
+```sh
+.venv/bin/python tools/render_preview.py auto-compose \
+  --preview test-results/workflow-fragments-priority-parent-v1/preview.json \
+  --image images/ubunchu-ja-test/ubunchu01_04.png \
+  --fonts test-results/render-parent-input-v1/fonts.json \
+  --text-mask-model /tmp/opencode/tralens-learned-eval-v1/models/comictextdetector.pt.onnx \
+  --output test-results/native-mask-automatic-parent-v2
+```
+
+The same `--text-mask-model PATH` option works with `src/main.py --render`. It is
+explicit because acquiring weights and accepting their deployment terms are
+separate decisions. Without it, the existing flat/classical behavior is unchanged.
+No model is bundled, downloaded, silently found in a cache, or installed globally.
+
+The coordinator checks the exact acquired model size/SHA256 **before OCR or
+translation calls**. Its digest is a recorded acquired-byte identity, not publisher
+authentication. Only if cheap plans fail does the renderer load it from verified
+bytes and run one bounded 1024² CPU inference for the page. A failed backend is
+not retried for every unit. Large pages use recorded aspect-preserving fit;
+contexts <=1024px use native padding. The native grayscale output and transforms
+are retained as `text-probability.png` and inference provenance.
+
+For each remaining strict translated unit, automatically attempt source-bound
+semantic flat fill, then supported phase-locked repair. `--background-method flat`
+disables classical/periodic restoration but can still use learned flat-mask
+acquisition when the explicit model is supplied. A final layout/typography failure
+rolls back successful cleanup. Exact wording, supplied minimum sizes, collision
+checks, original files, strict bindings and outside-mask invariants are unchanged.
+Dark backgrounds use white text with a dark outline. Reports separately count
+semantic and periodic replacements and retain every failed attempt.
+
+LaMa is **not** a production fallback: the retained periodic method outperformed
+it on exact regular patterns, and complex real backgrounds still lack sufficiently
+validated masks. This is deliberate evidence-based routing, not a universal claim.
+
 ## Boundaries
 
 These trials use only the already approved CTD checkpoint and local stack. No new

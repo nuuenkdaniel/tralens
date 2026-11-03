@@ -36,7 +36,8 @@ fresh output directory whose parent already exists:
 With multiple manifest faces, also supply one global `--font-id`. The default
 translator remains `translategemma:27b` on `http://127.0.0.1:11434`; existing
 `--model`, `--profile` and explicit private `--endpoint` overrides still apply.
-No model/font download, fallback, mask drawing or per-balloon confirmation occurs.
+No model/font download, provider/model-name fallback, mask drawing or per-balloon
+confirmation occurs. Background-method fallbacks are automatic as described below.
 
 Outputs are:
 
@@ -51,7 +52,7 @@ Outputs are:
 Rendering now defaults to `--background-method auto`: flat fill first, then a
 separately validated classical-inpainting fallback for remaining strict translated
 candidates. No per-region manual selection is needed. `--background-method flat`
-preserves white/off-white-only behavior. This option is also available on the
+preserves white/off-white-only behavior without the learned-model opt-in below. This option is also available on the
 standalone `auto-compose` command. Unsupported/missing translations or uncertain
 text-versus-art masks remain explicit skips, not guessed replacements.
 
@@ -166,8 +167,8 @@ No text rewrite, clipping, squashing or size below the supplied bound is allowed
 Cleanup is committed only after successful typography and per-unit pixel checks;
 skips leave source ink untouched. The manual/assisted flat-interior cleanup guard
 is unchanged. The flat stage does not use inpainting; its rejection is not erase
-permission for the separate fallback. Learned segmentation is not used in production;
-the optional CTD/LaMa feasibility experiment below is separate.
+permission for the separate fallback. Learned segmentation is not used by default;
+the explicit native-mask option and historical CTD/LaMa experiment are described below.
 
 Original source masks are raster-counted once per job; exact per-pixel counts
 preserve coincident/contained nonmember annotations when subtracting a member's
@@ -316,8 +317,9 @@ The optional local CTD/LaMa experiment is separate from production routing.
 It freezes source hashes and development/held-out memberships, compares raw and
 source-bound refined CTD masks, and compares classical methods against a pinned
 LaMa ONNX conversion **using identical masks and native-resolution contexts**.
-No model adapter was added to the production renderer. A real standalone CTD
-output was obtained before the experiment runner was built.
+That first pass did not add a production adapter. A real standalone CTD output
+was obtained before the experiment runner was built. The separately validated
+native-component follow-up now has the explicit opt-in route below.
 
 See [the evaluation/provenance record](docs/learned-restoration-evaluation.md) for
 exact artifacts, licensing uncertainty, preprocessing corrections, reproducible
@@ -332,6 +334,15 @@ preserving the previous six units' pixels. Source-bound mask association, connec
 safe-space layout and phase-locked periodic repair are described in
 [the follow-up trial record](docs/native-background-trials.md). These results do
 not imply that the other untranslated/blocked units or arbitrary artwork are solved.
+
+To use the retained fallback automatically, add **`--text-mask-model PATH`** to
+`auto-compose` or `src/main.py --render`, pointing to the already acquired,
+digest-pinned `comictextdetector.pt.onnx`. It tries the cheap existing routes first,
+then source-bound native masks with measured flat fill or supported phase-locked
+periodic repair. This is one global model setting, not user masks or per-region
+confirmations. No downloads or new project dependencies occur. Without the option,
+the previous behavior is unchanged. Checkpoint deployment rights remain unresolved;
+the current approval covers local evaluation, not distribution/commercial clearance.
 
 The output purpose is `automatic_candidate_output`, separate from operator-selected
 `candidate_only` jobs. It includes:
@@ -1253,7 +1264,7 @@ src/tralens/
                 recognition_units.py, transcription_selection.py, automatic_units.py,
                 automatic_evidence.py, automatic_recognition.py, manga_adapter.py
   translation/  contracts.py, workflow.py, runtime.py, ocr_review.py, translator.py
-  rendering/    automatic.py, restoration.py, typography.py, natural.py, preparation.py,
+  rendering/    automatic.py, restoration.py, segmentation.py, typography.py, natural.py, preparation.py,
                 review.py, styles.py, renderer.py
 src/main.py     preview CLI and optional end-to-end rendering coordinator
 tools/          standalone OCR/translation/rendering diagnostics

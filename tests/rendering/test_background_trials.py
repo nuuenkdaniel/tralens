@@ -127,6 +127,17 @@ class BackgroundTrialTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             b.periodic_surface(np.zeros((1024, 1024, 3), np.uint8), np.ones((1024, 1024), bool))
 
+    def test_many_source_components_stop_before_per_component_work(self):
+        image = Image.new('RGB', (220, 180), 'white')
+        probability = np.zeros((180, 220), np.uint8)
+        for y in range(45, 136, 5):
+            for x in range(45, 176, 5):
+                image.putpixel((x, y), (0, 0, 0))
+                probability[y, x] = 245
+        detections = [dict(source_id='main', polygon=[[40, 40], [180, 40], [180, 140], [40, 140]])]
+        with self.assertRaisesRegex(ValueError, 'component work budget'):
+            b.derive(image, detections, ['main'], probability)
+
 
 if __name__ == '__main__':
     unittest.main()

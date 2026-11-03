@@ -281,7 +281,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py')})
 
 
 def _report_html(report):
@@ -308,6 +308,8 @@ def _report_html(report):
                 for attempt in row['background_attempts'])+'</ul>'
         if row.get('cleanup_method', '').startswith('inpaint_'):
             background_note += '<p>Classical restoration candidate: hidden background is estimated, not verified original artwork.</p>'
+        if row.get('cleanup_method') == 'phase_locked_tile':
+            background_note += '<p>Phase-locked periodic repair: estimated from original context, not verified hidden artwork.</p>'
         if row.get('layout', {}).get('typography'):
             layout = row['layout']
             fitted = layout['typography']
@@ -345,7 +347,7 @@ def _font(fonts_doc, font_id):
     return font_id, available[font_id]
 
 
-def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto'):
+def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None):
     """Check rendering prerequisites before upstream inference, without a preview.
 
     This is not erase permission: run_automatic still validates the complete saved
@@ -367,13 +369,21 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
                 'size': list(rgb.size)}
     selected, _ = _font(n.document(font_manifest), font_id)
     n.require(n.features.check_feature('raqm'), 'RAQM unavailable')
-    return {'source': source, 'fonts_sha256': n.digest(font_manifest), 'font_id': selected}
+    checked = {'source': source, 'fonts_sha256': n.digest(font_manifest), 'font_id': selected}
+    if text_mask_model is not None:
+        from . import segmentation
+        checked['text_mask_model'] = segmentation.model_spec(text_mask_model)
+    return checked
 
 
-def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto'):
+def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None):
     """All current strict translated candidates, with explicit machine skip states."""
     _options(min_size, max_size, max_units, background_method)
     from . import restoration
+    model_spec = None
+    if text_mask_model is not None:
+        from . import segmentation
+        model_spec = segmentation.model_spec(text_mask_model)
     output = Path(output).absolute()
     n.require(not output.exists() and output.parent.is_dir() and
               not any(path.is_symlink() for path in (output, *output.parents)), 'automatic output must be fresh without symlinks')
@@ -419,6 +429,38 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                    'harfbuzz': n.features.version_feature('harfbuzz'), 'freetype': n.features.version_module('freetype2')}}
     plans, tiles, content_masks = {}, {}, {}
     restoration_context = None
+    text_mask, text_mask_error = None, None
+    if model_spec is not None:
+        report['policy'] = 'automatic_flat_classical_native_semantic_v1'
+        report['text_mask_model'] = model_spec
+
+    def semantic_plan(binding, row, original_error):
+        nonlocal text_mask, text_mask_error
+        if model_spec is None:
+            raise original_error
+        if text_mask is None and text_mask_error is None:
+            try:
+                text_mask = segmentation.TextMask(rgb, model_spec)
+                report['text_mask_inference'] = text_mask.evidence
+            except (ValueError, OSError) as error:
+                text_mask_error = str(error)
+        if text_mask_error is not None:
+            row['background_attempts'].append({'method': 'semantic_mask', 'status': 'skipped',
+                'reason_code': 'text_mask_backend', 'reason': text_mask_error})
+            raise original_error
+        for surface in (('flat',) if background_method == 'flat' else ('flat', 'periodic')):
+            method = 'semantic_flat_fill' if surface == 'flat' else 'phase_locked_tile'
+            try:
+                candidate = segmentation.derive(rgb, raw, binding['member_ids'], text_mask.raw, surface=surface)
+                row['background_attempts'].append({'method': method, 'status': 'planned'})
+                row['cleanup_method'] = 'flat_fill_semantic' if surface == 'flat' else 'phase_locked_tile'
+                row['text_mask_method'] = segmentation.POLICY
+                return candidate
+            except (ValueError, AutomaticSkip) as error:
+                row['background_attempts'].append({'method': method, 'status': 'skipped',
+                    'reason_code': getattr(error, 'code', 'validation'), 'reason': str(error),
+                    'evidence': getattr(error, 'evidence', {})})
+        raise original_error
     work, eligible, attempts = pixels*len(raw), 0, 0
     try:
         context = OriginalComponents(rgb)
@@ -463,26 +505,27 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 row['background_attempts'].append({'method': 'flat_fill', 'status': 'skipped',
                     'reason_code': getattr(flat_error, 'code', 'resource_budget'), 'reason': str(flat_error)})
                 if background_method == 'flat':
-                    raise
-                try:
-                    if restoration_context is None:
-                        extra_work = pixels*len(raw) if context is None else 0
-                        n.budget_check(work+extra_work <= MAX_WORK, 'restoration geometry raster-work budget')
-                        restoration_context = restoration.OriginalGeometry(rgb, raw, geometry=context)
-                        work += extra_work
-                    plan = restoration.derive_plan(rgb, raw, binding['member_ids'], context=restoration_context)
-                    row['background_attempts'].append({'method': 'classical_inpaint', 'status': 'planned'})
-                    row['cleanup_method'] = 'inpaint_'+plan.evidence['method']
-                except (restoration.RestorationSkip, AutomaticSkip, n.ResourceLimit) as restore_error:
-                    row['background_attempts'].append({'method': 'classical_inpaint', 'status': 'skipped',
-                        'reason_code': getattr(restore_error, 'code', 'resource_budget'), 'reason': str(restore_error),
-                        'evidence': getattr(restore_error, 'evidence', {})})
-                    raise flat_error
+                    plan = semantic_plan(binding, row, flat_error)
+                else:
+                    try:
+                        if restoration_context is None:
+                            extra_work = pixels*len(raw) if context is None else 0
+                            n.budget_check(work+extra_work <= MAX_WORK, 'restoration geometry raster-work budget')
+                            restoration_context = restoration.OriginalGeometry(rgb, raw, geometry=context)
+                            work += extra_work
+                        plan = restoration.derive_plan(rgb, raw, binding['member_ids'], context=restoration_context)
+                        row['background_attempts'].append({'method': 'classical_inpaint', 'status': 'planned'})
+                        row['cleanup_method'] = 'inpaint_'+plan.evidence['method']
+                    except (restoration.RestorationSkip, AutomaticSkip, n.ResourceLimit) as restore_error:
+                        row['background_attempts'].append({'method': 'classical_inpaint', 'status': 'skipped',
+                            'reason_code': getattr(restore_error, 'code', 'resource_budget'), 'reason': str(restore_error),
+                            'evidence': getattr(restore_error, 'evidence', {})})
+                        plan = semantic_plan(binding, row, flat_error)
             plans[index] = plan
             row['mask_evidence'] = plan.evidence
             check(not (plan.erase & plan.obstacles).any(), 'erasure_obstacle', 'automatic erasure intersects original obstacles')
             unit_style = style
-            if plan.restored_pixels is not None:
+            if plan.restored_pixels is not None or row.get('text_mask_method'):
                 luminance = float(np.dot(plan.evidence['background_rgb_at_center'], [.2126, .7152, .0722]))
                 fill = [255, 255, 255] if luminance < 128 else [0, 0, 0]
                 outline = [255-value for value in fill]
@@ -572,11 +615,16 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         'rendered': rendered, 'skipped': len(report['units'])-rendered, 'partial_output': rendered < len(report['units']),
         'strict_coverage_fraction': rendered/eligible if eligible else None, 'has_rendered_output': bool(rendered)}
     report['background_summary'] = {'flat_rendered': sum(row['status'] == 'automatic_composed'
-            and row.get('cleanup_method') == 'flat_fill' for row in report['units']),
+            and row.get('cleanup_method') in ('flat_fill', 'flat_fill_semantic') for row in report['units']),
         'restored_rendered': sum(row['status'] == 'automatic_composed'
             and row.get('cleanup_method', '').startswith('inpaint_') for row in report['units']),
         'restoration_attempted': sum(any(attempt['method'] == 'classical_inpaint'
-            for attempt in row.get('background_attempts', [])) for row in report['units'])}
+             for attempt in row.get('background_attempts', [])) for row in report['units'])}
+    if model_spec is not None:
+        report['background_summary'].update(semantic_mask_rendered=sum(row['status'] == 'automatic_composed'
+            and bool(row.get('text_mask_method')) for row in report['units']),
+            periodic_rendered=sum(row['status'] == 'automatic_composed' and row.get('cleanup_method') == 'phase_locked_tile'
+                for row in report['units']))
     report['job_revision'] = n.revision({k: v for k, v in report.items() if k not in ('job_revision', 'artifacts')})
     blobs, total = {}, 0
     def add(name, value):
@@ -593,6 +641,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         add(name, value)
     for name, value in (('source', rgb), ('clean', clean), ('composite', composite), ('text', text)):
         png(name+'.png', value)
+    if text_mask is not None:
+        png('text-probability.png', Image.fromarray(text_mask.raw))
     for name, mask in (('erase-mask', erase_union), ('alpha-mask', alpha_union), ('protected-mask', protected),
                        ('cleanup-diff', np.any(np.asarray(clean) != np.asarray(rgb), axis=2)),
                        ('composite-diff', np.any(np.asarray(composite) != np.asarray(rgb), axis=2))):

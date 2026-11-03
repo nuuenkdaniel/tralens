@@ -86,6 +86,15 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(report['coverage']['partial_output'])
         self.provider.assert_called_once()
 
+    def test_invalid_text_mask_checkpoint_is_rejected_before_ocr_or_translation(self):
+        invalid = self.root/'invalid.onnx'
+        invalid.write_bytes(b'not the approved model')
+        with self.assertRaisesRegex(ValueError, 'checkpoint'):
+            self.run_pipeline(text_mask_model=invalid)
+        self.provider.assert_not_called()
+        self.fixture.engine.ocr.close.assert_not_called()
+        self.assertFalse((self.root/'job').exists())
+
     def test_restoration_is_automatic_in_the_main_pipeline_and_can_be_disabled(self):
         from tralens.ocr.automatic_units import propose_page_from_boxes
         with Image.open(self.fixture.image) as opened:

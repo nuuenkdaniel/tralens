@@ -1,5 +1,9 @@
 # Learned mask / background restoration feasibility
 
+Historical first-pass record. Later native-component association and phase-locked
+repair are retained through an opt-in automatic route; see
+[the follow-up record](native-background-trials.md). LaMa remains evaluation-only.
+
 This is a **local evaluation, not a production fallback**. The working automatic
 renderer remains flat fill followed by classical restoration. No translation,
 training, cloud inference, image upload, dependency-file edit or push is required.
