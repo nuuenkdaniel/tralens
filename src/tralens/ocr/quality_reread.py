@@ -149,13 +149,15 @@ class RereadResult:
     reason: str = 'not_eligible_for_paired_reread'
     attempts: int = 0
     candidates: tuple = ()
+    fallback_attempts: int = 0
 
 
 def refine(engine, image, original_bytes, *, vision, manga, model_identity, output,
-           max_units=8, max_line_attempts=96):
+           max_units=8, max_line_attempts=96, max_fallback_calls=4):
     """Readers are explicit callbacks. Failed/uncorroborated candidates stay inspectable."""
     require(type(max_units) is int and 0 <= max_units <= 20 and type(max_line_attempts) is int
-            and 0 <= max_line_attempts <= 128, 'bounded reread budgets required')
+            and 0 <= max_line_attempts <= 128 and type(max_fallback_calls) is int
+            and 0 <= max_fallback_calls <= 8, 'bounded reread budgets required')
     require(image.mode == 'RGB' and image.width*image.height <= 4_000_000, 'reread original pixel budget')
     require(not hasattr(engine, 'quality_rereads'), 'quality reread already attempted; use a fresh run')
     batches = engine.automatic_unit_proposals
@@ -326,6 +328,40 @@ def refine(engine, image, original_bytes, *, vision, manga, model_identity, outp
                 except (ValueError, OSError) as retention_error:
                     record['failed_response_retention_error'] = str(retention_error)[:256]
             result.status, result.reason = 'error', record['error']
+    from . import quality_lines
+    stage.update(primary_vision_calls=stage['vision_calls'], fallback_vision_calls=0, line_fallbacks=[])
+    source = None
+    for index, (proposal, unit, result) in enumerate(zip(batch.proposals, units, results)):
+        ids = proposal.main_ids
+        if (len(ids) < 2 or proposal.annotation_ids or result.attempts != 1
+                or any(c['quality_reread'].get('preferred') for c in result.candidates)
+                or min(raw[i].confidence for i in ids) >= quality_lines.RAW_FLOOR
+                or stage['fallback_vision_calls'] >= max_fallback_calls):
+            continue
+        before = stage['fallback_vision_calls']
+        try:
+            if source is None:
+                source = quality_lines.OriginalLines(image, [asdict(d) for d in batch.detections])
+            proof = quality_lines.attempt(unit, proposal, source, vision=vision, manga=manga, stage=stage,
+                retain=retain, retain_image=retain_image, max_calls=max_fallback_calls,
+                max_line_attempts=max_line_attempts, prefix=f'quality-lines-{index:03d}')
+            stage['line_fallbacks'].append({'proposal_id': proposal.proposal_id, **proof})
+            if proof['preferred']:
+                evidence = AutomaticCropEvidence(proposal.proposal_id, proposal.page, proposal.member_ids, ids,
+                    proposal.crop_bounds, tuple(i for i in raw if i not in proposal.member_ids), batch.evidence_sha256,
+                    hashlib.sha256(json.dumps(asdict(proposal), sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
+                    script_evidence(unit.selected.text)[0], proposal.structural_reasons, proposal.word_reasons, proposal.completeness)
+                candidate = {'text': proof['verdict']['text'], 'reference_main_text': unit.selected.text,
+                    'crop': asdict(evidence), 'engine': ENGINE, 'status': 'automated_unverified', 'reviewed': False,
+                    'model_identity': model_identity, 'model_settings_json': canonical({'policy': quality_lines.POLICY}),
+                    'quality_reread': proof}
+                result.candidates += (candidate,)
+                result.status, result.reason = 'automated_unverified', proof['status']
+        except Exception as error:
+            stage['line_fallbacks'].append({'proposal_id': proposal.proposal_id, 'status': 'failed',
+                                          'error': type(error).__name__+': '+str(error)[:512]})
+        finally:
+            result.fallback_attempts = stage['fallback_vision_calls']-before
     return stage
 
 
@@ -339,11 +375,16 @@ def preferred_reading(unit):
         proof = data.get('quality_reread', {})
         if proof.get('preferred') is not True:
             continue
+        from . import quality_lines
         require(data['text'] == reading.text and data['engine'] == ENGINE and data['reviewed'] is False
-                and data['status'] == 'automated_unverified' and proof['policy'] == POLICY
+                and data['status'] == 'automated_unverified' and proof['policy'] in (POLICY, quality_lines.POLICY)
                 and proof['raw_reading_revision'] == unit.selected_revision
                 and data['reference_main_text'] == unit.selected.text and proof['verdict']['text'] == reading.text
                 and proof['verdict']['uncertain'] is False, 'reread preferred source binding drift')
+        if proof['policy'] == quality_lines.POLICY:
+            quality_lines.validate_reading(unit, proof)
+            candidates.append(reading)
+            continue
         lines = reading.text.splitlines()
         evidence = proof['line_evidence']
         require(len(lines) == len(evidence) == len(unit.order), 'reread line coverage drift')
@@ -359,6 +400,11 @@ def preferred_reading(unit):
 
 def validate_pixels(candidate, image, detections):
     proof = candidate['quality_reread']
+    from . import quality_lines
+    if proof['policy'] == quality_lines.POLICY:
+        require(proof['bounds'] == candidate['crop']['bounds'], 'mixed crop/source binding drift')
+        quality_lines.validate_pixels(proof, image, detections)
+        return
     bounds = proof['bounds']
     raw = {(type(d['source_id']), d['source_id']): d for d in detections}
     members = candidate['crop']['member_ids']

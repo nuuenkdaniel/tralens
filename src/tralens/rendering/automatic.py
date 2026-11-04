@@ -320,7 +320,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', '../translation/coverage.py', '../translation/contracts.py', '../ocr/quality_reread.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', '../translation/coverage.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py')})
 
 
 def _report_html(report):
@@ -722,7 +722,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                         n.budget_check(work+extra_work <= MAX_WORK, 'best-effort native raster budget')
                         work += extra_work
                         plan = best_effort.native_plan(rgb, raw, row['binding']['member_ids'],
-                            reserved=None if confidence_settings is not None else reserved)
+                            reserved=None if confidence_settings is not None else reserved,
+                            allow_tight_source_seed=confidence_settings is not None)
                         if confidence_settings is not None:
                             plan = reserve_layout(plan, reserved)
                         method = plan.evidence['cleanup_method']

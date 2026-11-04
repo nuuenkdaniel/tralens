@@ -43,6 +43,8 @@ evidence that the OCR or translation is correct.
    whitespace removal are used **only for agreement diagnostics**. The exact
    selected visual string, including supplied spaces and line breaks, is what
    enters translation. No expected-word substitutions or fluency selection exist.
+   A later mixed-line fallback, described below, keeps the original strings/scores
+   on unchanged raw lines and requires paired corroboration only on changed lines.
 5. **Unverified derived translation input.** A preferred candidate is separately
    bound to the original raw unit, proposal, image and line evidence. The original
    unit still selects raw OCR and retains its structural blocks and alternatives.
@@ -265,3 +267,102 @@ Final full reruns after the restoration fix: **839 tests passed in `.venv` and
 839 in `.venv-paddle6`**. JavaScript syntax, Python compilation and
 `git diff --check` also passed. These remain regression/integration checks, not
 a claim that the remaining image or linguistic quality is satisfactory.
+
+## Follow-up: the LiveCD / desktop panel
+
+The next user screenshot correctly identified a remaining failure: both speech
+balloons were still Japanese. Broad erasure was gone, but preservation alone did
+not finish the translation. The outlined keyboard sound effect also remains
+unresolved.
+
+### Bounded mixed-line recognition fallback
+
+`src/tralens/ocr/quality_lines.py` adds a fallback inside the **already opt-in**
+quality reread stage, not a new default recognizer or provider:
+
+- Retain exact raw lines scoring at least the provisional `0.70` routing floor.
+  These are not newly certified readings. Their original individual scores must
+  still meet the requested rendering threshold; a paired reading of another line
+  cannot launder a weaker raw line into a higher-confidence result.
+- For weak lines in otherwise eligible multi-line blocks, derive separate
+  recognition presentations from whole original ink components. Competing source
+  geometry, ambiguous ownership, empty images and excessive extents reject the
+  presentation. Removed context is white **only in the OCR presentation**; these
+  masks do not grant any erase permission and never modify the original image.
+- Try a single target image, then target plus original block context, under a
+  shared **four-call fallback vision budget**. All eight primary calls remain
+  separately counted. Uncertain or uncorroborated outputs do not select a block.
+- Compare changed lines with Manga OCR on a fixed set of bounded presentations:
+  rotations `0, -4, 4, -8, 8` degrees, expanded without clipping, with white
+  presentation padding. All calls, responses, rejected readings, transforms and
+  original-pixel bindings remain inspectable. This is presentation diversity,
+  not five independent recognizers or a confidence probability.
+- Keep exact per-line text separately, then concatenate in the already bound
+  geometric reading order, like the raw main-text input. Do not introduce image
+  row boundaries as new sentence breaks. An early live run showed that inserting
+  artificial newlines made the native translation unnecessarily fragmentary.
+
+No expected Japanese words or English targets were added to either model prompt.
+The probes also retained failures: Paddle and the visual reader remained poor on
+some isolated handwriting, and Manga OCR misread the outlined sound-effect band.
+Neither improved fluency nor trying more transforms is independent source truth.
+
+### Native cleanup and placement remain separate
+
+The right balloon passed native stroke/background/collar checks, but requiring
+an **extra layout-only collar** to fit inside the already inset placement space
+vetoed the entire operation. In confidence-gated mode only, the native fallback
+can now seed placement with the complete foreground instead. Every original
+foreground and erase pixel stays intact, obstacles/insets are unchanged, and
+exact-glyph containment and requested minimum type size still apply. Genuine
+border/collar contact remains a rejection. This is not smaller erasure, a relaxed
+background model or an art-overlay fallback.
+
+### Actual outcomes and limitations
+
+The `quality-panel-live-v1` run newly rendered both balloons, but its artificially
+line-separated translation input made the English choppy. `quality-panel-live-v2`
+retained line boundaries in evidence rather than inserting them into the composed
+input. A fresh real-browser retry then produced a byte-identical composite:
+
+<http://127.0.0.1:7860/?job=8d5c4cdaf1af4569a12871265db76aa1>
+
+The viewer used real local readers and the configured native translator, not test
+doubles. It shows 43 retained detections, 28 grouped translations and 14 actual
+image replacements. Eight primary and four fallback vision calls plus 14 Manga
+OCR calls are recorded. The previous instruction improvement remains present.
+All 60 PNGs checked for the twelve previously rendered operations stay
+byte-identical, as do the default-route 444 coverage and 129 strict-only PNGs.
+
+Visual inspection covered the full served page, both balloon crops and the panel.
+The original speech lettering is removed and replaced without broad smearing;
+the balloon outlines, face and surrounding artwork are retained. The keyboard
+effect band is pixel-identical to the original after conversion to the same RGB
+representation. It is **not** counted as translated or fixed.
+
+The output is still only a partial candidate. The retained raw desktop line still
+contains a questionable extra `°`, and the resulting English “Whoa, it suddenly
+appeared on my desktop!” is semantically awkward. The left target is “I heard
+it’s called a LiveCD.” Neither is claimed to be an independently approved
+translation. The keyboard effect, gloss and other previously noted gaps remain;
+no successful replacement count is an artistic/linguistic quality score.
+
+Local panel/browser evidence: `test-results/viewer-quality-panel-live-v1/`.
+Fresh job: `test-results/dev-frontend/8d5c4cdaf1af4569a12871265db76aa1/`.
+Offline translation review checked this job's source/request/result consistency;
+all 62 reread artifacts and 223 rendering artifact hashes also verified.
+
+| Retained viewer evidence | SHA256 |
+| --- | --- |
+| Preview | `96bad7e4553f49a8c6754e593e34a7a1ada00e4fa96fc4d9b52c473672cbf59e` |
+| Rendering manifest | `b06719df981d1f15b7d1b8ffce600bca891cedb647cb1d146e2ffa9165f89536` |
+| Composite (CLI v2 and viewer) | `9448e202fdf91e462925b0e2dcd9aad51f70b0497e347ac020cf27aac58a0686` |
+
+Verification: **848 tests passed in each of `.venv` and `.venv-paddle6`**;
+source-only verification also passed with 39 optional-local-evidence skips.
+Portable regressions cover source/score laundering, disagreement, budgets,
+rotation/payload/pixel drift, empty/shared components, full pipeline/offline
+bindings, unchanged native erasure and genuine border-contact rejection. No
+defaults, licenses, user dependency edits or earlier evidence were changed, and
+nothing was downloaded or pushed. This is development evidence, not held-out
+general OCR accuracy validation.

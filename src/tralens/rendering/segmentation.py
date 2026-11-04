@@ -139,12 +139,13 @@ def periodic_surface(pixels, known):
 
 
 def derive(rgb, detections, member_ids, probability, *, surface='flat', source_fraction=.75,
-           semantic_fraction=.5):
+           semantic_fraction=.5, allow_tight_source_seed=False):
     """Build an experimental automatic plan from whole original residual strokes."""
     n.require(rgb.mode == 'RGB' and isinstance(probability, np.ndarray)
         and probability.shape == (rgb.height, rgb.width) and probability.dtype == np.uint8,
         'native uint8 CTD grayscale required')
     n.require(surface in ('flat', 'periodic'), 'unknown surface')
+    n.require(type(allow_tight_source_seed) is bool, 'tight source-seed option must be boolean')
     n.budget_check(rgb.width*rgb.height <= 16_000_000 and len(detections) <= 512,
                    'trial source geometry budget')
     own, other = raster(detections, member_ids, rgb.size)
@@ -282,20 +283,34 @@ def derive(rgb, detections, member_ids, probability, *, surface='flat', source_f
     window = [max(2, x-mx), max(2, y-my), min(rgb.width-2, x+w+mx), min(rgb.height-2, y+h+my)]
     # Periodic surface contrast is background, not layout ink: residual-based
     # obstacles preserve deviations from the supported pattern, not its dots.
-    layout, bounds, steps, derivation = a.source_local_layout(safe, dilate(full_fg, 2), window)
+    seed = dilate(full_fg, 2)
+    try:
+        layout, bounds, steps, derivation = a.source_local_layout(safe, seed, window)
+    except a.AutomaticSkip as error:
+        if not allow_tight_source_seed or error.code != 'layout_seed_obstructed':
+            raise
+        # Native cleanup/collar checks above already passed. Layout is a separate
+        # permission: preserve EVERY foreground/erase pixel, but do not require
+        # its unused outer collar to fit inside the text-placement inset too.
+        layout, bounds, steps, derivation = a.source_local_layout(safe, full_fg, window)
+        derivation = {**derivation, 'source_seed_policy': 'complete_native_foreground_not_extra_collar',
+            'original_rejection': error.code, 'unused_layout_collar_pixels': int((seed & ~full_fg).sum()),
+            'source_foreground_discarded': 0, 'erase_pixels_discarded': 0,
+            'layout_obstacle_inset_unchanged': True}
+        seed = full_fg
     # A successful rectangle can still waste genuine original whitespace around
     # a tapered balloon. Keep the same window, obstacles and complete source
     # clearance, but expose its one 4-connected safe component to exact-glyph
     # layout. No rectangular corner is treated as new erasure permission.
     wl, wt, wr, wb = window
-    local_seed = dilate(full_fg, 2)[wt:wb, wl:wr]
+    local_seed = seed[wt:wb, wl:wr]
     component_count, free_labels = cv2.connectedComponents(safe[wt:wb, wl:wr].astype(np.uint8), connectivity=4)
     n.budget_check(component_count <= 8192, 'trial free-space component budget')
     seed_labels = np.unique(free_labels[local_seed])
     if len(seed_labels) == 1 and seed_labels[0] != 0:
         free = np.zeros_like(own)
         free[wt:wb, wl:wr] = free_labels == seed_labels[0]
-        n.require(not (dilate(full_fg, 2) & ~free).any() and not (free & ~safe).any(),
+        n.require(not (seed & ~free).any() and not (free & ~safe).any(),
                   'trial free-space lost original clearance')
         if int(free.sum()) > int(layout.sum()):
             old_pixels = int(layout.sum())

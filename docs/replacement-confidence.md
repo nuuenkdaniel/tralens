@@ -11,6 +11,12 @@ inheriting Paddle's numeric confidence. Its image edits still require native
 cleanup and readable fitting; agreement is not semantic approval. The figures
 below describe the initial raw-reading confidence checkpoint, not those later runs.
 
+The later mixed-line fallback can retain individually bound raw lines alongside
+paired rereads. Only those unchanged raw lines keep their original scores, and
+each must still meet the requested edit threshold. Changed lines never inherit
+those scores. Per-line alternatives and original-pixel presentation checks remain
+recorded; neither route certifies linguistic correctness.
+
 The policy uses the minimum bound raw **main-line** OCR score, not a mean that can
 hide a bad line. Only raw readings can use those scores; other recognizer readings
 do not inherit Paddle confidence. Missing, malformed or out-of-range scores defer

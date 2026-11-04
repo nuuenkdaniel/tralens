@@ -76,6 +76,17 @@ def assess_source(unit, target, minimum):
                 assessment.update(allowed=True, reason_code=None,
                     score_kind='unscored paired visual/line reread; no raw Paddle score inherited',
                     reason='Explicitly enabled, source-bound paired-reader hypothesis; semantic correctness remains unverified.')
+                from ..ocr import quality_lines
+                proof = strict_json(candidate.evidence_json)['quality_reread']
+                if proof['policy'] == quality_lines.POLICY:
+                    scores = [{'source_id': line['source_id'], 'score': line['confidence']}
+                        for line in proof['lines'] if line['kind'] == 'raw_unchanged']
+                    assessment.update(line_scores=scores,
+                        minimum_main_line_score=min((line['score'] for line in scores), default=None),
+                        score_kind='retained raw lines keep their own scores; changed lines are unscored paired-reader hypotheses')
+                    if any(line['score'] < minimum for line in scores):
+                        assessment.update(allowed=False, reason_code='replacement_low_ocr_confidence',
+                            reason='A retained raw line is below the requested replacement threshold; reread scores are not inherited.')
     # Exact string identity justifies preserving source pixels, not certifying OCR.
     if assessment['source_target_exact_match']:
         assessment.update(allowed=False, reason_code='replacement_unchanged_text',

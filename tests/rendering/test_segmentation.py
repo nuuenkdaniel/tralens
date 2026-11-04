@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from tralens.rendering import automatic as a, natural as n, restoration as r, segmentation as s
 from . import test_restoration as fixtures
@@ -148,6 +148,42 @@ class RoutingTests(unittest.TestCase):
             report = self.run_render(background_method='flat')
         self.assertTrue(all(call.kwargs['surface'] == 'flat' for call in derive.call_args_list))
         self.assertEqual(report['coverage']['rendered'], 0)
+
+
+class TightNativeLayoutTests(unittest.TestCase):
+    def fixture(self, left=55):
+        image = Image.new('RGB', (200, 160), 'white')
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((50, 20, 170, 140), outline='black', width=2)
+        foreground = np.zeros((160, 200), bool)
+        for y in (45, 70, 95):
+            draw.rectangle((left, y, left+10, y+10), fill='black')
+            foreground[y:y+11, left:left+11] = True
+            draw.rectangle((110, y, 120, y+10), fill='black')
+            foreground[y:y+11, 110:121] = True
+        raw = [{'source_id': 0, 'polygon': [[52, 40], [150, 40], [150, 115], [52, 115]]}]
+        support = np.where(np.asarray(image).min(axis=2) < 180, 245, 0).astype(np.uint8)
+        return image, raw, support, foreground
+
+    def test_unused_outer_layout_collar_is_not_a_reason_to_discard_complete_native_cleanup(self):
+        image, raw, support, expected = self.fixture()
+        before = image.tobytes()
+        with self.assertRaises(a.AutomaticSkip) as caught:
+            s.derive(image, raw, [0], support)
+        self.assertEqual(caught.exception.code, 'layout_seed_obstructed')
+        plan = s.derive(image, raw, [0], support, allow_tight_source_seed=True)
+        self.assertTrue(np.array_equal(plan.foreground, expected))
+        self.assertTrue(np.array_equal(plan.erase, cv2.dilate(expected.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)))
+        self.assertFalse((plan.foreground & ~plan.layout).any())
+        self.assertFalse((plan.layout & plan.obstacles).any())
+        self.assertEqual(plan.evidence['layout_derivation']['source_foreground_discarded'], 0)
+        self.assertEqual(plan.evidence['layout_derivation']['erase_pixels_discarded'], 0)
+        self.assertEqual(image.tobytes(), before)
+
+    def test_tight_layout_never_waives_real_border_or_cleanup_collar_contact(self):
+        image, raw, support, _ = self.fixture(left=53)
+        with self.assertRaises(a.AutomaticSkip):
+            s.derive(image, raw, [0], support, allow_tight_source_seed=True)
 
 
 if __name__ == '__main__':
