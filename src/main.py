@@ -58,7 +58,7 @@ def quality_refiner(*, endpoint, model, manga_model):
 def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28,
                  max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort',
                  replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', quality_reread=False,
-                 reread_model='qwen3.8:latest', manga_reread_model=None, **preview_options):
+                 reread_model='qwen3.8:latest', manga_reread_model=None, source_localization=False, **preview_options):
     """Connect the existing OCR/translation preview to automatic rendering.
 
     Source/translation bindings stay strict; rendering quality follows the chosen
@@ -77,6 +77,15 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
     from tralens.translation.coverage import validate_policy
 
     translation_policy = validate_policy(preview_options.get('translation_policy', 'coverage-first'))
+    if type(source_localization) is not bool:
+        raise ValueError('source localization requires explicit boolean enablement')
+    if preview_options.get('translation_context', 'isolated') != 'isolated':
+        from tralens.translation.context import validate_policy as validate_context
+        from tralens.translation.runtime import GENERALIST, TRANSLATEGEMMA
+        validate_context(preview_options['translation_context'],
+            GENERALIST if preview_options.get('profile') == 'generalist' else TRANSLATEGEMMA)
+        if preview_options.get('review_ocr'):
+            raise ValueError('nearby translation context and visual alternate review must be separate experiments')
     if type(quality_reread) is not bool or (not quality_reread and manga_reread_model is not None):
         raise ValueError('quality reread requires explicit enablement and existing local model assets')
     if quality_reread:
@@ -96,6 +105,9 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         rendering_options.update(replacement_policy=replacement_policy, min_ocr_confidence=min_ocr_confidence)
     if layout_policy != 'source-local':
         rendering_options['layout_policy'] = layout_policy
+    if source_localization:
+        preview_options['source_localization'] = True
+        rendering_options['cleanup_policy'] = 'localized'
     checked = preflight_automatic(**rendering_options)
     report = {'schema_version': 1, 'purpose': 'automatic_pipeline_candidate', 'status': 'running',
         'stage': 'preview', 'source': checked['source'], 'fonts_sha256': checked['fonts_sha256'],
@@ -113,6 +125,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         report['layout_policy'] = checked['layout_policy']
     if quality_reread:
         report['quality_reread'] = {'enabled': True, 'model': reread_model, 'truth_approval': False}
+    if source_localization:
+        report['source_localization'] = {'enabled': True, 'semantic_ownership_verified': False}
     output.mkdir(mode=0o700)
     checkpoint = output/'pipeline.json'
     _atomic_json(checkpoint, report)
@@ -210,7 +224,11 @@ def main(argv=None):
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434")
     parser.add_argument("--max-attempts", type=int, default=2, help="global model call budget, 0..64; no retries")
     parser.add_argument('--translation-policy', choices=('coverage-first', 'conservative'), default='coverage-first',
-                        help='default coverage-first: attempt source-bound OCR text despite uncertain ownership/crop/orientation')
+                         help='default coverage-first: attempt source-bound OCR text despite uncertain ownership/crop/orientation')
+    parser.add_argument('--translation-context', choices=('isolated', 'nearby'), default='isolated',
+                         help='opt-in nearby OCR context and one rendition per target; requires explicit generalist model/profile; no inferred reading order')
+    parser.add_argument('--source-localization', action='store_true',
+                         help='opt-in bounded crop predictions using existing OCR; with render, retry failed cleanup as unverified whole strokes')
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--keep-alive", type=int, default=60)
     parser.add_argument("--num-predict", type=int, default=1024)
@@ -258,6 +276,10 @@ def main(argv=None):
             allow_fragment_previews=args.allow_fragment_previews,review_ocr=args.review_ocr,review_model=args.review_model,
             max_review_attempts=args.max_review_attempts,review_timeout=args.review_timeout)
         preview_options['translation_policy'] = args.translation_policy
+        if args.translation_context != 'isolated':
+            preview_options['translation_context'] = args.translation_context
+        if args.source_localization:
+            preview_options['source_localization'] = True
         if args.render:
             report = run_pipeline(args.image, args.output, fonts=args.fonts, font_id=args.font_id,
                 min_size=16 if args.min_size is None else args.min_size,

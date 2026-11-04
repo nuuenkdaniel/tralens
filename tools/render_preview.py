@@ -34,6 +34,8 @@ def main(argv=None):
                          help='confidence-gated auto-compose: weakest main-line OCR score 0..1, default 0.70; not accuracy probability')
     parser.add_argument('--layout-policy', choices=('source-local', 'enclosed-retry'),
                          help='auto-compose: opt-in original-enclosure retry after native layout failure; no new erase permission')
+    parser.add_argument('--cleanup-policy', choices=('native', 'localized'),
+                         help='auto-compose: opt-in crop-corroborated whole-stroke retry; requires saved source-localization evidence')
     for name in ('min-size', 'max-size', 'clearance', 'member-padding', 'glyph-padding', 'layout-inset'):
         parser.add_argument('--'+name, type=int)
     args = parser.parse_args(argv)
@@ -53,7 +55,8 @@ def main(argv=None):
                 max_size=28 if args.max_size is None else args.max_size, max_units=args.max_units,
                 background_method=args.background_method or 'auto', text_mask_model=args.text_mask_model,
                 render_policy=args.render_policy or 'best-effort', replacement_policy=args.replacement_policy or 'all',
-                min_ocr_confidence=args.min_ocr_confidence, layout_policy=args.layout_policy or 'source-local')
+                min_ocr_confidence=args.min_ocr_confidence, layout_policy=args.layout_policy or 'source-local',
+                cleanup_policy=args.cleanup_policy or 'native')
         except (ValueError, OSError, KeyError, TypeError) as error:
             parser.exit(2, f'automatic render rejected: {error}\n')
         print(f"Automatic candidate output: {report['coverage']['rendered']}/{report['coverage']['total_eligible']} total candidates rendered; "
@@ -72,6 +75,8 @@ def main(argv=None):
         parser.error('replacement confidence options require auto-compose')
     if args.layout_policy is not None:
         parser.error('--layout-policy requires auto-compose')
+    if args.cleanup_policy is not None:
+        parser.error('--cleanup-policy requires auto-compose')
     if args.mode in ('prepare', 'confirm-preparation'):
         if args.output is None or args.selection is not None or args.parent is not None or args.compare or any(
                 getattr(args, k) is not None for k in ('candidate', 'review', 'state', 'note')):

@@ -338,7 +338,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', '../translation/coverage.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
 
 
 def _report_html(report):
@@ -422,7 +422,13 @@ def layout_settings(policy, render_policy, confidence_settings):
               'enclosed-retry requires best-effort rendering and confidence-gated replacement')
 
 
-def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local'):
+def cleanup_settings(policy, render_policy, confidence_settings):
+    n.require(type(policy) is str and policy in ('native', 'localized'), 'unknown automatic cleanup policy')
+    n.require(policy == 'native' or (render_policy == 'best-effort' and confidence_settings is not None),
+              'localized cleanup requires best-effort rendering and confidence-gated replacement')
+
+
+def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native'):
     """Check rendering prerequisites before upstream inference, without a preview.
 
     This is not erase permission: run_automatic still validates the complete saved
@@ -431,6 +437,7 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
     confidence_settings = _options(min_size, max_size, max_units, background_method, render_policy,
                                    replacement_policy, min_ocr_confidence)
     layout_settings(layout_policy, render_policy, confidence_settings)
+    cleanup_settings(cleanup_policy, render_policy, confidence_settings)
     image, fonts = Path(image).absolute(), Path(fonts).absolute()
     content = n.read_explicit(image, 32*1024*1024)
     font_manifest = n.read_explicit(fonts, 256*1024)
@@ -448,17 +455,20 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
         checked['replacement_policy'] = confidence_settings
     if layout_policy != 'source-local':
         checked['layout_policy'] = layout_policy
+    if cleanup_policy != 'native':
+        checked['cleanup_policy'] = cleanup_policy
     if text_mask_model is not None:
         from . import segmentation
         checked['text_mask_model'] = segmentation.model_spec(text_mask_model)
     return checked
 
 
-def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local'):
+def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native'):
     """All current strict translated candidates, with explicit machine skip states."""
     confidence_settings = _options(min_size, max_size, max_units, background_method, render_policy,
                                    replacement_policy, min_ocr_confidence)
     layout_settings(layout_policy, render_policy, confidence_settings)
+    cleanup_settings(cleanup_policy, render_policy, confidence_settings)
     from . import restoration
     from ..translation import coverage as tc
     model_spec = None
@@ -482,6 +492,12 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     style = {'min_size': min_size, 'max_size': max_size, 'outline': 0}
     candidates = preview_doc['ocr'].get('automatic_recognition_results', [])
     units = n.automatic_units(preview_doc['ocr']['batches'][0], candidates[0] if candidates else ())
+    from ..translation.context import saved_requests
+    contextual = saved_requests(preview_doc, units)
+    localized = {}
+    if cleanup_policy != 'native':
+        from . import localized_strokes
+        localized = localized_strokes.saved_records(preview_doc, rgb, raw, units)
     report = {'schema_version': 1, 'purpose': 'automatic_candidate_output',
         'policy': POLICY if background_method == 'flat' else 'automatic_flat_then_classical_v1',
         'background_method': background_method,
@@ -516,6 +532,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         report['replacement_policy'] = confidence_settings
     if layout_policy != 'source-local':
         report['layout_policy'] = layout_policy
+    if cleanup_policy != 'native':
+        report['cleanup_policy'] = cleanup_policy
     restoration_context = None
     text_mask, text_mask_error = None, None
     if model_spec is not None:
@@ -591,11 +609,11 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             if is_coverage:
                 n.require(preview_doc['schema_version'] == 4 and
                     preview_doc['settings'].get('translation_policy') == 'coverage-first', 'coverage translation policy/schema required')
-                binding = tc.bound_result(record, unit)
+                binding = tc.bound_result(record, unit, request=contextual.get(unit.unit_id))
                 coverage_eligible += 1
                 row['coverage'] = record['coverage']
             else:
-                binding = n.strict_result_binding(record, unit)
+                binding = n.strict_result_binding(record, unit, request=contextual.get(unit.unit_id))
                 eligible += 1
             row.update(machine_selected=True, binding=binding)
             if max_units is not None and eligible+coverage_eligible > max_units:
@@ -952,6 +970,57 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             except (ValueError, OSError, KeyError, TypeError) as error:
                 attempt.update(reason_code=getattr(error, 'code', 'validation'), reason=str(error),
                                rejection_evidence=getattr(error, 'evidence', {}))
+    if cleanup_policy == 'localized':
+        localized_work, localized_retries = 0, 0
+        retry_indices = [i for i, _ in pairs if report['units'][i]['status'] == 'skipped'
+            and report['units'][i]['reason_code'] == 'replacement_cleanup_confidence'
+            and report['units'][i].get('attempted') and units[i].unit_id in localized]
+        directions = {proposal['proposal_id']:proposal['direction'] for proposal in preview_doc['ocr']['batches'][0]['proposals']}
+        retry_indices.sort(key=lambda i:(directions[units[i].unit_id]!='vertical',len(units[i].order)<2,
+                                        -len(units[i].selected.text),units[i].unit_id))
+        for i in retry_indices:
+            row = report['units'][i]
+            attempt = {'policy': localized_strokes.POLICY, 'status': 'rejected',
+                'original_failure': row['reason_code']}
+            row['localized_cleanup_attempt'] = attempt
+            try:
+                extra_work = pixels*(len(raw)+128)
+                n.budget_check(localized_retries < localized_strokes.MAX_RETRIES
+                    and localized_work+extra_work <= localized_strokes.MAX_RETRY_WORK,
+                    'localized cleanup retry/raster budget')
+                localized_retries += 1; localized_work += extra_work
+                plan = localized_strokes.derive(rgb, raw, row['binding']['member_ids'],
+                    localized[units[i].unit_id], reserved=reserved)
+                attempt['evidence'] = plan.evidence
+                mask = Image.fromarray(plan.layout.astype(np.uint8)*255)
+                layer, provenance, content = typography.layout_dialogue(row['binding']['text'], font_data, coverage, mask, style)
+                check(rc.layout_rejection(provenance, min_size) is None, 'replacement_layout_confidence',
+                    'localized lettering must meet the requested minimum')
+                alpha = np.asarray(layer.getchannel('A')) != 0
+                check(alpha.any() and not (alpha & (~plan.layout | plan.obstacles | reserved)).any(),
+                    'alpha_containment', 'localized lettering leaves supported original space')
+                plate_pixels = np.asarray(rgb).copy(); apply_cleanup(plate_pixels, plan)
+                plate = Image.fromarray(plate_pixels)
+                composite = Image.alpha_composite(plate.convert('RGBA'), layer).convert('RGB')
+                audit = n.pixel_audit(rgb, plate, composite, plan.erase, alpha, plan.obstacles)
+                n.verify_pixel_audit(audit)
+                box = layer.getchannel('A').getbbox()
+                plans[i], tiles[i], content_masks[i] = PackedPlan(plan), (layer.crop(box), box[:2]), content.convert('1')
+                provenance['typography']['content_mask_artifact'] = f'unit-{i:03d}-content-mask.png'
+                row.update(status='ready', reason_code=None, reason=None, render_quality='best_effort',
+                    cleanup_method=plan.evidence['cleanup_method'], layout=provenance, mask_evidence=plan.evidence,
+                    candidate_pixel_audit=audit, candidate_audit_scope='isolated crop-corroborated whole-stroke hypothesis',
+                    outside_content_alpha_pixels=0, best_effort={'original_failure': attempt['original_failure'],
+                        'warnings': plan.evidence['warnings']})
+                attempt['status'] = 'planned'
+                ready.append(i); collisions.discard(i)
+                reserved |= occupied_reservation(plan, tiles[i])
+            except (ValueError, OSError, KeyError, TypeError) as error:
+                attempt.update(reason_code=getattr(error, 'code', 'validation'), reason=str(error),
+                    rejection_evidence=getattr(error, 'evidence', {}))
+        report['localized_cleanup_summary'] = {'retries': localized_retries, 'raster_work': localized_work,
+            'maximum_retries': localized_strokes.MAX_RETRIES, 'maximum_raster_work': localized_strokes.MAX_RETRY_WORK,
+            'semantic_mask_inference': False, 'semantic_ownership_verified': False}
     erase_union = np.zeros((rgb.height, rgb.width), bool)
     alpha_union = np.zeros_like(erase_union)
     layout_union = np.zeros_like(erase_union)
@@ -1029,6 +1098,9 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             and bool(row.get('text_mask_method')) for row in report['units']),
             periodic_rendered=sum(row['status'] == 'automatic_composed' and row.get('cleanup_method') == 'phase_locked_tile'
                 for row in report['units']))
+    if cleanup_policy != 'native':
+        report['background_summary']['localized_whole_stroke_rendered'] = sum(row['status'] == 'automatic_composed'
+            and row.get('cleanup_method') == 'localized_whole_stroke_flat_fill' for row in report['units'])
     report['job_revision'] = n.revision({k: v for k, v in report.items() if k not in ('job_revision', 'artifacts')})
     blobs, total = {}, 0
     def add(name, value):

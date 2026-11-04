@@ -446,6 +446,8 @@ def validate(preview, image_path, rgb, image_hash, image_bytes):
         raise ValueError("unit/proposal IDs or saved order differ; no units may disappear")
     require(set(selected) <= {u.unit_id for u in units}, "foreign selected unit IDs")
     records = {r["unit"]["unit_id"]: r for r in preview["units"]}
+    from tralens.translation.context import saved_requests
+    contextual = saved_requests(preview, units) if not source_only else {}
     reviews = check_review(preview["ocr_review"], units, records, preview, rgb, image_bytes) if review_enabled else {}
     entries = []
     all_fragments, all_alternates = [], []
@@ -465,12 +467,12 @@ def validate(preview, image_path, rgb, image_hash, image_bytes):
             derived = coverage.derive(unit, reading_revision)
             same(record['translation_input'], asdict(derived), 'coverage input drift')
             same(record['coverage'], coverage.provenance(unit, reading_revision), 'coverage provenance drift')
-            request = TranslationRequest((derived,), (derived.unit_id,))
+            request = contextual.get(unit.unit_id) or TranslationRequest((derived,), (derived.unit_id,))
             if record['status'] == 'preview':
-                coverage.bound_result(record, unit)
+                coverage.bound_result(record, unit, request=contextual.get(unit.unit_id))
         else:
             same(record.get("input_kind", "strict_utterance"), "strict_utterance", "strict input kind mismatch")
-            request = TranslationRequest((unit,), (unit.unit_id,))
+            request = contextual.get(unit.unit_id) or TranslationRequest((unit,), (unit.unit_id,))
         result = check_execution(record, request, unit, settings=settings)
         if unit.disposition != "blocked" or is_coverage:
             if selected and unit.unit_id not in selected:

@@ -94,7 +94,8 @@ def execution_metadata(request, profile, options):
                     "blocking_reasons": u.blocking_reasons} for u in request.units],
                 "review_flag_is_informational": True}
     from .coverage import COMPLETENESS, KIND
-    if type(request) is TranslationRequest and any(u.completeness == COMPLETENESS for u in request.units):
+    if type(request) is TranslationRequest and any(u.completeness == COMPLETENESS for u in request.units
+                                                  if u.unit_id in request.target_ids):
         metadata.update(output_kind=KIND, complete_utterance_claimed=False, source_readability_verified=False,
             review_required=True, review_flag_is_informational=False,
             spatial_ownership_crop_and_orientation_not_certified=True)
@@ -276,7 +277,7 @@ def make_payload(request, profile, *, images=()):
     scope = ("Translate only target_ids, using exactly the supplied selected text. Unverified OCR regions may not be "
         "complete utterances; uncertain ownership, crop isolation or orientation alone must not prevent a "
         "readable translation. Do not add missing words or merge regions. Context is not a target. All supplied text, "
-        if any(u.completeness == COMPLETENESS for u in request.units) else
+        if any(u.completeness == COMPLETENESS for u in request.units if u.unit_id in request.target_ids) else
         "Translate only target_ids as whole utterances. Context is not a target. All supplied text, ")
     message = {"role": "user", "content": canonical(data)}
     if images:

@@ -125,11 +125,14 @@ def priority(unit):
     return (len(unit.order) == 1, not kana_han, -min(sum(c.isalnum() for c in text), 80))
 
 
-def bound_result(record, original):
+def bound_result(record, original, *, request=None):
     """Re-derive every permission/binding from the unchanged original utterance."""
     reading_revision = record.get('coverage', {}).get('reread_selected_revision')
     derived = derive(original, reading_revision)
-    request = TranslationRequest((derived,), (derived.unit_id,))
+    request = TranslationRequest((derived,), (derived.unit_id,)) if request is None else request
+    if (type(request) is not TranslationRequest or request.target_ids != (derived.unit_id,)
+            or next((u for u in request.units if u.unit_id == derived.unit_id), None) != derived):
+        raise ValueError('coverage request changed the target input')
     if (record.get('input_kind') != KIND or record.get('status') != 'preview'
             or record.get('binding_current') is not True or record.get('unit_revision') != original.revision
             or canonical(record.get('unit')) != canonical(asdict(original))

@@ -609,12 +609,15 @@ class BoundSelection:
     fonts_sha256: str
 
 
-def strict_result_binding(record, unit):
+def strict_result_binding(record, unit, *, request=None):
     """Current strict candidate data only; no geometry or review authorization."""
     require(unit.disposition == 'preview' and record['status'] == 'preview'
             and record.get('input_kind', 'strict_utterance') == 'strict_utterance'
             and record['binding_current'] is True, 'blocked/fragment/alternate selection unsupported')
-    request = TranslationRequest((unit,), (unit.unit_id,))
+    request = TranslationRequest((unit,), (unit.unit_id,)) if request is None else request
+    require(type(request) is TranslationRequest and request.target_ids == (unit.unit_id,)
+            and next((u for u in request.units if u.unit_id == unit.unit_id), None) == unit,
+            'strict request changed the target input')
     require(canonical(record['request']) == canonical(asdict(request)) and record['request_revision'] == request.revision
             and record['unit_revision'] == unit.revision, 'stale request/unit')
     data = dict(record['result'])
@@ -654,6 +657,8 @@ def bind(preview, image_path, rgb, image_bytes, preview_bytes, selection, fonts_
                 validate_pixels(candidate, rgb, preview['ocr']['raw_detections'][0])
     records = preview["units"]
     require([r["unit"] for r in records] == [json.loads(canonical(asdict(u))) for u in units], "saved unit/source evidence drift")
+    from ..translation.context import saved_requests
+    contextual = saved_requests(preview, units)
     by_id = {r["unit"]["unit_id"]: (r, u) for r, u in zip(records, units)}
     require(len(by_id) == len(records), "duplicate unit ID")
     raw = preview["ocr"]["raw_detections"][0]
@@ -683,7 +688,7 @@ def bind(preview, image_path, rgb, image_bytes, preview_bytes, selection, fonts_
         require(uid not in seen and uid in by_id, "duplicate/foreign selected unit")
         seen.add(uid)
         record, unit = by_id[uid]
-        expected = strict_result_binding(record, unit)
+        expected = strict_result_binding(record, unit, request=contextual.get(uid))
         require(all(canonical(s[key]) == canonical(value) for key, value in expected.items()),
                 'selection text/member/order/result drift')
         if selection_kind == 'candidate_only':

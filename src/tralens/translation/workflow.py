@@ -135,7 +135,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 timeout=120, keep_alive=60, num_predict=1024, selected_ids=(), ocr_factory=None, runtime=None,
                 allow_fragment_previews=False, review_ocr=False, review_model="qwen3.8:latest",
                 max_review_attempts=4, review_timeout=90, review_runtime=None, cancelled=lambda:False,
-                translation_policy='coverage-first', ocr_refine=None):
+                translation_policy='coverage-first', ocr_refine=None, translation_context='isolated', source_localization=False):
     """Injected OCR factory is workflow-owned; an injected translation runtime is caller-owned.
 
     Invalid arguments/paths are rejected before creating any engine. Runtime/engine
@@ -153,6 +153,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
         raise ValueError("review_ocr must be a boolean and cancelled must be callable")
     if ocr_refine is not None and not callable(ocr_refine):
         raise ValueError('OCR refinement must be an explicit callback')
+    if type(source_localization) is not bool:
+        raise ValueError('source localization requires explicit boolean enablement')
     if review_ocr and not run_local_model:
         raise ValueError("--review-ocr requires --run-local-model; no image review in OCR-only mode")
     from . import coverage
@@ -178,11 +180,16 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
         raise ValueError("unknown translation profile")
     capability = profiles[profile]
     validate_model_profile(model, capability)
+    from . import context
+    context.validate_policy(translation_context, capability)
+    if translation_context != 'isolated' and review_ocr:
+        raise ValueError('nearby translation context and visual alternate review must be separate experiments')
     if review_ocr:
         from . import ocr_review as visual
         visual.validate_options(review_ocr,review_model,model,max_review_attempts,review_timeout,run_local_model)
     endpoint = local_endpoint(endpoint)
-    options = GenerationOptions(num_ctx=4096, num_predict=num_predict, keep_alive=keep_alive)
+    options = GenerationOptions(num_ctx=8192 if translation_context != 'isolated' else 4096,
+                                num_predict=num_predict, keep_alive=keep_alive)
     paddle = resolve_profile(DEFAULT_PROFILE, device=device, model_root=model_root)
     if ocr_factory is None:
         validate_runtime(paddle.settings())
@@ -214,6 +221,11 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
         "ocr": None, "units": [], "attempts": 0, "strict_attempts": 0, "fragment_attempts": 0,
         "strict_eligible_units": 0, "fragment_candidate_inputs": 0, "cleanup": None, "error": None}
     state['settings']['translation_policy'] = translation_policy
+    if source_localization:
+        state['settings']['source_localization'] = True
+    if translation_context != 'isolated':
+        state['settings'].update(translation_context=translation_context, context_policy=context.POLICY,
+            context='separately identified nearby OCR text; order/speaker/relevance unverified; no image sent to translator')
     state.update(coverage_attempts=0, coverage_eligible_units=0)
     if allow_fragment_previews:
         state["settings"]["call_order"] = ("selected strict inputs first; explicit fragment selection order"
@@ -261,6 +273,9 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
             engine.process_images(propose_units=True, complementary_ownership=True, regroup_companions=True)
             if ocr_refine is not None:
                 ocr_refine(engine, output=output)
+            if source_localization:
+                from ..ocr.source_localization import refine as localize
+                localize(engine, output=output)
         except Exception as error:
             ocr_error = error
         finally:
@@ -276,6 +291,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                     if ocr_refine is not None:
                         state['ocr']['original_unit_proposals'] = _snapshot(getattr(engine, 'original_unit_proposals', ()))
                         state['ocr']['quality_rereads'] = _snapshot(getattr(engine, 'quality_rereads', {}))
+                    if source_localization:
+                        state['ocr']['source_localization'] = _snapshot(getattr(engine, 'source_localization', {}))
                     if len(batches) == 1 and batches[0] is not None and len(engine.raw_detections) == 1:
                         raw_bound = snapshot_detections(engine.raw_detections[0], batches[0].page)
                 except Exception as error:
@@ -352,6 +369,12 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 record['coverage_rejection_reasons'] = list(coverage.rejection_reasons(unit))
             state["units"].append(record)
             records[unit.unit_id] = (record, request)
+        if translation_context != 'isolated' and units:
+            planned = context.page_plan(units, state['units'], state['ocr']['batches'][0])
+            for identity, (request, proof) in planned.items():
+                record, _ = records[identity]
+                record.update(request=_snapshot(request), request_revision=request.revision, context_selection=proof)
+                records[identity] = (record, request)
         if not set(selected_ids) <= set(records):
             raise ValueError("selected unit IDs are not present on this page")
         review_proposals = {}
