@@ -100,18 +100,22 @@ def payload(line, context=None):
 
 
 def attempt(unit, proposal, source, *, vision, manga, stage, retain, retain_image, max_calls, max_line_attempts, prefix):
-    """Retain reliable RAW lines; replace weak lines only with exact paired readings."""
+    """Retain eligible RAW lines; audit weak/suspicious lines with paired readers."""
     raw = strict_json(unit.selected.evidence_json)
+    from .quality_reread import suspect_latin_mark
+    forced = [line['source_id'] for line in raw if suspect_latin_mark(line['text'])]
     proof = {'policy': POLICY, 'raw_reading_revision': unit.selected_revision, 'preferred': False,
         'raw_passthrough_floor': RAW_FLOOR, 'bounds': list(proposal.crop_bounds), 'lines': [], 'status': 'in_progress',
         'line_join': '', 'join_scope': 'geometric reading order like raw main input; exact per-line strings retained separately'}
+    if forced:
+        proof['script_audit_ids'] = forced
     context = source.image.crop(proposal.crop_bounds)
     require(context.width*context.height*16 <= 2_000_000, 'line fallback context budget')
     context = context.resize((context.width*4, context.height*4), Image.Resampling.LANCZOS)
     proof['context_pixels_sha256'] = digest(context)
     for index, original in enumerate(raw):
         source_id = original['source_id']
-        if original['confidence'] >= RAW_FLOOR:
+        if original['confidence'] >= RAW_FLOOR and source_id not in forced:
             proof['lines'].append({'source_id': source_id, 'kind': 'raw_unchanged', 'text': original['text'],
                                    'confidence': original['confidence']})
             continue
@@ -170,10 +174,15 @@ def attempt(unit, proposal, source, *, vision, manga, stage, retain, retain_imag
 
 def validate_reading(unit, proof):
     raw = strict_json(unit.selected.evidence_json)
+    if 'script_audit_ids' in proof:
+        from .quality_reread import suspect_latin_mark
+        require(proof['script_audit_ids'] == [line['source_id'] for line in raw if suspect_latin_mark(line['text'])],
+                'mixed script-audit source drift')
     require(proof['raw_passthrough_floor'] == RAW_FLOOR and len(proof['lines']) == len(raw), 'mixed line coverage drift')
     for original, line in zip(raw, proof['lines']):
         require(type(original['source_id']) is type(line['source_id']) and original['source_id'] == line['source_id'], 'mixed line identity drift')
         if line['kind'] == 'raw_unchanged':
+            require(line['source_id'] not in proof.get('script_audit_ids', ()), 'script-audited line bypassed paired reading')
             require(line['text'] == original['text'] and type(line['confidence']) in (int, float)
                 and math.isfinite(line['confidence']) and line['confidence'] == original['confidence'] >= RAW_FLOOR,
                 'retained raw line confidence/text drift')

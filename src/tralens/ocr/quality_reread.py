@@ -11,6 +11,7 @@ from io import BytesIO
 import json
 import math
 from pathlib import Path
+import re
 import unicodedata
 
 import cv2
@@ -36,6 +37,11 @@ def require(condition, message):
 def normalized(text):
     """Agreement diagnostic only; candidate/source strings are never rewritten."""
     return ''.join(c for c in unicodedata.normalize('NFKC', text) if not c.isspace())
+
+
+def suspect_latin_mark(text):
+    """A routing hint, not a dictionary correction or a claim the OCR is wrong."""
+    return re.search(r'[A-Za-z]ー[A-Za-z]', unicodedata.normalize('NFKC', text)) is not None
 
 
 def pixels_sha(image):
@@ -206,7 +212,8 @@ def refine(engine, image, original_bytes, *, vision, manga, model_identity, outp
         if unit.disposition != 'blocked':
             result.reason = 'strict_raw_input_retained'
             continue
-        if min(raw[i].confidence for i in ids) >= .9:
+        script_audit_ids = [i for i in ids if suspect_latin_mark(raw[i].text)]
+        if min(raw[i].confidence for i in ids) >= .9 and not script_audit_ids:
             result.reason = 'high_score_raw_input_retained'
             continue
         if not has_kana:
@@ -257,7 +264,8 @@ def refine(engine, image, original_bytes, *, vision, manga, model_identity, outp
             'native_pixels_sha256': pixels_sha(crop), 'presentation_pixels_sha256': pixels_sha(view),
             'scale': 4, 'interpolation': 'Pillow LANCZOS', 'payload_sha256': revision(payload),
             'vision_lines': vision_line_evidence,
-            'preferred': False, 'line_evidence': [], 'status': 'in_progress'}
+            'preferred': False, 'line_evidence': [], 'status': 'in_progress',
+            'script_audit_ids': script_audit_ids, 'line_join': ''}
         stage['records'].append(record)
         try:
             response = vision(payload)
@@ -268,10 +276,11 @@ def refine(engine, image, original_bytes, *, vision, manga, model_identity, outp
                     and all(type(text) is str and 0 < len(text) <= 128 and '\n' not in text for text in answer['lines'].values())
                     and type(answer['uncertain']) is bool and type(answer['notes']) is str and len(answer['notes']) <= 4096,
                     'invalid bounded visual reread response')
-            verdict = {'text': '\n'.join(answer['lines'][str(i)] for i in range(len(ids))),
+            lines = [answer['lines'][str(i)] for i in range(len(ids))]
+            record['visual_line_texts'] = lines
+            verdict = {'text': ''.join(lines),
                        'uncertain': answer['uncertain'], 'notes': answer['notes']}
             record.update(verdict=verdict, response_sha256=hashlib.sha256(response.response_json.encode()).hexdigest())
-            lines = verdict['text'].splitlines()
             source_length = len(normalized(unit.selected.text))
             candidate_length = len(normalized(verdict['text']))
             eligible = (not verdict['uncertain'] and len(lines) == len(ids) and all(line.strip() for line in lines)
@@ -338,7 +347,8 @@ def refine(engine, image, original_bytes, *, vision, manga, model_identity, outp
         ids = proposal.main_ids
         if (len(ids) < 2 or proposal.annotation_ids or result.attempts != 1
                 or any(c['quality_reread'].get('preferred') for c in result.candidates)
-                or min(raw[i].confidence for i in ids) >= quality_lines.RAW_FLOOR
+                or (min(raw[i].confidence for i in ids) >= quality_lines.RAW_FLOOR
+                    and not any(suspect_latin_mark(raw[i].text) for i in ids))
                 or stage['fallback_vision_calls'] >= max_fallback_calls):
             continue
         before = stage['fallback_vision_calls']
@@ -388,7 +398,13 @@ def preferred_reading(unit):
             quality_lines.validate_reading(unit, proof)
             candidates.append(reading)
             continue
-        lines = reading.text.splitlines()
+        if 'line_join' in proof:
+            lines = proof['visual_line_texts']
+            require(proof['line_join'] == '' and type(lines) is list
+                and all(type(line) is str and line and '\n' not in line for line in lines)
+                and ''.join(lines) == reading.text, 'reread exact geometric line composition drift')
+        else:
+            lines = reading.text.splitlines()  # Retained older source-bound evidence.
         evidence = proof['line_evidence']
         require(len(lines) == len(evidence) == len(unit.order), 'reread line coverage drift')
         for source_id, line, item in zip(unit.order, lines, evidence):

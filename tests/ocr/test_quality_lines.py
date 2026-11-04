@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw
 from tralens.ocr import quality_lines as lines, quality_reread as q
 from tralens.ocr.automatic_units import propose_page_from_boxes
 from tralens.ocr.types import Text_Box
-from tralens.translation.contracts import automatic_units, canonical
+from tralens.translation.contracts import automatic_units, canonical, Reading
 from tralens.translation.runtime import Generation
 from tralens.translation import coverage
 from tralens.rendering import replacement_confidence as rc
@@ -130,6 +130,81 @@ class MixedLineTests(unittest.TestCase):
         with self.assertRaises(ValueError):lines.OriginalLines(Image.new('RGB', self.image.size, 'white'), raw).line(1)
         raw.append({**raw[1], 'source_id':'duplicate-overlap'})
         with self.assertRaises(ValueError):lines.OriginalLines(self.image, raw).line(1)
+
+    def test_primary_paired_lines_do_not_become_artificial_sentence_breaks(self):
+        self.vision.side_effect=lambda payload: Generation(canonical({'lines':{'0':'いう','1':'あお','2':'いう'},
+            'uncertain':False,'notes':'synthetic independent line readings'}),'{}')
+        self.manga.side_effect=lambda image,source_box_id,crop_bounds: 'あお' if source_box_id==1 else 'いう'
+        stage=self.run_refine()
+        unit,candidate=self.selected()
+        self.assertEqual(candidate.text,'いうあおいう')
+        self.assertEqual(stage['line_calls'],3)
+        data=json.loads(candidate.evidence_json)
+        self.assertEqual(data['quality_reread']['visual_line_texts'],['いう','あお','いう'])
+        self.assertEqual(data['quality_reread']['line_join'],'')
+        for mutate in (lambda p:p['quality_reread'].update(line_join='\n'),
+                       lambda p:p['quality_reread']['visual_line_texts'].__setitem__(1,'別の文字')):
+            changed=copy.deepcopy(data);mutate(changed)
+            reading=Reading(changed['text'],q.ENGINE,canonical(changed))
+            with self.assertRaises(ValueError):
+                q.preferred_reading(replace(unit,readings=(unit.selected,reading)))
+        # Older saved candidates remain valid evidence with their exact old text.
+        legacy=copy.deepcopy(data)
+        legacy['quality_reread'].pop('line_join');legacy['quality_reread'].pop('visual_line_texts')
+        legacy['text']='いう\nあお\nいう';legacy['quality_reread']['verdict']['text']=legacy['text']
+        reading=Reading(legacy['text'],q.ENGINE,canonical(legacy))
+        restored=replace(unit,readings=(unit.selected,reading))
+        self.assertEqual(q.preferred_reading(restored).text,legacy['text'])
+
+    def high_score_audit_fixture(self):
+        boxes=[Text_Box(b.paddle_box_id,.97,b.paddle_poly,'AーBの' if b.paddle_box_id==1 else b.paddle_text)
+               for b in self.boxes]
+        self.batch=replace(propose_page_from_boxes(boxes,self.path,complementary_ownership=True,regroup_companions=True),regions=())
+        self.engine.automatic_unit_proposals=(self.batch,)
+        self.vision.side_effect=lambda payload: self.read(payload) if 'lines' in payload['format']['properties'] else Generation(
+            canonical({'text':'ＡｌＢの','uncertain':False}),'{}')
+        self.manga.return_value='AlBの'
+
+    def test_high_raw_score_does_not_skip_a_paired_mixed_script_glyph_audit(self):
+        self.high_score_audit_fixture()
+        stage=self.run_refine()
+        unit,candidate=self.selected()
+        self.assertEqual(stage['primary_vision_calls'],1)
+        self.assertEqual(stage['fallback_vision_calls'],1)
+        self.assertEqual(candidate.text,'いうＡｌＢのいう')
+        proof=json.loads(candidate.evidence_json)['quality_reread']
+        self.assertEqual(proof['script_audit_ids'],[1])
+        self.assertEqual(proof['lines'][1]['kind'],'paired_isolated_line')
+        assessment=rc.assess_source(coverage.derive(unit,candidate.revision),'Synthetic target.',.95)
+        self.assertTrue(assessment['allowed'])
+        self.assertEqual([line['source_id'] for line in assessment['line_scores']],[0,2])
+        self.assertEqual(unit.selected.text,'いうAーBのいう')
+        changed=copy.deepcopy(proof);changed['script_audit_ids']=[]
+        with self.assertRaises(ValueError):lines.validate_reading(unit,changed)
+
+    def test_high_score_audit_zero_budget_never_uses_a_dictionary_correction(self):
+        self.high_score_audit_fixture()
+        self.manga.return_value='independent disagreement'
+        stage=self.run_refine(max_line_attempts=0)
+        self.assertIsNone(self.selected()[1])
+        self.assertEqual(stage['line_calls'],0)
+        self.assertLessEqual(stage['vision_calls'],12)
+        self.manga.assert_not_called()
+
+    def test_high_score_audit_disagreement_retains_only_the_original_input(self):
+        self.high_score_audit_fixture()
+        self.manga.return_value='independent disagreement'
+        stage=self.run_refine()
+        self.assertIsNone(self.selected()[1])
+        self.assertEqual(self.selected()[0].selected.text,'いうAーBのいう')
+        self.assertEqual(stage['line_calls'],2*len(lines.ANGLES))
+        self.assertLessEqual(stage['vision_calls'],12)
+
+    def test_mixed_script_routing_hint_is_not_a_dictionary_or_auto_correction(self):
+        self.assertTrue(q.suspect_latin_mark('AーBの'))
+        self.assertTrue(q.suspect_latin_mark('ＡーＢ'))
+        for text in ('キャラクター','A-B','A ー B','Aー','ーB','普通の日本語'):
+            self.assertFalse(q.suspect_latin_mark(text))
 
     def test_full_pipeline_and_offline_review_keep_mixed_reading_binding(self):
         import main
