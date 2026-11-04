@@ -31,6 +31,33 @@ Older saved runs retain their previous settings: select Coverage first and raise
 the budget before retrying. See [translation coverage](docs/translation-coverage.md)
 for retained integrity checks and the separate conservative options.
 
+**Quality checks are available in the viewer, not just the CLI.** In Run settings,
+Artwork protection → **Native cleanup + OCR checks** disables coarse footprint
+erasure and defers unsupported edits instead of smearing artwork. Translations
+remain available even when source lettering is preserved. Broad replacement is
+still the unchanged default; it is not a quality guarantee.
+
+For the optional paired OCR rereads, start the viewer with existing local assets:
+
+```sh
+.venv-paddle6/bin/python tools/dev_frontend.py \
+  --fonts PATH/fonts.json --manga-reread-model PATH/existing-manga-ocr-snapshot
+```
+
+This enables the **Paired OCR quality rereads** checkbox, not automatic inference.
+It uses the installed `qwen3.8:latest` vision tag (override with `--reread-model`)
+on the configured private Ollama endpoint, plus the supplied local Manga OCR
+snapshot. Only explicit rendering runs send crop presentations; nothing is
+downloaded. The route requires Coverage first translation and remains experimental:
+reader agreement does not prove correct source text.
+
+Saved broad-replacement outputs show a warning and **Retry with quality checks**
+(or artwork protection alone if readers are not configured). This makes a fresh
+job, retains earlier results and labels the policy actually used by each output.
+Reread-selected sources are shown alongside their retained original OCR. A link
+with `?job=JOB_ID` opens that exact saved job rather than another recent output.
+See [quality iteration evidence and limitations](docs/ocr-rendering-quality-iterations.md).
+
 After any completed, partial or failed run, **Run pipeline** becomes **Retry
 pipeline**. It reuses the saved upload with the current Run settings—no file
 selection is needed, including after refresh. A retry reruns the pipeline in a
@@ -48,8 +75,7 @@ Without `--fonts`, OCR and translation still work, but rendering is disabled.
 For another checkout, supply
 your own explicit licensed font manifest using the schema below.
 
-The translation call budget defaults to **2**; increase it to at most **20** in the
-page for a broader pass. Existing rendering/eligibility limits still apply. No
+The translation call budget defaults to **64**. Existing rendering/eligibility limits still apply. No
 inference happens on server startup, page load or refresh—only on **Run** or **Retry**.
 
 Status comes from real saved checkpoints, polled once a second. OCR/grouping
@@ -71,7 +97,7 @@ path traversal, and accepts only bounded PNG/JPEG uploads (32 MiB, 4M pixels,
 4096px side; opaque source required). Do not expose this Python development server
 as a public upload service. Native engine setup/model failures are shown in the UI.
 
-Verification: 20 offline viewer tests cover HTTP upload through the real pipeline
+Verification: offline viewer tests cover HTTP upload through the real pipeline
 with injected engines/providers, checkpoint visibility, mode dispatch, errors,
 source retention, retries, saved-run recovery and request/path guards. A headless
 Firefox smoke test also exercised browser file upload, five stage views,

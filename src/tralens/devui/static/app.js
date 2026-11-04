@@ -45,12 +45,23 @@ function missingOutputMessage(data, view) {
   if (data.error || data.status === "failed" || data.status === "interrupted") return {title: "This stage didn't produce an output", copy: "The run stopped before this output was published. Earlier stage results and the original remain available. See the error above for details."};
   return {title: data.status === "running" ? "Waiting for this stage…" : "No output for this stage", copy: data.status === "running" ? "The real output will appear here when the pipeline publishes it. You can inspect earlier stages while you wait." : "This run did not publish this output. Inspect Translation and the run details to see why."};
 }
-if (typeof module !== "undefined" && module.exports) module.exports = {previewStates, progressView, outputReady, missingOutputMessage};
+function qualityNotice(data, rereadAvailable = false) {
+  if (!data || !outputReady(data, "final")) return null;
+  if (data.replacement_policy !== "confidence-gated") return {
+    copy: "This run used broad replacement without artwork checks. It can smear drawings and repaint bad OCR. Retry with native cleanup / OCR checks; unsupported edits will stay original, with translations retained.",
+    action: rereadAvailable ? "Retry with quality checks" : "Retry with artwork protection"
+  };
+  const counts = data.replacement_confidence;
+  return {copy: `Experimental native-cleanup / OCR checks used${data.quality_reread?.enabled ? " with paired rereads" : " without paired rereads"}. ` +
+    (counts ? `${counts.actual_replacements} image replacements; ${counts.bound_translations_without_replacement} translations kept without repainting. ` : "") +
+    "Untranslated text and wrong readings may remain. This is an unverified candidate—not a finished translated page.", action: null};
+}
+if (typeof module !== "undefined" && module.exports) module.exports = {previewStates, progressView, outputReady, missingOutputMessage, qualityNotice};
 
 if (typeof document !== "undefined") {
   const $ = id => document.getElementById(id);
   const colors = ["#157eac", "#9562b5", "#c07932", "#25845e", "#c65568"];
-  const titles = {original: "Original page", ocr: "Detected text", translation: "Translation previews", clean: "Cleaned page", final: "Final page"};
+  const titles = {original: "Original page", ocr: "Detected text", translation: "Translation previews", clean: "Cleaned page", final: "Rendered candidate"};
   const descriptions = {
     original: "Your original image, exactly as uploaded.", ocr: "Text regions found by OCR. Select a region on the page or in the list.",
     translation: "Translated regions are highlighted. Read the English text alongside the original page.",
@@ -83,10 +94,15 @@ if (typeof document !== "undefined") {
     $("run").title = retry ? "Rerun this saved upload with the current settings. Previous results are kept." : "Start a new run with the selected image.";
     $("jobs").disabled = value;
     for (const id of ["file", "mode", "budget", "policy", "translation-policy", "fragments"]) $(id).disabled = value;
+    $("replacement-policy").disabled = value || $("mode").value !== "render";
+    $("quality-reread").disabled = value || !config?.quality_reread_available || $("mode").value !== "render" || $("translation-policy").value !== "coverage-first";
+    $("quality-retry").disabled = value || !config?.render_enabled;
   }
   function settingsSummary() {
     const mode = {ocr: "OCR only", translate: "Through translation", render: "Through final rendering"}[$("mode").value];
     $("settings-summary").textContent = mode + ($("mode").value === "ocr" ? " · no model calls" : ` · ${$("translation-policy").value === "coverage-first" ? "coverage first" : "conservative translation"} · up to ${$("budget").value} translation calls`);
+    if ($("mode").value === "render") $("settings-summary").textContent += $("replacement-policy").value === "confidence-gated" ? " · artwork checks" : " · broad replacement";
+    setBusy(busy);
   }
   function ownership() {
     const result = new Map();
@@ -242,6 +258,10 @@ if (typeof document !== "undefined") {
       button.type = "button"; button.addEventListener("click", () => chooseUnit(unit.id));
       const [text, tone] = unitStatus(unit), badge = node("span", text, "unit-status"); badge.dataset.tone = tone;
       heading.append(button, badge); box.append(heading, node("pre", unit.source || "No selected source reading"));
+      if (unit.reread_selected) {
+        box.append(node("p", "Unverified paired reread used for translation; original OCR retained below.", "note"));
+        const original = node("details"); original.append(node("summary", "Original OCR"), node("pre", unit.raw_source)); box.append(original);
+      }
       if (["translation", "final"].includes(selectedView)) {
         if (unit.target) box.append(node("pre", unit.target, "target"));
         else if (selectedView === "translation") box.append(node("p", unit.status.includes("budget") ? "Not attempted: increase the call budget for a new run." : unit.status === "blocked" ? "OCR grouping or source ownership needs review; no complete translation was produced." : "No English preview for this region.", "note"));
@@ -301,6 +321,8 @@ if (typeof document !== "undefined") {
       $("mode").value = data.options.mode; $("budget").value = data.options.max_attempts;
       $("policy").value = data.options.render_policy; $("fragments").checked = data.options.allow_fragments;
       $("translation-policy").value = data.options.translation_policy || "conservative";
+      $("replacement-policy").value = data.options.replacement_policy || "all";
+      $("quality-reread").checked = Boolean(data.options.quality_reread);
       settingsJob = data.id; settingsSummary();
     }
     if (!pendingFile) $("filename").textContent = `Saved run · ${data.id.slice(0, 8)}`;
@@ -311,6 +333,11 @@ if (typeof document !== "undefined") {
       : `${data.status === "partial" || data.status === "complete_with_failures" ? "Finished with partial results" : data.status === "complete" ? "Ready to inspect" : "Run stopped"} · ${data.restored ? "saved run" : data.elapsed_seconds + "s"}`;
     $("status-dot").dataset.state = data.status;
     $("summary").textContent = `${data.detections.length} regions · ${translations} translations${data.rendering_coverage ? ` · ${data.rendering_coverage.rendered} replacements` : ""}`;
+    const notice = qualityNotice(data, config?.quality_reread_available);
+    $("quality-notice").hidden = !notice;
+    $("quality-copy").textContent = notice?.copy || "";
+    $("quality-retry").hidden = !notice?.action;
+    $("quality-retry").textContent = notice?.action || "";
     const coverage = data.rendering_coverage;
     $("render-note").textContent = data.rendering_skipped ? `No rendered page: ${friendly(data.rendering_skipped)}. Inspect Translation for the available results and blockers.` : coverage
       ? `${coverage.rendered} of ${coverage.saved_units} saved units replaced · ${data.quality?.best_effort_rendered || 0} best-effort.${coverage.partial_output ? " Other source regions remain unchanged." : " Candidate output only."}`
@@ -340,6 +367,8 @@ if (typeof document !== "undefined") {
     clearTimeout(timer); revokeLocal(); current = identity; snapshot = null; settingsJob = null; sourceImage = null; sourceURL = null; selected = null; outputImages.clear();
     selectedView = "original"; $("follow").checked = true;
     clearArtifacts(); showError(""); $("results").hidden = true;
+    $("quality-notice").hidden = true;
+    const url = new URL(window.location.href); url.searchParams.set("job", identity); window.history.replaceState(null, "", url);
     if (!keepFile) { pendingFile = null; $("file").value = ""; $("filename").textContent = `Saved run · ${identity.slice(0, 8)}`; $("file-info").textContent = "Original upload preserved on disk"; setBusy(false); }
     poll(identity);
   }
@@ -348,6 +377,8 @@ if (typeof document !== "undefined") {
     if (file.size > (config?.max_upload_bytes || 32 * 1024 * 1024)) return showError("Upload limit is 32 MiB.");
     clearTimeout(timer); revokeLocal(); current = null; snapshot = null; settingsJob = null; selected = null; pendingFile = file; outputImages.clear();
     clearArtifacts(); $("follow").checked = true; selectedView = "original";
+    $("quality-notice").hidden = true;
+    window.history.replaceState(null, "", window.location.pathname);
     $("filename").textContent = file.name; $("file-info").textContent = "Loading image preview…";
     $("results").hidden = false; $("empty-state").hidden = true; $("summary").textContent = ""; $("render-note").textContent = "";
     $("status").textContent = "Image selected. Ready to run."; $("status-dot").dataset.state = "ready"; showError("");
@@ -358,7 +389,10 @@ if (typeof document !== "undefined") {
     const retry = current && snapshot && snapshot.status !== "running";
     if ((!pendingFile && !retry) || busy) return;
     const file = pendingFile, parent = current;
-    const settings = {mode: $("mode").value, max_attempts: Number($("budget").value), allow_fragments: $("fragments").checked, render_policy: $("policy").value, translation_policy: $("translation-policy").value};
+    const rendering = $("mode").value === "render";
+    const settings = {mode: $("mode").value, max_attempts: Number($("budget").value), allow_fragments: $("fragments").checked, render_policy: $("policy").value, translation_policy: $("translation-policy").value,
+      replacement_policy: rendering ? $("replacement-policy").value : "all",
+      quality_reread: rendering && $("translation-policy").value === "coverage-first" && !$("quality-reread").disabled && $("quality-reread").checked};
     setBusy(true); showError(""); $("status").textContent = retry ? "Starting a fresh run with the saved image…" : "Uploading original image…";
     try {
       const result = retry
@@ -366,6 +400,12 @@ if (typeof document !== "undefined") {
         : await request("/api/jobs", {method: "POST", headers: {"Content-Type": "application/octet-stream", "X-Tralens-Token": config.token, "X-Tralens-Options": JSON.stringify(settings)}, body: file});
       const choice = node("option", `${retry ? "Retry " + parent.slice(0, 8) : file.name} · ${result.id.slice(0, 8)}`); choice.value = result.id; $("jobs").append(choice); $("jobs").value = result.id; selectJob(result.id, true);
     } catch (error) { showError(error.message); $("status").textContent = "Run was not started."; setBusy(false); }
+  });
+  $("quality-retry").addEventListener("click", () => {
+    if (busy || !snapshot || !config.render_enabled) return;
+    $("mode").value = "render"; $("policy").value = "best-effort"; $("translation-policy").value = "coverage-first";
+    $("replacement-policy").value = "confidence-gated"; $("quality-reread").checked = Boolean(config.quality_reread_available);
+    $("budget").value = "64"; settingsSummary(); $("run-form").requestSubmit();
   });
   $("file").addEventListener("change", () => chooseFile($("file").files[0]));
   $("jobs").addEventListener("change", () => { if ($("jobs").value) selectJob($("jobs").value); });
@@ -392,7 +432,7 @@ if (typeof document !== "undefined") {
       if (context.isPointInPath(path, x, y)) { const owner = owners.get(JSON.stringify(detection.source_id)); if (owner) chooseUnit(owner.unit.id, true); break; }
     }
   });
-  for (const id of ["mode", "budget", "translation-policy"]) $(id).addEventListener("input", settingsSummary);
+  for (const id of ["mode", "budget", "translation-policy", "replacement-policy", "quality-reread"]) $(id).addEventListener("input", settingsSummary);
   for (const eventName of ["dragenter", "dragover"]) document.addEventListener(eventName, event => {
     if (event.dataTransfer?.types.includes("Files")) { event.preventDefault(); if (!busy) document.body.classList.add("dragging"); }
   });
@@ -405,9 +445,10 @@ if (typeof document !== "undefined") {
   request("/api/config").then(async value => {
     config = value;
     $("configuration").textContent = `${config.device} · ${config.model} · Ollama: ${config.endpoint || "configured local service"} · OCR: ${config.model_root}${config.fonts ? " · Fonts: " + config.fonts : " · No --fonts: rendering disabled"}`;
+    $("reread-availability").textContent = config.quality_reread_available ? `Optional crop presentations go to ${config.reread_model} on the configured private Ollama endpoint, with local Manga OCR corroboration. No downloads; agreement is not truth.` : "Not configured: start with --manga-reread-model and an existing snapshot. Artwork checks work without rereads.";
     $("mode").querySelector('[value="render"]').disabled = !config.render_enabled; $("mode").value = config.render_enabled ? "render" : "ocr"; settingsSummary(); setBusy(false);
     const jobs = await request("/api/jobs");
     for (const job of jobs) { const choice = node("option", `Run ${job.id.slice(0, 8)} · ${friendly(job.status)}`); choice.value = job.id; $("jobs").append(choice); }
-    if (jobs.length && !pendingFile) { const last = jobs[jobs.length - 1]; $("jobs").value = last.id; selectJob(last.id); }
+    if (jobs.length && !pendingFile) { const requested = new URL(window.location.href).searchParams.get("job"); const last = jobs.find(job => job.id === requested) || jobs[jobs.length - 1]; $("jobs").value = last.id; selectJob(last.id); }
   }).catch(error => showError(error.message));
 }

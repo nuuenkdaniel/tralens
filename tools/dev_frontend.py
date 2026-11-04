@@ -42,17 +42,26 @@ def main(argv=None):
     parser.add_argument('--model', default='translategemma:27b')
     parser.add_argument('--profile', choices=('generalist', 'translategemma'), default='translategemma')
     parser.add_argument('--endpoint', help='explicit local Ollama origin; default: OLLAMA_HOST, otherwise http://127.0.0.1:11434')
+    parser.add_argument('--manga-reread-model', type=Path,
+                        help='existing local Manga OCR snapshot; enables the optional quality-reread control, never downloads')
+    parser.add_argument('--reread-model', default='qwen3.8:latest', help='installed local vision tag for opt-in quality rereads')
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error('port must be 1–65535')
     try:
         endpoint = configured_endpoint(args.endpoint)
-    except ValueError as error:
+        if args.manga_reread_model is not None:
+            from main import quality_refiner
+            # Check local files without importing readers or running inference.
+            quality_refiner(endpoint=endpoint, model=args.reread_model, manga_model=args.manga_reread_model)
+    except (ValueError, OSError) as error:
         parser.error(str(error))
     from tralens.devui.server import App, Config, create_server
     app = App(Config(root=args.output_root, model_root=args.model_root.expanduser().absolute(),
         device=args.device, fonts=args.fonts.expanduser().absolute() if args.fonts else None,
-        font_id=args.font_id, model=args.model, profile=args.profile, endpoint=endpoint))
+        font_id=args.font_id, model=args.model, profile=args.profile, endpoint=endpoint,
+        manga_reread_model=args.manga_reread_model.expanduser().absolute() if args.manga_reread_model else None,
+        reread_model=args.reread_model))
     with create_server(app, args.port) as server:
         print(f'Pipeline viewer: http://127.0.0.1:{args.port}', flush=True)
         print(f'Ollama endpoint: {endpoint}', flush=True)

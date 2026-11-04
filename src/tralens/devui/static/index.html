@@ -29,6 +29,8 @@
           <label>Translation call budget<input id="budget" type="number" min="0" max="64" value="64" required><small>Up to 64. Failed calls count too. A small budget leaves text unattempted.</small></label>
           <label>Translation coverage<select id="translation-policy"><option value="coverage-first">Coverage first</option><option value="conservative">Conservative</option></select><small>Coverage first also attempts OCR text with uncertain ownership, crop isolation or orientation.</small></label>
           <label>Rendering policy<select id="policy"><option value="best-effort">Best effort</option><option value="conservative">Conservative</option></select></label>
+          <label>Artwork protection<select id="replacement-policy"><option value="all">Broad replacement (may smear artwork)</option><option value="confidence-gated">Native cleanup + OCR checks (experimental)</option></select><small>Checks preserve unsupported regions, while keeping their translations available.</small></label>
+          <div><label class="checkbox-label"><input id="quality-reread" type="checkbox"> Paired OCR quality rereads (experimental)</label><small id="reread-availability">Requires existing local readers. Agreement is not proof of correct text.</small></div>
           <label class="checkbox-label"><input id="fragments" type="checkbox"> Include review-only fragment previews</label>
         </div>
         <p id="configuration" class="note">Loading local settings…</p>
@@ -37,6 +39,7 @@
     </form>
     <p id="error" class="error-banner" role="alert" hidden></p>
     <div class="run-status"><span id="status-dot" class="status-dot"></span><p id="status" aria-live="polite">Ready when you are.</p><p id="summary"></p></div>
+    <aside id="quality-notice" class="quality-notice" hidden><p id="quality-copy"></p><button id="quality-retry" class="secondary-button" type="button">Retry with quality checks</button></aside>
     <section id="empty-state" class="empty-state">
       <span class="page-symbol" aria-hidden="true">文 <span>→ A</span></span>
       <h2>Your page, step by step.</h2><p>Drop an image here, or choose one above.<br>Start with the original and follow each stage as it finishes.</p>

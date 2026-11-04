@@ -203,3 +203,65 @@ untouched. No repository push, visibility change or license choice was made.
 
 These checks establish reproducibility and regression coverage, not general OCR
 accuracy or independent approval of linguistic/artistic quality.
+
+## Viewer integration after the screenshot feedback
+
+The user's browser screenshot exposed a delivery gap: `execute_job` in the local
+viewer did not pass the experimental replacement/reread options. Its fresh
+best-effort runs therefore still used coarse fallback erasure and raw OCR. The
+separate CLI quality reports were not what the viewer displayed. That mismatch
+was an integration failure, not a reason to dismiss the visible quality problems.
+
+The viewer now exposes the same native-cleanup confidence gate and optional
+paired rereads. The operator supplies existing local reader assets at startup;
+configuring them alone does not run models or enable rereads. Client requests may
+choose only bounded options, not arbitrary model tags or filesystem paths.
+Original/default runs retain their settings; broad-replacement outputs show a
+warning and a fresh **Retry with quality checks** action. The displayed policy
+comes from the executed pipeline/manifest rather than unsaved form controls.
+Selected reread input and original raw OCR remain separately inspectable, and
+`?job=...` identifies the exact saved run to display.
+
+The idle local viewer was restarted with the existing Manga OCR snapshot enabled.
+A real headless Firefox session opened the user's saved broad-replacement job,
+clicked the quality retry, waited for the real pipeline and reloaded the result.
+This was **not** an injected-provider run. Its saved run is:
+
+`test-results/dev-frontend/a0651eb1907c45d9862cc2ebd8c2dc2c/`
+
+Exact browser view:
+<http://127.0.0.1:7860/?job=a0651eb1907c45d9862cc2ebd8c2dc2c>
+
+The browser exposed all 43 source detections, 28 grouped translations and 12
+image replacements. Its composite is byte-identical to the earlier confirmed
+quality image (`6fe4a61685d18c937770147efe56f5abbdb15c55c2a79d782838ffbf0cb8f5e4`).
+Visual inspection of both the actual served composite and browser screenshot
+confirmed that the large hair/panel smears and garbled instruction replacement
+were gone; difficult effects and dialogue were preserved, not magically solved.
+The bad raw translations remain available in the inspector with deferral reasons.
+The result is still partial, with the previously documented OCR and lettering
+limitations. It is now labeled **Rendered candidate**, not presented as a
+polished final page. All earlier outputs remain untouched.
+
+Browser screenshots, served PNGs and the run snapshot are retained under
+`test-results/viewer-quality-live-v1/`. A separate injected-provider browser smoke
+test also passed upload, five-stage switching, comparison, zoom, highlighting,
+refresh and retry without re-upload. The new offline viewer integration test
+uses real source/reread/translation/rendering contracts with synthetic readers;
+it verifies that the controls reach the coordinator and display the actual
+selected source instead of pairing the new target with old garbled raw OCR.
+
+The new legacy-restoration regression initially caught a missing fallback to the
+executed pipeline's translation policy when preview metadata is unavailable.
+Restoration now retains that policy rather than silently excluding the saved
+quality run. All **24 viewer tests** pass, and source-only verification passes
+the **839-test suite with 39 optional-local-evidence skips**. After a server
+restart, a second real-browser inspection restored the exact new run and its
+quality settings without dispatching any additional job. Offline translation
+review and all 46 reread artifact hashes also checked for this viewer-produced
+run. User-owned dependency files remain excluded from the checkpoint.
+
+Final full reruns after the restoration fix: **839 tests passed in `.venv` and
+839 in `.venv-paddle6`**. JavaScript syntax, Python compilation and
+`git diff --check` also passed. These remain regression/integration checks, not
+a claim that the remaining image or linguistic quality is satisfactory.

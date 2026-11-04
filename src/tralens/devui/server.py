@@ -42,13 +42,17 @@ class Config:
     model: str = 'translategemma:27b'
     profile: str = 'translategemma'
     endpoint: str = 'http://127.0.0.1:11434'
+    manga_reread_model: Path | None = None
+    reread_model: str = 'qwen3.8:latest'
 
 
 def options(value, *, render_enabled):
-    if type(value) is not dict or set(value) - {'mode', 'max_attempts', 'allow_fragments', 'render_policy', 'translation_policy'}:
+    if type(value) is not dict or set(value) - {'mode', 'max_attempts', 'allow_fragments', 'render_policy', 'translation_policy',
+                                             'replacement_policy', 'quality_reread'}:
         raise RequestError('Unknown run options.')
     result = dict(mode='render' if render_enabled else 'ocr', max_attempts=64,
-        allow_fragments=False, render_policy='best-effort', translation_policy='coverage-first')
+        allow_fragments=False, render_policy='best-effort', translation_policy='coverage-first',
+        replacement_policy='all', quality_reread=False)
     result.update(value)
     if type(result['mode']) is not str or result['mode'] not in ('ocr', 'translate', 'render'):
         raise RequestError('Choose OCR, translation, or rendering.')
@@ -62,6 +66,14 @@ def options(value, *, render_enabled):
         raise RequestError('Unknown rendering policy.')
     if type(result['translation_policy']) is not str or result['translation_policy'] not in ('coverage-first', 'conservative'):
         raise RequestError('Unknown translation policy.')
+    if type(result['replacement_policy']) is not str or result['replacement_policy'] not in ('all', 'confidence-gated'):
+        raise RequestError('Unknown image replacement policy.')
+    if type(result['quality_reread']) is not bool:
+        raise RequestError('Quality reread option must be a boolean.')
+    if result['quality_reread'] and (result['mode'] != 'render' or result['translation_policy'] != 'coverage-first'):
+        raise RequestError('Quality rereads require Final rendering and Coverage first translation.')
+    if result['replacement_policy'] != 'all' and result['mode'] != 'render':
+        raise RequestError('Image replacement checks require Final rendering.')
     return result
 
 
@@ -101,7 +113,10 @@ def execute_job(config, job):
     if settings['mode'] == 'render':
         from main import run_pipeline
         return run_pipeline(job['image'], job['directory']/'run', fonts=config.fonts,
-            font_id=config.font_id, render_policy=settings['render_policy'], **kwargs)
+            font_id=config.font_id, render_policy=settings['render_policy'],
+            replacement_policy=settings.get('replacement_policy', 'all'),
+            quality_reread=settings.get('quality_reread', False), reread_model=config.reread_model,
+            manga_reread_model=config.manga_reread_model if settings.get('quality_reread') else None, **kwargs)
     from ..translation.workflow import run_preview
     return run_preview(job['image'], job['directory']/'run'/'preview', **kwargs)
 
@@ -139,9 +154,12 @@ class App:
                     max_attempts=preview.get('settings', {}).get('max_attempts', 2),
                     allow_fragments=preview.get('settings', {}).get('allow_fragment_previews', False),
                     render_policy=pipeline.get('render_policy', 'best-effort'),
-                    translation_policy=preview.get('settings', {}).get('translation_policy', 'conservative'))
+                    translation_policy=preview.get('settings', {}).get('translation_policy', pipeline.get('translation_policy', 'conservative')))
                 if 'translation_policy' not in settings:
-                    settings = {**settings, 'translation_policy': preview.get('settings', {}).get('translation_policy', 'conservative')}
+                    settings = {**settings, 'translation_policy': preview.get('settings', {}).get('translation_policy', pipeline.get('translation_policy', 'conservative'))}
+                replacement = pipeline.get('replacement_policy', {})
+                settings = {'replacement_policy': replacement.get('name', 'all') if isinstance(replacement, dict) else replacement,
+                    'quality_reread': bool(pipeline.get('quality_reread', {}).get('enabled')), **settings}
                 settings = options(settings, render_enabled=True)  # View old jobs even without a current font manifest.
                 images = [directory/name for name in ('input.png', 'input.jpg') if (directory/name).is_file()]
                 if len(images) != 1 or images[0].is_symlink():
@@ -191,7 +209,8 @@ class App:
             endpoint=self.config.endpoint,
             model_root=str(self.config.model_root), fonts=str(self.config.fonts) if self.config.fonts else None,
             render_enabled=self.config.fonts is not None, max_upload_bytes=MAX_UPLOAD,
-            page_pixel_limit=4_000_000, max_jobs=MAX_JOBS)
+            page_pixel_limit=4_000_000, max_jobs=MAX_JOBS,
+            quality_reread_available=self.config.manga_reread_model is not None, reread_model=self.config.reread_model)
 
     def list_jobs(self):
         with self.lock:
@@ -199,6 +218,8 @@ class App:
 
     def start(self, data, supplied, *, retry_of=None):
         settings = options(supplied, render_enabled=self.config.fonts is not None)
+        if settings['quality_reread'] and self.config.manga_reread_model is None:
+            raise RequestError('Start the viewer with --manga-reread-model pointing to the existing local snapshot to enable quality rereads.')
         if not 0 < len(data) <= MAX_UPLOAD:
             raise RequestError('Upload must be 1 byte–32 MiB.')
         with self.lock:
@@ -305,6 +326,8 @@ class App:
         rendering = checkpoint(directory/'run/rendering/manifest.json', notices)
         preview = preview or {}
         rendering = rendering or {}
+        replacement = rendering.get('replacement_policy', (pipeline or {}).get('replacement_policy', 'all'))
+        replacement = replacement.get('name', 'all') if isinstance(replacement, dict) else replacement
         raw = (preview.get('ocr') or {}).get('raw_detections') or [[]]
         detections = [dict(source_id=d['source_id'], text=d.get('text', ''),
             confidence=d.get('confidence'), polygon=d['polygon']) for d in raw[0]][:512]
@@ -318,7 +341,8 @@ class App:
                 for f in record.get('fragment_previews', [])]
             units.append(dict(id=unit['unit_id'], member_ids=unit['member_ids'],
                 input_kind=record.get('input_kind', 'strict_utterance'),
-                source=selected_text(unit), status=record['status'],
+                source=selected_text(record.get('translation_input') or unit), raw_source=selected_text(unit),
+                reread_selected=bool(record.get('coverage', {}).get('reread_selected_revision')), status=record['status'],
                 target=dict(result.get('translations', [])).get(unit['unit_id']),
                 reasons=record.get('blocking_reasons', []) +
                     [v for v in (result.get('failure'), result.get('detail')) if v] +
@@ -350,6 +374,9 @@ class App:
             size=job['size'], input=job['image'].name, detections=detections, units=units,
             model_calls=preview.get('attempts', 0), coverage=(pipeline or {}).get('coverage'),
             rendering_coverage=rendering.get('coverage'), quality=rendering.get('quality_summary'),
+            replacement_policy=replacement,
+            replacement_confidence=rendering.get('replacement_confidence'),
+            quality_reread=(pipeline or {}).get('quality_reread'),
             error=job['error'] or (pipeline or {}).get('error') or preview.get('error'),
             artifacts=artifacts, notices=notices, output_directory=str(directory))
 

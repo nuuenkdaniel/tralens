@@ -48,6 +48,8 @@ input[type=checkbox] { accent-color: var(--accent); }
 .status-dot[data-state=failed] { background: #c7554a; }
 #summary { margin-left: auto; color: var(--muted); text-align: right; }
 .error-banner { padding: 13px 16px; border: 1px solid #f0c9c0; background: #fff3ef; color: #9a3428; border-radius: 9px; white-space: pre-wrap; }
+.quality-notice { padding: 13px 16px; border: 1px solid #ead4a5; background: #fff9ed; color: #78581f; border-radius: 9px; margin-bottom: 18px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.quality-notice p { flex: 1; min-width: 220px; margin: 0; font-size: 12px; }
 .empty-state { border: 1px dashed #cfdcd4; border-radius: 14px; text-align: center; padding: 90px 20px; background: #fff9; }
 .empty-state h2 { margin-bottom: 8px; font-size: 21px; font-weight: 600; letter-spacing: -.5px; }
 .empty-state p { color: var(--muted); }

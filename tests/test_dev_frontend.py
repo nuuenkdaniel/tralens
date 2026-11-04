@@ -110,6 +110,57 @@ class ViewerTests(unittest.TestCase):
         status, headers, _ = self.request(http, 'GET', f'/api/jobs/{identity}/artifacts/run/rendering/review.html')
         self.assertIn('attachment', headers['Content-Disposition'])
 
+    def test_viewer_quality_retry_reaches_real_reread_pipeline_and_displays_selected_source(self):
+        import main
+        from tests.ocr.test_quality_reread import QualityRereadTests
+        from tralens.ocr.automatic_units import propose_page_from_boxes
+        from tralens.translation import workflow
+        fixture = QualityRereadTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        config = replace(self.config, fonts=fixture.p.fonts, model_root=fixture.p.fixture.weights,
+            manga_reread_model=self.root/'existing-snapshot')
+        original = workflow.run_preview
+        def factory(image, **kwargs):
+            batch = replace(propose_page_from_boxes(fixture.p.fixture.boxes, image,
+                complementary_ownership=True, regroup_companions=True), regions=())
+            return SimpleNamespace(raw_detections=[fixture.p.fixture.boxes], automatic_unit_proposals=[batch],
+                process_images=Mock(), ocr=SimpleNamespace(close=Mock()))
+        def preview(*args, **kwargs):
+            kwargs.update(ocr_factory=factory, runtime=SimpleNamespace(generate=fixture.p.provider))
+            return original(*args, **kwargs)
+        app = s.App(config)
+        http = self.serve(app)
+        with patch.object(workflow, 'run_preview', side_effect=preview):
+            first = app.start(fixture.p.fixture.image.read_bytes(), {'mode': 'ocr'})
+            self.assertTrue(app.job(first)['done'].wait(5))
+        old = {p.relative_to(app.job(first)['directory']): p.read_bytes()
+            for p in app.job(first)['directory'].rglob('*') if p.is_file()}
+        with patch.object(workflow, 'run_preview', side_effect=preview), \
+                patch.object(main, 'quality_refiner', return_value=fixture.refine) as readers:
+            status, _, body = self.request(http, 'POST', f'/api/jobs/{first}/retry',
+                json.dumps(dict(mode='render', translation_policy='coverage-first',
+                    replacement_policy='confidence-gated', quality_reread=True)).encode(),
+                {'X-Tralens-Token': app.token, 'Content-Type': 'application/json'})
+            self.assertEqual(status, 202, body)
+            identity = json.loads(body)['id']
+            self.assertTrue(app.job(identity)['done'].wait(10))
+        readers.assert_called_once()
+        self.assertEqual(readers.call_args.kwargs['manga_model'], config.manga_reread_model)
+        view = app.snapshot(identity)
+        self.assertEqual(view['status'], 'complete', view['error'])
+        self.assertEqual(view['replacement_policy'], 'confidence-gated')
+        self.assertTrue(view['quality_reread']['enabled'])
+        self.assertEqual(view['retry_of'], first)
+        self.assertEqual(view['replacement_confidence']['actual_replacements'], 2)
+        self.assertTrue(all(u['source'] == 'こんばんは' and u['raw_source'] == 'こんにちは'
+            and u['reread_selected'] for u in view['units']))
+        self.assertEqual(old, {p.relative_to(app.job(first)['directory']): p.read_bytes()
+            for p in app.job(first)['directory'].rglob('*') if p.is_file()})
+        restored = s.App(config, runner=Mock())
+        self.assertTrue(restored.snapshot(identity)['options']['quality_reread'])
+        self.assertEqual(restored.snapshot(identity)['options']['replacement_policy'], 'confidence-gated')
+
     def test_busy_job_exposes_real_live_checkpoint_and_rejects_second_upload(self):
         entered, release = threading.Event(), threading.Event()
         def runner(config, job):
@@ -230,6 +281,22 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(job['options']['max_attempts'], 5)
         self.assertFalse((directory/'viewer.json').exists(), 'restoration must not rewrite old evidence')
 
+    def test_restoration_uses_executed_quality_policy_without_rewriting_legacy_evidence(self):
+        directory = self.config.root/('b'*32)
+        (directory/'run/preview').mkdir(parents=True)
+        data = image_bytes()
+        (directory/'input.png').write_bytes(data)
+        (directory/'run/pipeline.json').write_text(json.dumps(dict(status='partial',
+            source=dict(sha256=s.hashlib.sha256(data).hexdigest(), size=[100, 100]),
+            translation_policy='coverage-first',
+            replacement_policy=dict(name='confidence-gated'), quality_reread=dict(enabled=True))))
+        app = s.App(self.config, runner=Mock())
+        snapshot = app.snapshot('b'*32)
+        self.assertEqual(snapshot['replacement_policy'], 'confidence-gated')
+        self.assertTrue(snapshot['options']['quality_reread'])
+        self.assertEqual(snapshot['options']['replacement_policy'], 'confidence-gated')
+        self.assertFalse((directory/'viewer.json').exists())
+
     def test_interrupted_history_is_not_resumed_and_does_not_spend_session_slots(self):
         app = s.App(self.config, runner=lambda *args: dict(status='complete'))
         identity = app.start(image_bytes(), dict(mode='ocr'))
@@ -296,10 +363,38 @@ class ViewerTests(unittest.TestCase):
         defaults = s.options({}, render_enabled=True)
         self.assertEqual(defaults['translation_policy'], 'coverage-first')
         self.assertEqual(defaults['max_attempts'], 64)
+        self.assertEqual(defaults['replacement_policy'], 'all')
+        self.assertFalse(defaults['quality_reread'])
         for value in ([], {'fonts': '/etc/passwd'}, {'mode': 'render'}, {'max_attempts': True},
                       {'max_attempts': 65}, {'allow_fragments': 'yes'}, {'render_policy': []}, {'translation_policy': []}):
             with self.subTest(value=value), self.assertRaises(s.RequestError):
                 s.options(value, render_enabled=False)
+
+    def test_quality_options_are_explicit_bounded_and_cannot_select_asset_paths(self):
+        runner = Mock(return_value=dict(status='complete'))
+        app = s.App(replace(self.config, fonts=self.root/'fonts.json'), runner=runner)
+        for value in ({'replacement_policy': []}, {'replacement_policy': 'unknown'}, {'quality_reread': 1},
+                      {'quality_reread': True, 'mode': 'ocr'}, {'quality_reread': True, 'translation_policy': 'conservative'},
+                      {'replacement_policy': 'confidence-gated', 'mode': 'translate'},
+                      {'manga_reread_model': '/etc/passwd'}, {'reread_model': 'unconfigured'}):
+            with self.subTest(value=value), self.assertRaises(s.RequestError):
+                app.start(image_bytes(), value)
+        with self.assertRaisesRegex(s.RequestError, 'existing local snapshot'):
+            app.start(image_bytes(), dict(quality_reread=True))
+        self.assertFalse(app.jobs)
+        runner.assert_not_called()
+
+    def test_configured_readers_do_not_enable_quality_inference_without_run_opt_in(self):
+        import main
+        config = replace(self.config, fonts=self.root/'fonts.json', manga_reread_model=self.root/'snapshot')
+        settings = s.options({}, render_enabled=True)
+        app = s.App(config, runner=Mock())
+        self.assertTrue(app.public_config()['quality_reread_available'])
+        with patch.object(main, 'run_pipeline') as pipeline:
+            s.execute_job(config, dict(image=self.root/'image.png', directory=self.root/'job', options=settings))
+        self.assertFalse(pipeline.call_args.kwargs['quality_reread'])
+        self.assertIsNone(pipeline.call_args.kwargs['manga_reread_model'])
+        self.assertEqual(pipeline.call_args.kwargs['replacement_policy'], 'all')
 
     def test_mode_dispatch_reuses_coordinator_and_preview_workflow(self):
         import main
@@ -370,7 +465,7 @@ main(['--help'])
             self.skipTest('optional local evidence unavailable; Node.js for frontend state checks')
         script = r'''
 const assert = require('node:assert/strict');
-const {previewStates, progressView, outputReady, missingOutputMessage} = require(process.argv[1]);
+const {previewStates, progressView, outputReady, missingOutputMessage, qualityNotice} = require(process.argv[1]);
 const base = {status: 'running', stage: 'ocr', preview_stage: 'ocr', options: {mode: 'render'},
   detections: [], units: [], artifacts: [], rendering_coverage: null, error: null};
 assert.equal(previewStates(null, true).original.available, true);
@@ -389,6 +484,15 @@ const finished = {...pending, status: 'partial', stage: 'finished', preview_stag
 assert.equal(outputReady(finished, 'final'), true);
 assert.equal(progressView(finished), 'final');
 assert.equal(previewStates(finished).final.label, '1 replacement');
+assert.match(qualityNotice(finished, true).copy, /broad replacement/);
+assert.equal(qualityNotice(finished, true).action, 'Retry with quality checks');
+assert.equal(qualityNotice(finished, false).action, 'Retry with artwork protection');
+const protectedRun = {...finished, replacement_policy: 'confidence-gated', quality_reread: {enabled: true},
+  replacement_confidence: {actual_replacements: 1, bound_translations_without_replacement: 1}};
+assert.match(qualityNotice(protectedRun).copy, /paired rereads/);
+assert.match(qualityNotice(protectedRun).copy, /1 translations kept without repainting/);
+assert.equal(qualityNotice(protectedRun).action, null);
+assert.equal(qualityNotice(base), null);
 const skipped = {...finished, artifacts: [], rendering_coverage: null, units: [],
   rendering_skipped: 'no_strict_translations'};
 assert.equal(previewStates(skipped).final.state, 'skipped');
