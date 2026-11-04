@@ -7,6 +7,32 @@ import argparse
 from collections import Counter
 import hashlib
 from pathlib import Path
+import time
+
+
+def crop_localization_pass(preview, plan, *, image, output, device, model_root, ocr_factory=None):
+    """Coordinate a fresh crop-only reader; never repeat page OCR or translation."""
+    from tralens.ocr.source_localization import execute_requests
+    engine = None
+    started = time.monotonic()
+    try:
+        if plan['requests']:
+            if ocr_factory is None:
+                from tralens.ocr import OCR
+                ocr_factory = OCR
+            engine = ocr_factory(str(image), device=device, model_root=str(Path(model_root).expanduser()),
+                                 model_profile='v6_medium', enable_manga_ocr=False)
+            identity = engine.paddle_provenance
+        else:
+            # No reader construction for an empty request plan.
+            from tralens.ocr.paddle_profiles import resolve_profile
+            identity = resolve_profile(device=device, model_root=Path(model_root).expanduser()).identity()
+        derived = execute_requests(preview, plan, image=image, output=output, model_identity=identity,
+                                   reader=engine.ocr if engine is not None else None)
+    finally:
+        if engine is not None:
+            engine.ocr.close()
+    return derived, time.monotonic()-started
 
 
 def quality_refiner(*, endpoint, model, manga_model):
@@ -106,7 +132,6 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
     if layout_policy != 'source-local':
         rendering_options['layout_policy'] = layout_policy
     if source_localization:
-        preview_options['source_localization'] = True
         rendering_options['cleanup_policy'] = 'localized'
     checked = preflight_automatic(**rendering_options)
     report = {'schema_version': 1, 'purpose': 'automatic_pipeline_candidate', 'status': 'running',
@@ -172,9 +197,49 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                 report['stage'] = 'rendering'
                 report['rendering'] = {'status': 'running'}
                 persist()
-                rendered = run_automatic(preview=output/'preview/preview.json', output=output/'rendering', **rendering_options)
+                render_preview = output/'preview/preview.json'
+                render_options = dict(rendering_options)
+                if source_localization:
+                    native_options = {**rendering_options, 'cleanup_policy': 'native'}
+                    started = time.monotonic()
+                    native = run_automatic(preview=render_preview, output=output/'rendering-native',
+                                           plan_localization=True, **native_options)
+                    plan = native['localization_request_plan']
+                    report['source_localization'].update(native_seconds=time.monotonic()-started,
+                        planning_seconds=native['localization_planning_seconds'],
+                        native_manifest='rendering-native/manifest.json', requested=len(plan['requests']),
+                        budget_missed=sum('budget' in r['reason'] for r in plan['records']))
+                    persist()
+                    if preflight_automatic(**rendering_options) != checked:
+                        raise ValueError('pipeline image/font inputs changed before crop inference')
+                    try:
+                        derived, seconds = crop_localization_pass(preview, plan, image=rendering_options['image'],
+                            output=output/'localization', device=preview_options['device'],
+                            model_root=preview_options['model_root'], ocr_factory=preview_options.get('ocr_factory'))
+                        stage = derived['ocr']['source_localization']
+                        report['source_localization'].update(calls=stage['calls'], execution_seconds=seconds,
+                            predicted=sum(r['status'] == 'predicted' for r in stage['records']),
+                            failed=sum(r['status'] == 'failed' for r in stage['records']))
+                        render_preview = output/'localization/preview.json'
+                    except Exception as error:
+                        # Keep native successes and originals, but do not present
+                        # failed optional inference as a completed quality pass.
+                        report['source_localization']['error'] = type(error).__name__+': '+str(error)[:2000]
+                        render_options['cleanup_policy'] = 'native'
+                    if preflight_automatic(**rendering_options) != checked:
+                        raise ValueError('pipeline image/font inputs changed during crop inference')
+                render_preview_sha256 = fingerprint(render_preview)
+                started = time.monotonic()
+                rendered = run_automatic(preview=render_preview, output=output/'rendering', **render_options)
+                if source_localization:
+                    report['source_localization'].update(retry_render_seconds=time.monotonic()-started,
+                        predictions_consumed=rendered.get('localized_cleanup_summary', {}).get('retries', 0),
+                        rendered_preview=str(render_preview.relative_to(output)),
+                        rendered_preview_sha256=render_preview_sha256)
                 if (rendered['source'] != checked['source'] or rendered['fonts_sha256'] != checked['fonts_sha256']
-                        or rendered['preview_sha256'] != report['preview']['sha256']):
+                        or rendered['preview_sha256'] != render_preview_sha256
+                        or fingerprint(render_preview) != render_preview_sha256
+                        or fingerprint(output/'preview/preview.json') != report['preview']['sha256']):
                     raise ValueError('rendered output does not bind the original pipeline inputs')
                 report['rendering'] = {'status': 'complete', 'manifest': 'rendering/manifest.json',
                     'manifest_sha256': fingerprint(output/'rendering/manifest.json'),
@@ -191,6 +256,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                     partial_output=rendered['coverage']['partial_output'])
                 report['status'] = ('complete' if preview['status'] == 'complete'
                     and not rendered['coverage']['partial_output'] else 'partial')
+                if report.get('source_localization', {}).get('error') or report.get('source_localization', {}).get('failed'):
+                    report['status'] = 'partial'
         report['stage'] = 'finished'
     except (Exception, KeyboardInterrupt) as error:
         failed_stage = report['stage']

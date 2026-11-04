@@ -40,7 +40,11 @@ def saved_records(preview, rgb, detections, units):
         if row['status'] == 'predicted':
             n.require(row.get('prediction_revision') == n.revision(row['prediction']), 'localized prediction revision drift')
             result[unit.unit_id] = row
-    n.require(len(result) <= stage['calls'], 'localized prediction/call count drift')
+    reused = stage.get('reused_predictions', 0)
+    n.require(type(reused) is int and 0 <= reused <= MAX_RETRIES, 'localized saved prediction budget drift')
+    n.require(len(result) <= stage['calls']+reused, 'localized prediction/call count drift')
+    if 'request_plan' in stage:
+        n.require(set(result) <= set(stage['request_plan']['requests']), 'unrequested localized prediction')
     return result
 
 
@@ -68,8 +72,12 @@ def _single_ink(pixels, foreground, residual):
         'interior_policy':'unchanged native single fill within 32 channel levels; 2px transition; only existing <=4px varying exceptions'}
 
 
-def derive(rgb, detections, member_ids, record, *, reserved=None):
-    """Validate raw crop predictions and derive masks exclusively from original RGB."""
+def prerequisites(rgb, detections, member_ids):
+    """Existing model-free enclosure checks, shared by planning and cleanup.
+
+    Passing is not erasure permission. Prediction/whole-stroke/gray/art checks
+    still run in derive. No prediction or translated wording is consulted here.
+    """
     n.require(rgb.mode == 'RGB' and rgb.width*rgb.height <= p.MAX_PIXELS
         and len(detections)*rgb.width*rgb.height <= a.MAX_WORK, 'localized source budget/mode')
     n.require(type(member_ids) is list and 0 < len(member_ids) <= 8
@@ -79,26 +87,9 @@ def derive(rgb, detections, member_ids, record, *, reserved=None):
     selected = {(type(i).__name__,i) for i in member_ids}
     n.require(len(set(keys)) == len(keys) and selected <= set(keys), 'localized source identity mismatch')
     pixels = np.asarray(rgb)
-    shape = pixels.shape[:2]
-    n.require(reserved is None or (reserved.shape == shape and reserved.dtype == bool), 'localized reservation shape/type')
-    reserved = np.zeros(shape,bool) if reserved is None else reserved
     original = {key:d for key,d in zip(keys,detections)}
-    points = [pt for key in selected for pt in original[key]['polygon']]
-    xs,ys = zip(*points)
-    expected = [max(0,int(np.floor(min(xs)))-24), max(0,int(np.floor(min(ys)))-24),
-        min(rgb.width,int(np.ceil(max(xs)))+25), min(rgb.height,int(np.ceil(max(ys)))+25)]
-    bounds = record['bounds']
-    n.require(bounds == expected and (bounds[2]-bounds[0])*(bounds[3]-bounds[1]) <= MAX_LOCAL_PIXELS,
-        'localized crop extent drift/budget')
-    crop = rgb.crop(bounds)
-    n.require(record['crop_pixels_sha256'] == n.digest(crop.tobytes()), 'localized original crop pixels drift')
-    prediction = record['prediction']
-    fields = ('rec_texts','rec_scores','rec_polys','text_word_region')
-    n.require(all(type(prediction.get(k)) is list for k in fields)
-        and 0 < len(prediction['rec_texts']) <= 64
-        and len({len(prediction[k]) for k in fields}) == 1, 'localized prediction association contract')
-    masks = {key:np.asarray(n.polygon_mask(d['polygon'],rgb.size,evidence=True)) != 0
-             for key,d in zip(keys,detections)}
+    masks = {key:np.asarray(n.polygon_mask(original[key]['polygon'],rgb.size,evidence=True)) != 0
+             for key in selected}
     members = np.logical_or.reduce([masks[key] for key in selected])
     original_regions = p.OriginalRegions(rgb)
     envelopes, votes = [], []
@@ -124,6 +115,30 @@ def derive(rgb, detections, member_ids, record, *, reserved=None):
     ring=p.dilate(envelope,1)&~envelope
     a.check(ring.any() and float((pixels[ring].min(axis=1)<180).mean()) >= .9,
         'localized_outline','original enclosure lacks dark boundary support')
+    return keys, selected, original, masks, members, envelope, core
+
+
+def derive(rgb, detections, member_ids, record, *, reserved=None):
+    """Validate raw crop predictions and derive masks exclusively from original RGB."""
+    from ..ocr.source_localization import crop_bounds
+    bounds = record['bounds']
+    n.require(bounds == crop_bounds(detections, member_ids, rgb.size)
+        and (bounds[2]-bounds[0])*(bounds[3]-bounds[1]) <= MAX_LOCAL_PIXELS,
+        'localized crop extent drift/budget')
+    crop = rgb.crop(bounds)
+    n.require(record['crop_pixels_sha256'] == n.digest(crop.tobytes()), 'localized original crop pixels drift')
+    prediction = record['prediction']
+    fields = ('rec_texts','rec_scores','rec_polys','text_word_region')
+    n.require(all(type(prediction.get(k)) is list for k in fields)
+        and 0 < len(prediction['rec_texts']) <= 64
+        and len({len(prediction[k]) for k in fields}) == 1, 'localized prediction association contract')
+    keys, selected, original, masks, members, envelope, core = prerequisites(rgb, detections, member_ids)
+    masks.update({key:np.asarray(n.polygon_mask(original[key]['polygon'],rgb.size,evidence=True)) != 0
+                  for key in keys if key not in selected})
+    pixels = np.asarray(rgb)
+    shape = pixels.shape[:2]
+    n.require(reserved is None or (reserved.shape == shape and reserved.dtype == bool), 'localized reservation shape/type')
+    reserved = np.zeros(shape,bool) if reserved is None else reserved
     refinements=[]; seeds=np.zeros(shape,bool); line_masks=np.zeros(shape,bool); used=set()
     for key in sorted(selected):
         candidates=[]

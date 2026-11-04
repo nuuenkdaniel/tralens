@@ -338,7 +338,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
 
 
 def _report_html(report):
@@ -463,12 +463,15 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
     return checked
 
 
-def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native'):
+def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', plan_localization=False):
     """All current strict translated candidates, with explicit machine skip states."""
     confidence_settings = _options(min_size, max_size, max_units, background_method, render_policy,
                                    replacement_policy, min_ocr_confidence)
     layout_settings(layout_policy, render_policy, confidence_settings)
     cleanup_settings(cleanup_policy, render_policy, confidence_settings)
+    n.require(type(plan_localization) is bool, 'localization planning needs explicit boolean enablement')
+    if plan_localization:
+        cleanup_settings('localized', render_policy, confidence_settings)
     from . import restoration
     from ..translation import coverage as tc
     model_spec = None
@@ -970,6 +973,14 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             except (ValueError, OSError, KeyError, TypeError) as error:
                 attempt.update(reason_code=getattr(error, 'code', 'validation'), reason=str(error),
                                rejection_evidence=getattr(error, 'evidence', {}))
+    demand = preview_doc['ocr'].get('source_localization', {}).get('request_plan')
+    if plan_localization or demand is not None:
+        from . import localization_requests
+        requested, planning_seconds = localization_requests.plan(preview_doc, rgb, raw, units, report)
+        if demand is not None:
+            localization_requests.validate(demand, requested)
+        report['localization_request_plan'] = requested
+        report['localization_planning_seconds'] = planning_seconds
     if cleanup_policy == 'localized':
         localized_work, localized_retries = 0, 0
         retry_indices = [i for i, _ in pairs if report['units'][i]['status'] == 'skipped'
@@ -977,7 +988,10 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             and report['units'][i].get('attempted') and units[i].unit_id in localized]
         directions = {proposal['proposal_id']:proposal['direction'] for proposal in preview_doc['ocr']['batches'][0]['proposals']}
         retry_indices.sort(key=lambda i:(directions[units[i].unit_id]!='vertical',len(units[i].order)<2,
-                                        -len(units[i].selected.text),units[i].unit_id))
+                                         -len(units[i].selected.text),units[i].unit_id))
+        if demand is not None:
+            by_id = {units[i].unit_id:i for i in retry_indices}
+            retry_indices = [by_id[uid] for uid in demand['requests'] if uid in by_id]
         for i in retry_indices:
             row = report['units'][i]
             attempt = {'policy': localized_strokes.POLICY, 'status': 'rejected',

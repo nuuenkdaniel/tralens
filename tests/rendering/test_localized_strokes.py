@@ -181,7 +181,8 @@ class LocalizationPipelineTests(unittest.TestCase):
         self.assertEqual(row['localized_cleanup_attempt']['status'],'planned')
         self.assertGreaterEqual(row['layout']['size'],16)
         self.assertFalse(new['localized_cleanup_summary']['semantic_ownership_verified'])
-        self.assertEqual(self.f.engine.ocr.predict.call_count,2)
+        self.assertEqual(self.f.engine.ocr.predict.call_count,1)
+        self.assertEqual(self.pipeline.provider.call_count,4)  # Two separate complete jobs, not retry translations.
 
     def test_prediction_failure_retains_translation_and_strict_output(self):
         self.f.engine.ocr.predict.side_effect=RuntimeError('synthetic crop inference failure')
@@ -200,13 +201,13 @@ class LocalizationPipelineTests(unittest.TestCase):
         import json
         result=self.run_case('valid',True)
         self.assertIsNone(result['error'],result)
-        data=json.loads((self.pipeline.root/'valid/preview/preview.json').read_bytes())
+        data=json.loads((self.pipeline.root/'valid/localization/preview.json').read_bytes())
         for index,change in enumerate(('pixels','geometry','unit','prediction','call_budget')):
             forged=copy.deepcopy(data);stage=forged['ocr']['source_localization']
             if change=='pixels':stage['source_pixels_sha256']='0'*64
             elif change=='geometry':stage['geometry_revision']='0'*64
             elif change=='unit':stage['records'][0]['unit_revision']='0'*64
-            elif change=='prediction':stage['records'][0]['prediction']['rec_texts'][0]='changed'
+            elif change=='prediction':next(r for r in stage['records'] if r['status']=='predicted')['prediction']['rec_texts'][0]='changed'
             else:stage['calls']=13
             path=self.pipeline.root/f'forged-{index}.json';path.write_text(json.dumps(forged))
             with self.assertRaises(ValueError):
