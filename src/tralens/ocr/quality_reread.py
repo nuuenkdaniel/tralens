@@ -169,6 +169,9 @@ def refine(engine, image, original_bytes, *, vision, manga, model_identity, outp
     original_batch = batch
     owners = enclosure_map(image, batch.detections)
     batch, regrouping = terminal_groups(batch, owners)
+    from .quality_groups import vertical_groups
+    batch, vertical_regrouping = vertical_groups(batch, owners, image)
+    regrouping += vertical_regrouping
     engine.original_unit_proposals = (original_batch,)
     engine.automatic_unit_proposals = (batch,)
     engine.quality_rereads = {'policy': POLICY, 'model_identity': model_identity, 'grouping': regrouping,

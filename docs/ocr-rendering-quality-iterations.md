@@ -366,3 +366,154 @@ bindings, unchanged native erasure and genuine border-contact rejection. No
 defaults, licenses, user dependency edits or earlier evidence were changed, and
 nothing was downloaded or pushed. This is development evidence, not held-out
 general OCR accuracy validation.
+
+## Five-page visual development expansion
+
+The user requested more images, direct model visual inspection, trial-and-error
+fixes and fresh end-to-end reruns. Three existing pages were uploaded serially
+through real Firefox and the viewer, followed by two newly acquired originals.
+The same existing Paddle/Manga readers, private Ollama endpoint, fonts and opt-in
+quality settings were used. No models, fonts or dependencies were acquired.
+
+### Sources and initial visual findings
+
+New originals and English license records are retained locally in ignored
+`images/quality-more-v1/`, with acquisition URLs, byte counts, hashes and a runner.
+They are pinned to the original-artwork repository revision
+`f3c6473206a8a8b6f1a946e8c60b4cdaff5ea71b`, not a moving branch. Only Japanese
+original PNGs and license text were fetched, not translated references or
+implementations. Attribution: Hiroshi Seo / ASCII MEDIA WORKS Inc.; declared
+CC BY-NC 3.0, retained for local noncommercial evaluation, not training or
+redistribution. This does not select or change the project license.
+
+| New original | SHA256 |
+| --- | --- |
+| `ubunchu03_0002.png` | `66813ea39c2acc026262860e6c5f46e4370c333f42a17eb3651b1e55c2184489` |
+| `ubunchu05_0002.png` | `4625a3ecf3a5ba44855893561cbb398946292b187b9945c54b49c89fed62a054` |
+
+The full five initial composites were visually inspected against their originals,
+not assessed solely by successful execution or replacement count:
+
+| Page | Translations / replacements | Visible strengths and unresolved failures |
+| --- | --- | --- |
+| `04_0002` | 17 / 7 | Ordinary edits preserve outlines/art; important annotation-bearing dialogue remains untranslated; detached `なーんて` and `べ` remain beside English. |
+| `04_0005` | 16 / 11 | Most ordinary dialogue reads legibly; detached `そ` becomes a separate “That.”; sweat marks/effects and some text remain. |
+| `06_0002` | 22 / 9 | Several large dialogue edits work; one top-left balloon has two independent English layouts; bottom-right `あ` is detached; other dialogue/effects remain. |
+| `03_0002` | 17 / 9 | Many major balloons render cleanly; connected paragraphs remain distinct; small footnote/effects stay Japanese, with some oversimplified or awkward English. |
+| `05_0002` | 15 / 8 | Ordinary speech is legible without broad smearing; two annotation-bearing units lack translations and other balloons remain mixed Japanese/English. |
+
+All initial runs report **partial**, with zero browser errors, pipeline execution
+errors or exhausted translation budgets. Missing translations are distinguished
+from translations whose image replacement was deferred. Local baseline evidence:
+`test-results/multipage-viewer-check-v1/` and `test-results/more-viewer-check-v1/`.
+`visual-baseline.json` freezes the first three pages' observations and exact
+source/preview/manifest/composite hashes before the grouping change.
+
+### Conservative vertical continuation trial
+
+`src/tralens/ocr/quality_groups.py` operates only inside the already opt-in quality
+reread stage. It tests adjacent vertical columns, including a short leading
+singleton, against original enclosure, comparable column scale, leading alignment
+and a bounded, almost entirely white **original facing seam**. Sharing one white
+component is insufficient: narrow connecting necks with a border through the
+actual seam, separate paragraphs, annotations, new intervening source geometry,
+ambiguous neighbors and greedy chaining all reject the hypothesis. At most one
+unambiguous pair joins; source strings and model outputs do not choose a merge.
+
+The exact raw lines concatenate in geometric right-to-left order; originals and
+the previous partition remain saved. Existing corner crop conflicts are retained
+only when already present in a previous crop and absent from the joining seam;
+new union conflicts reject. The old conflict is not cleared, hidden or converted
+into cleanup permission. Structural uncertainty remains explicit, and original
+native-cleanup, source-score, obstacle, exact-glyph and minimum-size gates still
+decide whether an image edit is allowed. No cleanup/layout predicate is relaxed.
+
+Annotation ownership failures were investigated separately. They include tiny
+single-component readings with inconclusive glyph support, non-kana labels such
+as “AKA”, and small readings intersecting oversized main geometry. The hard
+`tentative_annotation_ownership` guard is **not waived** to inflate translation
+coverage. Those missing translations remain an identified limitation.
+
+The first live grouping prototype exposed an integration mistake: it added a
+grouping-policy field to proposal-ID hashing, which the renderer's existing
+source-identity contract correctly rejected on all three changed pages. Those
+failed jobs are retained in `test-results/grouped-viewer-check-v1/`; they are not
+quality successes. The implementation now uses the existing ID contract and
+records the grouping policy separately in evidence. A portable full-pipeline and
+offline-review regression covers this exact interface. No renderer identity
+validation was weakened to accept the prototype.
+
+Portable verification now includes short/full vertical continuation, immutable
+raw evidence, geometric order, distinct enclosures, original boundary/neck
+rejection, separate paragraphs, annotations, new intervening detections, retained
+corner conflicts, ambiguity/no chaining, and full pipeline/offline bindings.
+**857 tests passed in each of `.venv` and `.venv-paddle6`**; source-only
+verification passed with 39 optional-local-evidence skips. The 444 coverage and
+129 strict-only default-route PNGs are byte-identical to their previous outputs.
+All 219 PNGs of the previous confidence-gated LiveCD/desktop panel also remain
+byte-identical on a fresh rerender. These are software/binding regressions, not
+independent evidence of Japanese or translation accuracy. Defaults, protected
+user dependency edits, licenses and repository visibility remain unchanged;
+nothing was pushed.
+
+To reproduce with the existing local assets, use the viewer's **Native cleanup +
+OCR checks** and **Paired OCR quality rereads**, coverage-first translation,
+best-effort rendering and a 64-attempt translation budget. Upload the five
+originals individually, not the saved English composites. Keep live runs serial:
+the shared private Ollama switches between the visual reader and translator.
+Grouping can run without decoder calls in portable tests, but live weak-line
+recovery still requires both explicitly configured readers. Downloaded artwork
+and all browser/model artifacts remain ignored local evidence, not test fixtures
+required by the portable suite.
+
+### Corrected fresh viewer outcomes
+
+All five originals were then uploaded again through real Firefox with the
+corrected implementation. All five produced partial candidates without browser
+or pipeline execution errors or translation-budget exhaustion:
+
+| Page | Fresh viewer job | Grouped units / translations / replacements |
+| --- | --- | --- |
+| `04_0002` | `4a1138c539364c13ad7a6527ad8877af` | 19 / 16 / 7 |
+| `04_0005` | `b34b72f876cc477eab894a6501667081` | 16 / 15 / 10 |
+| `06_0002` | `c5a2300387444efdbd8813ec8f0367d7` | 20 / 20 / 8 |
+| `03_0002` | `c98e5d07307f4976a6f8415b944543a3` | 17 / 17 / 9 |
+| `05_0002` | `cc7c419c097646f7a3157b73ff58a0b1` | 17 / 15 / 8 |
+
+Open an exact job with `http://127.0.0.1:7860/?job=ID`. Evidence, screenshots,
+full composites, clean layers and four sets of original/clean/composite crops are in
+`test-results/grouped-viewer-check-v2/`. `audit-v2.json` records all five composite
+hashes and comparisons; the saved implementation hashes match the current code.
+
+Model visual inspection of all five full final pages and all four clean/composite
+join crops found the intended improvements:
+
+- `04_0002`: `なーんて` no longer remains Japanese beside English. It joins the
+  Stallman dialogue, with a clean background and intact frame/balloon/art edges.
+- `04_0005`: the separate “That.” disappears. The stammer's exact raw syllables
+  remain in the combined source; the translator emits one “It’s not exactly like
+  that!” block. The small sweat mark is deliberately retained, not erased as text.
+- `06_0002`: the top-left balloon now reads “I can’t give up until I see the new
+  boot-up screen.” in one layout instead of two independent blocks. Bottom-right
+  `あ` joins the “Oh, but…” dialogue instead of remaining as residual Japanese.
+- The two additional pages keep their original paragraph/balloon partitions and
+  produce byte-identical composites to their initial runs. They do **not** show
+  new quality gains from this particular change.
+
+Every raw detection (including strings, scores, polygons and metadata) and all
+assigned member IDs are unchanged across these paired runs. All **190 checked
+PNGs of unaffected rendered operations** are byte-identical. Composite pixels
+outside the four joined source rectangles plus a fixed 55-pixel audit margin are
+unchanged. Offline source/request/result consistency checks and all recorded
+reread/render artifact hashes verified for every fresh job; this is not semantic
+approval. No previously edited source ID is lost, and source IDs `34` on
+`04_0002` and `38` on `06_0002` newly participate in successful edits.
+
+Translation/replacement operation counts can decrease when two operations become
+one; the above source-ID audit prevents presenting that bookkeeping change as
+either lost text or an accuracy improvement. The remaining issues are still real:
+untranslated annotation-bearing speech, detached `べ`, screen/blackboard text,
+effects, inconsistent type sizes and awkward/mistaken English (including
+`KarmicKoa-a` and “Don’t argue with OS.”). No whole page is claimed finished.
+All visually inspected/tuned pages in this section are now development evidence,
+not fresh held-out references or justification for promoting defaults.

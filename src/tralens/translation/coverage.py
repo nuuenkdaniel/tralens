@@ -21,7 +21,7 @@ WAIVABLE = frozenset({'unknown_region_ownership', 'mixed_region_ownership', 'unk
 INFORMATIONAL_STRUCTURE = frozenset({'automatic_not_human_reviewed', 'complementary_component_ownership',
     'annotation_crosses_original_boundary', 'annotation_geometry_crosses_distinct_regions',
     'original_glyph_scale_not_smaller_than_main', 'original_glyph_flow_inconsistent_with_reading_annotation',
-    'automatic_terminal_row_hypothesis'})
+    'automatic_terminal_row_hypothesis', 'automatic_vertical_continuation_hypothesis'})
 
 
 def validate_policy(policy):

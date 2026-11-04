@@ -320,7 +320,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', '../translation/coverage.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', '../translation/coverage.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py')})
 
 
 def _report_html(report):
