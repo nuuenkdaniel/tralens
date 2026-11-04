@@ -68,3 +68,39 @@ contain embedded ICC profiles and one has genuinely nonopaque alpha (220–255).
 They are retained unchanged and reported as unsupported inputs, not silently
 stripped of profiles, flattened against a guessed matte or counted as successful
 pipeline runs.
+
+## Loop 2: reserve committed output, not unused layout space
+
+A same-model, same-preview ablation found that a valid native cleanup on
+`ubunchu05_0002.png` was being deferred because a previous operation reserved its
+entire unused placement region. The remaining mask could fit only 14px lettering,
+below the requested 16px floor. The actual previous lettering and cleanup occupy
+far less space than that mask; its whitespace is not semantic ownership.
+
+Confidence-gated fallback placement now reserves **actual committed text alpha
+and native erase pixels plus a 2px collar**. Complete source foreground, erase
+masks, original obstacles and requested minimum size remain unchanged. Real
+cleanup/ink overlap still rejects; previously unused whitespace can be considered
+for a later exact-glyph layout. The default route and initial symmetric strict
+collision rejection remain unchanged. This does not grant new erasure permission.
+
+The recovered paragraph fits at **17px**, with unchanged target wording and native
+cleanup, increasing this page from 8 to 9 replacements and covering four more
+bound main IDs (24–27). Visual inspection found retained balloon/frame edges,
+hair/face/art and separate lower-left lettering without overlap. The result is
+still dense, and two annotation-bearing dialogue units remain untranslated in
+this renderer-only experiment.
+
+All five existing development previews were rerendered with exact OCR and
+translation results held constant in `test-results/quality50-layout-five-v1/`.
+No previously edited source ID was lost. Existing foreground/erase PNGs are
+byte-identical on all five pages. Two composites are entirely byte-identical;
+two others have small safe placement shifts at unchanged font sizes, visually
+inspected against the old output. The fifth gains the paragraph above. The
+default-route 444 coverage and 129 strict-only PNGs remain byte-identical.
+
+Portable tests cover exact occupancy/collar pixels, reuse of unused whitespace,
+unchanged foreground/erase, real committed overlap rejection, invalid text tiles
+and exclusion from the default route.
+The exact staged checkpoint passed 69 renderer/pipeline tests in an isolated
+source snapshot (`test-results/occupancy-checkpoint-staged-tests-v1/`).

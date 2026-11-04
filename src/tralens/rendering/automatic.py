@@ -109,6 +109,24 @@ def apply_cleanup(pixels, plan):
         pixels[plan.erase] = plan.restored_pixels
 
 
+def occupied_reservation(plan, tile):
+    """Protect committed ink/cleanup plus 2px, not unused placement whitespace.
+
+    Layout support is not an ownership claim. This is only a reservation for
+    later native operations; no source foreground or erase permission changes.
+    """
+    layer, (x, y) = tile
+    height, width = plan.erase.shape
+    n.require(layer.mode == 'RGBA' and type(x) is int and type(y) is int
+        and 0 <= x < x+layer.width <= width and 0 <= y < y+layer.height <= height,
+        'invalid committed text tile geometry')
+    alpha = np.zeros_like(plan.erase)
+    alpha[y:y+layer.height, x:x+layer.width] = np.asarray(layer.getchannel('A')) != 0
+    check(not (alpha & (~plan.layout | plan.obstacles)).any(), 'alpha_containment',
+          'reservation text leaves original native layout support')
+    return p.dilate(plan.erase | alpha, 2)
+
+
 def reserve_layout(plan, reserved):
     """Trim only unused layout space; never clip a stroke or cleanup permission.
 
@@ -674,7 +692,10 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         reserved = np.zeros((rgb.height, rgb.width), bool)
         for i in ready:
             if i not in collisions:
-                reserved |= plans[i].layout | plans[i].erase
+                reserved |= (occupied_reservation(plans[i], tiles[i]) if confidence_settings is not None
+                             else plans[i].layout | plans[i].erase)
+        if confidence_settings is not None:
+            report['layout_reservation_policy'] = 'committed_alpha_and_native_erase_plus_2px_not_unused_layout'
         for i, _ in pairs:
             row = report['units'][i]
             if row['status'] != 'skipped' or 'binding' not in row:
@@ -702,9 +723,12 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 routes = tuple(route for route in routes if route != 'footprint')
             for route in routes:
                 reuse = route == 'reuse'
-                if reuse and (existing is None or row['reason_code'] == 'region_collision'
-                              or ((existing.layout | existing.erase) & reserved).any()):
-                    continue
+                if reuse:
+                    if existing is None or row['reason_code'] == 'region_collision':
+                        continue
+                    occupied = existing.erase if confidence_settings is not None else existing.layout | existing.erase
+                    if (occupied & reserved).any():
+                        continue
                 try:
                     if route == 'source_local':
                         if context_error is not None:
@@ -715,7 +739,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                             plan = reserve_layout(plan, reserved)
                         check(not ((plan.layout | plan.erase) & reserved).any(), 'region_collision', 'uncertain region touches reserved strict output')
                     elif reuse:
-                        plan = existing
+                        plan = reserve_layout(existing, reserved) if confidence_settings is not None else existing
                         method = 'reuse_cleanup_relaxed_typesetting'
                     elif route == 'native_hint':
                         extra_work = pixels*len(row['binding']['member_ids'])
@@ -793,7 +817,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     if i not in ready:
                         ready.append(i)
                     collisions.discard(i)
-                    reserved |= plan.layout | plan.erase
+                    reserved |= (occupied_reservation(plan, tiles[i]) if confidence_settings is not None
+                                 else plan.layout | plan.erase)
                     break
                 except (ValueError, OSError, KeyError, TypeError) as error:
                     row['best_effort_attempts'].append({'method': {'source_local': 'flat_fill_uncertain_region', 'reuse': 'reuse_cleanup', 'native_hint': 'native_contrast_hint',
