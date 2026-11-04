@@ -31,6 +31,8 @@
           <label>Rendering policy<select id="policy"><option value="best-effort">Best effort</option><option value="conservative">Conservative</option></select></label>
           <label>Artwork protection<select id="replacement-policy"><option value="all">Broad replacement (may smear artwork)</option><option value="confidence-gated">Native cleanup + OCR checks (experimental)</option></select><small>Checks preserve unsupported regions, while keeping their translations available.</small></label>
           <div><label class="checkbox-label"><input id="quality-reread" type="checkbox"> Paired OCR quality rereads (experimental)</label><small id="reread-availability">Requires existing local readers. Agreement is not proof of correct text.</small></div>
+          <label>Enclosure layout (experimental)<select id="layout-policy"><option value="source-local">Source-local layout</option><option value="enclosed-retry">Retry failed lettering in supported enclosure space</option></select><small>Requires Best effort + Native cleanup checks. Does not expand erasure or reletter successful dialogue.</small></label>
+          <div><label class="checkbox-label"><input id="source-localization" type="checkbox"> Demand-driven crop localization (experimental)</label><small>Requires Best effort + Native cleanup checks. Uses the existing OCR reader only after unresolved native cleanup; not source correction or verified artwork ownership.</small></div>
           <label class="checkbox-label"><input id="fragments" type="checkbox"> Include review-only fragment previews</label>
         </div>
         <p id="configuration" class="note">Loading local settings…</p>

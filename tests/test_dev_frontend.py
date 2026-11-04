@@ -419,6 +419,88 @@ class ViewerTests(unittest.TestCase):
             else:
                 pipeline.assert_not_called()
 
+    def test_enclosure_and_localization_options_are_explicit_and_require_guards(self):
+        defaults = s.options({},render_enabled=True)
+        self.assertEqual(defaults['layout_policy'],'source-local')
+        self.assertFalse(defaults['source_localization'])
+        config = replace(self.config,fonts=self.root/'fonts.json')
+        runner = Mock()
+        app = s.App(config,runner=runner)
+        for settings in ({'layout_policy':True},{'layout_policy':'unknown'},{'source_localization':1},
+                         {'source_localization':True},{'layout_policy':'enclosed-retry'},
+                         {'source_localization':True,'mode':'ocr'},
+                         {'source_localization':True,'replacement_policy':'confidence-gated','render_policy':'conservative'},
+                         {'localization_model':'unconfigured'},{'localization_plan':'/etc/passwd'}):
+            with self.subTest(settings=settings),self.assertRaises(s.RequestError):app.start(image_bytes(),settings)
+        runner.assert_not_called()
+        allowed=s.options({'layout_policy':'enclosed-retry','source_localization':True,
+            'replacement_policy':'confidence-gated'},render_enabled=True)
+        self.assertTrue(allowed['source_localization'])
+
+    def test_http_experiments_reach_real_coordinator_survive_retry_and_restore(self):
+        import main
+        from tests.rendering.test_localized_strokes import LocalizationPipelineTests
+        from tralens.ocr.automatic_units import propose_page_from_boxes
+        from tralens.rendering import automatic, best_effort
+        fixture=LocalizationPipelineTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        f=fixture.f
+        config=replace(self.config,fonts=fixture.pipeline.fonts,model_root=f.weights)
+        def factory(image,**kwargs):
+            batch=propose_page_from_boxes(f.boxes,image,complementary_ownership=True,regroup_companions=True)
+            batch=replace(batch,proposals=tuple(replace(p,structural_reasons=p.structural_reasons+('unknown_region_ownership',))
+                if p.member_ids==('localized',) else p for p in batch.proposals))
+            return SimpleNamespace(raw_detections=[f.boxes],automatic_unit_proposals=[batch],
+                process_images=Mock(),ocr=SimpleNamespace(close=Mock(),predict=f.engine.ocr.predict),
+                paddle_provenance=f.engine.paddle_provenance,image_path=str(image))
+        original=main.run_pipeline
+        def pipeline(*args,**kwargs):
+            return original(*args,**kwargs,ocr_factory=factory,runtime=SimpleNamespace(generate=fixture.pipeline.provider))
+        app=s.App(config);http=self.serve(app)
+        opts=dict(mode='render',layout_policy='enclosed-retry',source_localization=True,replacement_policy='confidence-gated')
+        with patch.object(main,'run_pipeline',side_effect=pipeline), \
+                patch.object(automatic,'derive_plan',side_effect=fixture.native), \
+                patch.object(best_effort,'native_plan',side_effect=automatic.AutomaticSkip('fixture_failure','synthetic coverage')):
+            status,_,body=self.request(http,'POST','/api/jobs',f.image.read_bytes(),
+                {'X-Tralens-Token':app.token,'X-Tralens-Options':json.dumps(opts)})
+            self.assertEqual(status,202,body)
+            identity=json.loads(body)['id'];self.assertTrue(app.job(identity)['done'].wait(15))
+            view=app.snapshot(identity)
+            self.assertIsNone(view['error'],view)
+            self.assertEqual(view['source_localization']['calls'],1)
+            self.assertEqual(view['source_localization']['predictions_consumed'],1)
+            self.assertEqual(view['layout_policy'],'enclosed-retry')
+            self.assertEqual(view['rendering_coverage']['rendered'],2)
+            self.assertIn('run/rendering-native/composite.png',view['artifacts'])
+            self.assertTrue(any(u['localized_cleanup_attempt'] for u in view['units']))
+            directory=app.job(identity)['directory']
+            old={p.relative_to(directory):p.read_bytes()for p in directory.rglob('*')if p.is_file()}
+            status,_,body=self.request(http,'POST',f'/api/jobs/{identity}/retry',b'{}',
+                {'X-Tralens-Token':app.token,'Content-Type':'application/json'})
+            self.assertEqual(status,202,body)
+            retry=json.loads(body)['id'];self.assertTrue(app.job(retry)['done'].wait(15))
+            self.assertEqual(app.job(retry)['options'],app.job(identity)['options'])
+            self.assertIsNone(app.snapshot(retry)['error'])
+        for path,data in old.items():self.assertEqual((directory/path).read_bytes(),data)
+        runner=Mock(side_effect=AssertionError('restoration must not infer'))
+        restored=s.App(config,runner=runner)
+        self.assertEqual(restored.job(identity)['options'],app.job(identity)['options'])
+        self.assertEqual(restored.snapshot(identity)['source_localization']['calls'],1)
+        runner.assert_not_called()
+
+    def test_legacy_pipeline_restores_executed_enclosure_and_localization_policy(self):
+        directory=self.config.root/('c'*32);(directory/'run').mkdir(parents=True)
+        data=image_bytes();(directory/'input.png').write_bytes(data)
+        pipeline=dict(status='partial',source=dict(sha256=s.hashlib.sha256(data).hexdigest(),size=[100,100]),
+            render_policy='best-effort',translation_policy='coverage-first',replacement_policy=dict(name='confidence-gated'),
+            layout_policy='enclosed-retry',source_localization=dict(enabled=True,calls=2,predictions_consumed=2))
+        (directory/'run/pipeline.json').write_text(json.dumps(pipeline))
+        app=s.App(self.config,runner=Mock())
+        view=app.snapshot('c'*32)
+        self.assertEqual(view['options']['layout_policy'],'enclosed-retry')
+        self.assertTrue(view['options']['source_localization'])
+        self.assertEqual(view['source_localization']['calls'],2)
+        self.assertFalse((directory/'viewer.json').exists())
+
     def test_frontend_respects_ollama_host_and_explicit_endpoint_override(self):
         from tools.dev_frontend import configured_endpoint
         for host, expected in (
@@ -465,7 +547,7 @@ main(['--help'])
             self.skipTest('optional local evidence unavailable; Node.js for frontend state checks')
         script = r'''
 const assert = require('node:assert/strict');
-const {previewStates, progressView, outputReady, missingOutputMessage, qualityNotice} = require(process.argv[1]);
+const {previewStates, progressView, outputReady, missingOutputMessage, qualityNotice, localizationNotice} = require(process.argv[1]);
 const base = {status: 'running', stage: 'ocr', preview_stage: 'ocr', options: {mode: 'render'},
   detections: [], units: [], artifacts: [], rendering_coverage: null, error: null};
 assert.equal(previewStates(null, true).original.available, true);
@@ -493,6 +575,15 @@ assert.match(qualityNotice(protectedRun).copy, /paired rereads/);
 assert.match(qualityNotice(protectedRun).copy, /1 translations kept without repainting/);
 assert.equal(qualityNotice(protectedRun).action, null);
 assert.equal(qualityNotice(base), null);
+assert.equal(localizationNotice(base), '');
+assert.match(localizationNotice({...base, source_localization: {enabled: true}}), /pending calls/);
+const localized = {...finished, source_localization: {enabled: true, requested: 2, calls: 2,
+  predictions_consumed: 2, budget_missed: 4}};
+assert.match(localizationNotice(localized), /2 calls, 2 predictions reaching cleanup, 4 budget exclusions/);
+const cropFailed = {...finished, source_localization: {enabled: true, error: 'reader failed'}};
+assert.match(localizationNotice(cropFailed), /not recorded calls/);
+assert.match(localizationNotice(cropFailed), /Crop pass failed: reader failed/);
+assert.doesNotMatch(localizationNotice(cropFailed), /pending|0 calls/);
 const skipped = {...finished, artifacts: [], rendering_coverage: null, units: [],
   rendering_skipped: 'no_strict_translations'};
 assert.equal(previewStates(skipped).final.state, 'skipped');

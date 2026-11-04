@@ -56,7 +56,15 @@ function qualityNotice(data, rereadAvailable = false) {
     (counts ? `${counts.actual_replacements} image replacements; ${counts.bound_translations_without_replacement} translations kept without repainting. ` : "") +
     "Untranslated text and wrong readings may remain. This is an unverified candidate—not a finished translated page.", action: null};
 }
-if (typeof module !== "undefined" && module.exports) module.exports = {previewStates, progressView, outputReady, missingOutputMessage, qualityNotice};
+function localizationNotice(data) {
+  const crop = data?.source_localization;
+  if (!crop?.enabled) return "";
+  const unknown = data.status === "running" ? "pending" : "not recorded";
+  return ` Experimental crop localization: ${crop.requested ?? unknown} requested, ${crop.calls ?? unknown} calls, ${crop.predictions_consumed ?? unknown} predictions reaching cleanup, ${crop.budget_missed ?? unknown} budget exclusions. Model agreement does not certify correctness.` +
+    (crop.error ? ` Crop pass failed: ${crop.error}` : "") +
+    (crop.failed ? ` ${crop.failed} crop predictions failed.` : "");
+}
+if (typeof module !== "undefined" && module.exports) module.exports = {previewStates, progressView, outputReady, missingOutputMessage, qualityNotice, localizationNotice};
 
 if (typeof document !== "undefined") {
   const $ = id => document.getElementById(id);
@@ -96,12 +104,16 @@ if (typeof document !== "undefined") {
     for (const id of ["file", "mode", "budget", "policy", "translation-policy", "fragments"]) $(id).disabled = value;
     $("replacement-policy").disabled = value || $("mode").value !== "render";
     $("quality-reread").disabled = value || !config?.quality_reread_available || $("mode").value !== "render" || $("translation-policy").value !== "coverage-first";
+    $("layout-policy").disabled = value || $("mode").value !== "render";
+    $("source-localization").disabled = value || $("mode").value !== "render";
     $("quality-retry").disabled = value || !config?.render_enabled;
   }
   function settingsSummary() {
     const mode = {ocr: "OCR only", translate: "Through translation", render: "Through final rendering"}[$("mode").value];
     $("settings-summary").textContent = mode + ($("mode").value === "ocr" ? " · no model calls" : ` · ${$("translation-policy").value === "coverage-first" ? "coverage first" : "conservative translation"} · up to ${$("budget").value} translation calls`);
     if ($("mode").value === "render") $("settings-summary").textContent += $("replacement-policy").value === "confidence-gated" ? " · artwork checks" : " · broad replacement";
+    if ($("mode").value === "render" && $("layout-policy").value === "enclosed-retry") $("settings-summary").textContent += " · enclosure retry";
+    if ($("mode").value === "render" && $("source-localization").checked) $("settings-summary").textContent += " · requested crop OCR";
     setBusy(busy);
   }
   function ownership() {
@@ -268,11 +280,15 @@ if (typeof document !== "undefined") {
       }
       if (unit.input_kind === "coverage_text_region" && unit.target) box.append(node("p", "Coverage-first OCR region: ownership, reading order and sentence completeness are not verified.", "note"));
       if (["clean", "final"].includes(selectedView) && unit.warnings.length) box.append(node("p", unit.warnings.join("\n"), "warning"));
-      if (unit.reasons.length || unit.render_reason || unit.fragments.length) {
+      if (unit.reasons.length || unit.render_reason || unit.fragments.length || unit.crop_request_reason || unit.enclosure_layout_attempt) {
         const details = node("details"); details.open = open.has(unit.id); details.append(node("summary", "Why / details"));
         details.append(node("p", `Source boxes: ${unit.member_ids.join(", ")} · ${unit.status}`));
         for (const reason of unit.reasons) details.append(node("p", friendly(reason)));
         if (unit.render_reason) details.append(node("p", unit.render_reason));
+        if (unit.crop_request_reason) details.append(node("p", `Crop localization: ${friendly(unit.crop_request_status)} · ${friendly(unit.crop_request_reason)}`));
+        for (const [label, attempt] of [["Localized cleanup", unit.localized_cleanup_attempt], ["Enclosure lettering", unit.enclosure_layout_attempt]]) {
+          if (attempt) details.append(node("p", `${label}: ${friendly(attempt.status)}${attempt.reason ? " · " + attempt.reason : ""}`));
+        }
         for (const fragment of unit.fragments) {
           details.append(node("p", `Review-only fragment: ${friendly(fragment.status)}`));
           for (const [, translation] of fragment.translations) details.append(node("pre", translation));
@@ -323,6 +339,8 @@ if (typeof document !== "undefined") {
       $("translation-policy").value = data.options.translation_policy || "conservative";
       $("replacement-policy").value = data.options.replacement_policy || "all";
       $("quality-reread").checked = Boolean(data.options.quality_reread);
+      $("layout-policy").value = data.options.layout_policy || "source-local";
+      $("source-localization").checked = Boolean(data.options.source_localization);
       settingsJob = data.id; settingsSummary();
     }
     if (!pendingFile) $("filename").textContent = `Saved run · ${data.id.slice(0, 8)}`;
@@ -342,6 +360,7 @@ if (typeof document !== "undefined") {
     $("render-note").textContent = data.rendering_skipped ? `No rendered page: ${friendly(data.rendering_skipped)}. Inspect Translation for the available results and blockers.` : coverage
       ? `${coverage.rendered} of ${coverage.saved_units} saved units replaced · ${data.quality?.best_effort_rendered || 0} best-effort.${coverage.partial_output ? " Other source regions remain unchanged." : " Candidate output only."}`
       : data.options.mode === "ocr" ? "OCR-only run: translation and rendering were not requested." : "Translation produces text previews; rendering produces the cleaned and final page images.";
+    $("render-note").textContent += localizationNotice(data);
     showError(data.error ? data.error.message || String(data.error) : "");
     loadSource(artifactUrl(data.input));
     if ($("follow").checked) selectedView = progressView(data);
@@ -392,7 +411,9 @@ if (typeof document !== "undefined") {
     const rendering = $("mode").value === "render";
     const settings = {mode: $("mode").value, max_attempts: Number($("budget").value), allow_fragments: $("fragments").checked, render_policy: $("policy").value, translation_policy: $("translation-policy").value,
       replacement_policy: rendering ? $("replacement-policy").value : "all",
-      quality_reread: rendering && $("translation-policy").value === "coverage-first" && !$("quality-reread").disabled && $("quality-reread").checked};
+      quality_reread: rendering && $("translation-policy").value === "coverage-first" && !$("quality-reread").disabled && $("quality-reread").checked,
+      layout_policy: rendering ? $("layout-policy").value : "source-local",
+      source_localization: rendering && $("source-localization").checked};
     setBusy(true); showError(""); $("status").textContent = retry ? "Starting a fresh run with the saved image…" : "Uploading original image…";
     try {
       const result = retry
@@ -432,7 +453,7 @@ if (typeof document !== "undefined") {
       if (context.isPointInPath(path, x, y)) { const owner = owners.get(JSON.stringify(detection.source_id)); if (owner) chooseUnit(owner.unit.id, true); break; }
     }
   });
-  for (const id of ["mode", "budget", "translation-policy", "replacement-policy", "quality-reread"]) $(id).addEventListener("input", settingsSummary);
+  for (const id of ["mode", "budget", "translation-policy", "replacement-policy", "quality-reread", "layout-policy", "source-localization"]) $(id).addEventListener("input", settingsSummary);
   for (const eventName of ["dragenter", "dragover"]) document.addEventListener(eventName, event => {
     if (event.dataTransfer?.types.includes("Files")) { event.preventDefault(); if (!busy) document.body.classList.add("dragging"); }
   });

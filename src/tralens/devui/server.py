@@ -48,11 +48,11 @@ class Config:
 
 def options(value, *, render_enabled):
     if type(value) is not dict or set(value) - {'mode', 'max_attempts', 'allow_fragments', 'render_policy', 'translation_policy',
-                                             'replacement_policy', 'quality_reread'}:
+                                             'replacement_policy', 'quality_reread', 'layout_policy', 'source_localization'}:
         raise RequestError('Unknown run options.')
     result = dict(mode='render' if render_enabled else 'ocr', max_attempts=64,
         allow_fragments=False, render_policy='best-effort', translation_policy='coverage-first',
-        replacement_policy='all', quality_reread=False)
+        replacement_policy='all', quality_reread=False, layout_policy='source-local', source_localization=False)
     result.update(value)
     if type(result['mode']) is not str or result['mode'] not in ('ocr', 'translate', 'render'):
         raise RequestError('Choose OCR, translation, or rendering.')
@@ -74,6 +74,14 @@ def options(value, *, render_enabled):
         raise RequestError('Quality rereads require Final rendering and Coverage first translation.')
     if result['replacement_policy'] != 'all' and result['mode'] != 'render':
         raise RequestError('Image replacement checks require Final rendering.')
+    if type(result['layout_policy']) is not str or result['layout_policy'] not in ('source-local', 'enclosed-retry'):
+        raise RequestError('Unknown enclosure layout policy.')
+    if type(result['source_localization']) is not bool:
+        raise RequestError('Source localization option must be a boolean.')
+    if (result['layout_policy'] != 'source-local' or result['source_localization']) and (
+            result['mode'] != 'render' or result['render_policy'] != 'best-effort'
+            or result['replacement_policy'] != 'confidence-gated'):
+        raise RequestError('Enclosure retries and source localization require Final rendering, Best effort, and Native cleanup + OCR checks.')
     return result
 
 
@@ -115,6 +123,8 @@ def execute_job(config, job):
         return run_pipeline(job['image'], job['directory']/'run', fonts=config.fonts,
             font_id=config.font_id, render_policy=settings['render_policy'],
             replacement_policy=settings.get('replacement_policy', 'all'),
+            layout_policy=settings.get('layout_policy', 'source-local'),
+            source_localization=settings.get('source_localization', False),
             quality_reread=settings.get('quality_reread', False), reread_model=config.reread_model,
             manga_reread_model=config.manga_reread_model if settings.get('quality_reread') else None, **kwargs)
     from ..translation.workflow import run_preview
@@ -159,7 +169,9 @@ class App:
                     settings = {**settings, 'translation_policy': preview.get('settings', {}).get('translation_policy', pipeline.get('translation_policy', 'conservative'))}
                 replacement = pipeline.get('replacement_policy', {})
                 settings = {'replacement_policy': replacement.get('name', 'all') if isinstance(replacement, dict) else replacement,
-                    'quality_reread': bool(pipeline.get('quality_reread', {}).get('enabled')), **settings}
+                    'quality_reread': bool(pipeline.get('quality_reread', {}).get('enabled')),
+                    'layout_policy': pipeline.get('layout_policy', 'source-local'),
+                    'source_localization': bool(pipeline.get('source_localization', {}).get('enabled')), **settings}
                 settings = options(settings, render_enabled=True)  # View old jobs even without a current font manifest.
                 images = [directory/name for name in ('input.png', 'input.jpg') if (directory/name).is_file()]
                 if len(images) != 1 or images[0].is_symlink():
@@ -324,6 +336,7 @@ class App:
         pipeline = checkpoint(directory/'run/pipeline.json', notices)
         preview = checkpoint(directory/'run/preview/preview.json', notices)
         rendering = checkpoint(directory/'run/rendering/manifest.json', notices)
+        native = checkpoint(directory/'run/rendering-native/manifest.json', notices) if job['options'].get('source_localization') else None
         preview = preview or {}
         rendering = rendering or {}
         replacement = rendering.get('replacement_policy', (pipeline or {}).get('replacement_policy', 'all'))
@@ -332,6 +345,8 @@ class App:
         detections = [dict(source_id=d['source_id'], text=d.get('text', ''),
             confidence=d.get('confidence'), polygon=d['polygon']) for d in raw[0]][:512]
         rendered = {r['unit_id']: r for r in rendering.get('units', [])}
+        plan = rendering.get('localization_request_plan') or (native or {}).get('localization_request_plan') or {}
+        crop_requests = {r['unit_id']: r for r in plan.get('records', [])}
         units = []
         for record in preview.get('units', [])[:512]:
             unit = record['unit']
@@ -349,7 +364,11 @@ class App:
                     [reason for outcome in result.get('outcomes', []) for reason in outcome.get('reasons', [])],
                 fragments=fragments, render_status=row.get('status'), render_reason=row.get('reason'),
                 quality=row.get('render_quality', 'conservative') if row.get('status') == 'automatic_composed' else None,
-                warnings=(row.get('best_effort') or {}).get('warnings', [])))
+                warnings=(row.get('best_effort') or {}).get('warnings', []),
+                crop_request_reason=crop_requests.get(unit['unit_id'], {}).get('reason'),
+                crop_request_status=crop_requests.get(unit['unit_id'], {}).get('status'),
+                localized_cleanup_attempt=row.get('localized_cleanup_attempt'),
+                enclosure_layout_attempt=row.get('enclosure_layout_attempt')))
         if job['status'] == 'running':
             stage = 'rendering' if pipeline and pipeline.get('stage') == 'rendering' else preview.get('stage', 'starting')
             if stage == 'finished':
@@ -377,6 +396,8 @@ class App:
             replacement_policy=replacement,
             replacement_confidence=rendering.get('replacement_confidence'),
             quality_reread=(pipeline or {}).get('quality_reread'),
+            layout_policy=rendering.get('layout_policy', (pipeline or {}).get('layout_policy', 'source-local')),
+            source_localization=(pipeline or {}).get('source_localization'),
             error=job['error'] or (pipeline or {}).get('error') or preview.get('error'),
             artifacts=artifacts, notices=notices, output_directory=str(directory))
 
