@@ -57,7 +57,7 @@ def quality_refiner(*, endpoint, model, manga_model):
 
 def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28,
                  max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort',
-                 replacement_policy='all', min_ocr_confidence=None, quality_reread=False,
+                 replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', quality_reread=False,
                  reread_model='qwen3.8:latest', manga_reread_model=None, **preview_options):
     """Connect the existing OCR/translation preview to automatic rendering.
 
@@ -94,6 +94,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         text_mask_model=text_mask_model, render_policy=render_policy)
     if replacement_policy != 'all' or min_ocr_confidence is not None:
         rendering_options.update(replacement_policy=replacement_policy, min_ocr_confidence=min_ocr_confidence)
+    if layout_policy != 'source-local':
+        rendering_options['layout_policy'] = layout_policy
     checked = preflight_automatic(**rendering_options)
     report = {'schema_version': 1, 'purpose': 'automatic_pipeline_candidate', 'status': 'running',
         'stage': 'preview', 'source': checked['source'], 'fonts_sha256': checked['fonts_sha256'],
@@ -107,6 +109,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         report['text_mask_model'] = checked['text_mask_model']
     if 'replacement_policy' in checked:
         report['replacement_policy'] = checked['replacement_policy']
+    if 'layout_policy' in checked:
+        report['layout_policy'] = checked['layout_policy']
     if quality_reread:
         report['quality_reread'] = {'enabled': True, 'model': reread_model, 'truth_approval': False}
     output.mkdir(mode=0o700)
@@ -226,7 +230,9 @@ def main(argv=None):
     parser.add_argument('--replacement-policy', choices=('all', 'confidence-gated'),
                         help='render: optional experimental OCR/native-cleanup confidence gate; translation coverage is unchanged')
     parser.add_argument('--min-ocr-confidence', type=float,
-                        help='confidence-gated render: weakest raw main-line score 0..1; provisional default 0.70, not an accuracy probability')
+                         help='confidence-gated render: weakest raw main-line score 0..1; provisional default 0.70, not an accuracy probability')
+    parser.add_argument('--layout-policy', choices=('source-local', 'enclosed-retry'),
+                         help='render: opt-in closed original-space layout retry; unchanged native cleanup and minimum font size')
     parser.add_argument('--quality-reread', action='store_true',
                         help='render: opt-in enclosed terminal grouping and paired visual/line OCR rereads; original readings retained')
     parser.add_argument('--reread-model', default='qwen3.8:latest', help='existing local vision model for quality rereads; never downloaded')
@@ -240,7 +246,7 @@ def main(argv=None):
         parser.error('--render requires --run-local-model and --fonts; no engine was initialized')
     if not args.render and (args.quality_reread or args.manga_reread_model is not None):
         parser.error('quality reread options require --render')
-    if not args.render and any(getattr(args, name) is not None for name in ('fonts', 'font_id', 'min_size', 'max_size', 'max_units', 'background_method', 'text_mask_model', 'render_policy', 'replacement_policy', 'min_ocr_confidence')):
+    if not args.render and any(getattr(args, name) is not None for name in ('fonts', 'font_id', 'min_size', 'max_size', 'max_units', 'background_method', 'text_mask_model', 'render_policy', 'replacement_policy', 'min_ocr_confidence', 'layout_policy')):
         parser.error('font/rendering options require --render')
     # Keep help/import and missing opt-in paths free of OCR/provider imports.
     from tralens.translation.workflow import run_preview
@@ -258,7 +264,7 @@ def main(argv=None):
                 max_size=28 if args.max_size is None else args.max_size, max_units=args.max_units,
                 background_method=args.background_method or 'auto', text_mask_model=args.text_mask_model,
                 render_policy=args.render_policy or 'best-effort', replacement_policy=args.replacement_policy or 'all',
-                min_ocr_confidence=args.min_ocr_confidence, quality_reread=args.quality_reread,
+                min_ocr_confidence=args.min_ocr_confidence, layout_policy=args.layout_policy or 'source-local', quality_reread=args.quality_reread,
                 reread_model=args.reread_model, manga_reread_model=args.manga_reread_model, **preview_options)
             coverage = report['coverage'] or {}
             print(f"{report['status']}: {args.output / 'pipeline.json'}; "

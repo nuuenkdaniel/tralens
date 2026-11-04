@@ -338,7 +338,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', '../translation/coverage.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', '../translation/coverage.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py')})
 
 
 def _report_html(report):
@@ -416,7 +416,13 @@ def _font(fonts_doc, font_id):
     return font_id, available[font_id]
 
 
-def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None):
+def layout_settings(policy, render_policy, confidence_settings):
+    n.require(type(policy) is str and policy in ('source-local', 'enclosed-retry'), 'unknown automatic layout policy')
+    n.require(policy == 'source-local' or (render_policy == 'best-effort' and confidence_settings is not None),
+              'enclosed-retry requires best-effort rendering and confidence-gated replacement')
+
+
+def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local'):
     """Check rendering prerequisites before upstream inference, without a preview.
 
     This is not erase permission: run_automatic still validates the complete saved
@@ -424,6 +430,7 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
     """
     confidence_settings = _options(min_size, max_size, max_units, background_method, render_policy,
                                    replacement_policy, min_ocr_confidence)
+    layout_settings(layout_policy, render_policy, confidence_settings)
     image, fonts = Path(image).absolute(), Path(fonts).absolute()
     content = n.read_explicit(image, 32*1024*1024)
     font_manifest = n.read_explicit(fonts, 256*1024)
@@ -439,16 +446,19 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
     checked = {'source': source, 'fonts_sha256': n.digest(font_manifest), 'font_id': selected, 'render_policy': render_policy}
     if confidence_settings is not None:
         checked['replacement_policy'] = confidence_settings
+    if layout_policy != 'source-local':
+        checked['layout_policy'] = layout_policy
     if text_mask_model is not None:
         from . import segmentation
         checked['text_mask_model'] = segmentation.model_spec(text_mask_model)
     return checked
 
 
-def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None):
+def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local'):
     """All current strict translated candidates, with explicit machine skip states."""
     confidence_settings = _options(min_size, max_size, max_units, background_method, render_policy,
                                    replacement_policy, min_ocr_confidence)
+    layout_settings(layout_policy, render_policy, confidence_settings)
     from . import restoration
     from ..translation import coverage as tc
     model_spec = None
@@ -501,8 +511,11 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         'engine': {'pillow': n.pillow_version, 'opencv': cv2.__version__, 'raqm': n.features.version_feature('raqm'),
                    'harfbuzz': n.features.version_feature('harfbuzz'), 'freetype': n.features.version_module('freetype2')}}
     plans, tiles, content_masks = {}, {}, {}
+    layout_retry_plans = {}
     if confidence_settings is not None:
         report['replacement_policy'] = confidence_settings
+    if layout_policy != 'source-local':
+        report['layout_policy'] = layout_policy
     restoration_context = None
     text_mask, text_mask_error = None, None
     if model_spec is not None:
@@ -719,6 +732,11 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             existing = plans.get(i)
             fallback_work = n.LayoutWork()
             routes = ('source_local', 'native_hint', 'footprint') if row['input_kind'] == tc.KIND else ('reuse', 'native_hint', 'footprint')
+            if row['input_kind'] == tc.KIND and model_spec is not None:
+                # Explicit optional evidence must reach coverage regions too.
+                # Preserve native attempts/strict reservations; use the same
+                # single page inference and unchanged association/repair guards.
+                routes = (*routes[:-1], 'semantic', routes[-1])
             if confidence_settings is not None:
                 routes = tuple(route for route in routes if route != 'footprint')
             for route in routes:
@@ -751,6 +769,17 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                         if confidence_settings is not None:
                             plan = reserve_layout(plan, reserved)
                         method = plan.evidence['cleanup_method']
+                    elif route == 'semantic':
+                        extra_work = pixels*len(row['binding']['member_ids'])
+                        n.budget_check(work+extra_work <= MAX_WORK, 'coverage semantic raster budget')
+                        work += extra_work
+                        plan = semantic_plan(row['binding'], row,
+                            AutomaticSkip('semantic_cleanup_unavailable', 'explicit semantic cleanup supplied no supported plan'))
+                        if confidence_settings is not None:
+                            plan = reserve_layout(plan, reserved)
+                        check(not ((plan.layout | plan.erase) & reserved).any(), 'region_collision',
+                              'semantic coverage plan touches prior committed output')
+                        method = row['cleanup_method']
                     else:
                         # Geometry/source checks are reused, not weakened. The
                         # artistic interpretation of the OCR footprint is weaker.
@@ -771,6 +800,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     light = float(np.dot(background, [.2126, .7152, .0722])) < 128
                     fill = [255, 255, 255] if light else [0, 0, 0]
                     fallback_style = {**style, 'fill': fill, 'outline_fill': [255-v for v in fill], 'outline': 1}
+                    if layout_policy == 'enclosed-retry' and plan.restored_pixels is None and plan.background is not None:
+                        layout_retry_plans[i] = PackedPlan(plan)
                     try:
                         layer, provenance, content = best_effort.fit(row['binding']['text'], font_data, coverage,
                             Image.fromarray(plan.layout.astype(np.uint8)*255), fallback_style, work=fallback_work)
@@ -799,7 +830,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     except ValueError as error:
                         raise AutomaticSkip('runtime_locality', str(error)) from error
                     plans[i], content_masks[i], tiles[i] = PackedPlan(plan), content.convert('1'), (layer.crop(box), box[:2])
-                    if not reuse:
+                    if not reuse and route != 'semantic':
                         row.pop('text_mask_method', None)
                     provenance['typography']['content_mask_artifact'] = f'unit-{i:03d}-content-mask.png'
                     row['best_effort_attempts'].append({'method': method, 'status': 'planned'})
@@ -822,6 +853,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     break
                 except (ValueError, OSError, KeyError, TypeError) as error:
                     row['best_effort_attempts'].append({'method': {'source_local': 'flat_fill_uncertain_region', 'reuse': 'reuse_cleanup', 'native_hint': 'native_contrast_hint',
+                        'semantic': 'explicit_semantic_mask',
                         'footprint': 'ocr_footprint_replacement'}[route],
                         'status': 'failed', 'reason_code': getattr(error, 'code', 'validation'), 'reason': str(error)})
                     if isinstance(error, n.ResourceLimit):
@@ -844,6 +876,82 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                                              'erasure_obstacle', 'replacement_layout_confidence'):
                     row.update(reason_code='replacement_cleanup_confidence',
                         reason='Native-mask cleanup/layout routes failed; coarse footprint replacement is disabled. Translation retained.')
+    if layout_policy == 'enclosed-retry':
+        from . import layout_enclosures
+        enclosure_context = None
+        enclosure_error = None
+        retry_indices = [i for i, _ in pairs if report['units'][i]['status'] == 'skipped'
+            and report['units'][i]['reason_code'] == 'replacement_layout_confidence']
+        for i in retry_indices:
+            row = report['units'][i]
+            previous = layout_retry_plans.get(i, plans.get(i))
+            if previous is None or previous.restored_pixels is not None or previous.background is None:
+                continue
+            attempt = {'policy': layout_enclosures.POLICY, 'status': 'rejected',
+                       'original_failure': row['reason_code']}
+            row['enclosure_layout_attempt'] = attempt
+            try:
+                if enclosure_context is None and enclosure_error is None:
+                    try:
+                        n.budget_check(work+3*pixels <= MAX_WORK, 'enclosure original geometry work budget')
+                        n.require(context is not None, 'original geometry unavailable for enclosure retry')
+                        enclosure_context = layout_enclosures.Enclosures(rgb, raw, context)
+                        work += 3*pixels
+                    except (ValueError, OSError) as error:
+                        enclosure_error = str(error)
+                n.require(enclosure_error is None, enclosure_error or 'enclosure geometry unavailable')
+                unit_work = pixels*len(row['binding']['member_ids'])
+                n.budget_check(work+unit_work <= MAX_WORK, 'enclosure member raster work budget')
+                work += unit_work
+                plan = enclosure_context.expand(rgb, raw, row['binding']['member_ids'], previous, reserved)
+                mask = Image.fromarray(plan.layout.astype(np.uint8)*255)
+                attempt['evidence'] = plan.evidence['enclosure_layout']
+                try:
+                    layer, provenance, content = typography.layout_dialogue(row['binding']['text'], font_data, coverage, mask, style)
+                    attempt['typesetting'] = 'comfortable_margins'
+                except n.ResourceLimit:
+                    raise
+                except ValueError as error:
+                    if not str(error).startswith('overflow:'):
+                        raise
+                    # The measured enclosure already has 5px boundary clearance.
+                    # Relax extra comfort/leading, never the requested font floor.
+                    layer, provenance = n.layout(row['binding']['text'], font_data, coverage, mask,
+                        {**style, 'leading': 0})
+                    content = mask
+                    provenance['typography'] = {'policy': layout_enclosures.POLICY,
+                        'margin_pixels': 0, 'boundary_clearance_pixels': 5,
+                        'preferred_size': max(min_size, round(max_size*.9)),
+                        'below_requested_minimum': False, 'requested_minimum': min_size}
+                    attempt['typesetting'] = 'measured_boundary_margin_zero_extra_leading'
+                check(rc.layout_rejection(provenance, min_size) is None, 'replacement_layout_confidence',
+                      'enclosure lettering must meet the requested minimum')
+                alpha = np.asarray(layer.getchannel('A')) != 0
+                check(alpha.any() and not (alpha & (~plan.layout | plan.obstacles | reserved)).any(),
+                      'alpha_containment', 'enclosure text leaves supported original whitespace')
+                plate_pixels = np.asarray(rgb).copy()
+                apply_cleanup(plate_pixels, plan)
+                plate = Image.fromarray(plate_pixels)
+                composite = Image.alpha_composite(plate.convert('RGBA'), layer).convert('RGB')
+                audit = n.pixel_audit(rgb, plate, composite, plan.erase, alpha, plan.obstacles)
+                n.verify_pixel_audit(audit)
+                box = layer.getchannel('A').getbbox()
+                plans[i], tiles[i], content_masks[i] = PackedPlan(plan), (layer.crop(box), box[:2]), content.convert('1')
+                provenance['typography']['content_mask_artifact'] = f'unit-{i:03d}-content-mask.png'
+                row.update(status='ready', reason_code=None, reason=None, render_quality='best_effort',
+                    layout=provenance, mask_evidence=plan.evidence, candidate_pixel_audit=audit,
+                    candidate_audit_scope='isolated enclosure layout retry; unchanged validated native cleanup',
+                    outside_content_alpha_pixels=0,
+                    best_effort={'original_failure': attempt['original_failure'], 'reused_cleanup': True,
+                                 'warnings': ['Original closed flat-space hypothesis; balloon ownership and translation unverified.']})
+                row.setdefault('cleanup_method', plan.evidence.get('cleanup_method', 'flat_fill_uncertain_region'))
+                attempt['status'] = 'planned'
+                ready.append(i)
+                collisions.discard(i)
+                reserved |= occupied_reservation(plan, tiles[i])
+            except (ValueError, OSError, KeyError, TypeError) as error:
+                attempt.update(reason_code=getattr(error, 'code', 'validation'), reason=str(error),
+                               rejection_evidence=getattr(error, 'evidence', {}))
     erase_union = np.zeros((rgb.height, rgb.width), bool)
     alpha_union = np.zeros_like(erase_union)
     layout_union = np.zeros_like(erase_union)
