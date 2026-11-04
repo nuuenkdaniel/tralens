@@ -98,8 +98,12 @@ def polygon_mask(points, size, *, evidence=False):
     for p in points:
         require(type(p) is list and len(p) == 2, "invalid polygon vertex")
         if evidence:
+            # Detector polygons describe continuous page edges, not pixel
+            # indices. The OCR contract permits exactly width/height; rasterize
+            # that edge into the existing canvas without changing the source
+            # polygon. Reviewed edit geometry below still requires pixel bounds.
             require(all(type(v) in (int, float) and math.isfinite(v) for v in p)
-                    and 0 <= p[0] < size[0] and 0 <= p[1] < size[1], "invalid source geometry")
+                    and 0 <= p[0] <= size[0] and 0 <= p[1] <= size[1], "invalid source geometry")
         else:
             integer(p[0], 0, size[0] - 1)
             integer(p[1], 0, size[1] - 1)

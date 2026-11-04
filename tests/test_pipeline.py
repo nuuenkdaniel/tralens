@@ -86,6 +86,24 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(report['coverage']['partial_output'])
         self.provider.assert_called_once()
 
+    def test_valid_detector_page_edge_does_not_fail_unrelated_replacements(self):
+        from tralens.ocr.types import Text_Box
+        from tralens.ocr.automatic_units import propose_page_from_boxes
+        with Image.open(self.fixture.image) as source:
+            width,height=source.size
+        boxes=[Text_Box(b.paddle_box_id,.95,b.paddle_poly,b.paddle_text) for b in self.fixture.boxes]
+        boxes+=[Text_Box(2,.3,[[width-20,height-15],[width,height-15],
+            [width,height],[width-20,height]],'あ')]
+        self.fixture.engine.raw_detections=[boxes]
+        self.fixture.engine.automatic_unit_proposals=[propose_page_from_boxes(boxes,self.fixture.image,
+            complementary_ownership=True,regroup_companions=True)]
+        before=self.fixture.image.read_bytes()
+        result=self.run_pipeline(render_policy='best-effort',replacement_policy='confidence-gated')
+        self.assertEqual(result['status'],'partial',result)
+        self.assertIsNone(result['error'])
+        self.assertEqual(result['coverage']['rendered'],2)
+        self.assertEqual(self.fixture.image.read_bytes(),before)
+
     def test_invalid_text_mask_checkpoint_is_rejected_before_ocr_or_translation(self):
         invalid = self.root/'invalid.onnx'
         invalid.write_bytes(b'not the approved model')

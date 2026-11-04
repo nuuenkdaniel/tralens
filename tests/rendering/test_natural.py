@@ -30,6 +30,17 @@ class NaturalTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 polygon_mask(points, (10, 10))
 
+    def test_original_detection_can_end_on_continuous_page_edge_but_never_beyond_it(self):
+        points=rect(8,8,10,10);before=copy.deepcopy(points)
+        mask=np.asarray(polygon_mask(points,(10,10),evidence=True))!=0
+        expected=np.zeros((10,10),bool);expected[8:,8:]=True
+        self.assertTrue(np.array_equal(mask,expected))
+        self.assertEqual(points,before)
+        with self.assertRaises(ValueError):polygon_mask(points,(10,10))
+        for outside in (rect(8,8,10.01,10),rect(-.01,8,10,10),[[True,8],[10,8],[10,10]],
+                        [[8,8],[float('inf'),8],[10,10]]):
+            with self.assertRaises(ValueError):polygon_mask(outside,(10,10),evidence=True)
+
     def test_missing_coverage_blocks_before_drawing(self):
         with self.assertRaisesRegex(ValueError, "coverage"):
             layout("Hello", b"", frozenset(), Image.new("L", (20, 20), 255),
