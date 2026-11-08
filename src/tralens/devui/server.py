@@ -48,11 +48,12 @@ class Config:
 
 def options(value, *, render_enabled):
     if type(value) is not dict or set(value) - {'mode', 'max_attempts', 'allow_fragments', 'render_policy', 'translation_policy',
-                                             'replacement_policy', 'quality_reread', 'layout_policy', 'source_localization'}:
+                                             'replacement_policy', 'quality_reread', 'layout_policy', 'source_localization', 'visibility_policy'}:
         raise RequestError('Unknown run options.')
     result = dict(mode='render' if render_enabled else 'ocr', max_attempts=64,
         allow_fragments=False, render_policy='best-effort', translation_policy='coverage-first',
-        replacement_policy='all', quality_reread=False, layout_policy='source-local', source_localization=False)
+        replacement_policy='all', quality_reread=False, layout_policy='source-local', source_localization=False,
+        visibility_policy='replacement-only')
     result.update(value)
     if type(result['mode']) is not str or result['mode'] not in ('ocr', 'translate', 'render'):
         raise RequestError('Choose OCR, translation, or rendering.')
@@ -82,6 +83,10 @@ def options(value, *, render_enabled):
             result['mode'] != 'render' or result['render_policy'] != 'best-effort'
             or result['replacement_policy'] != 'confidence-gated'):
         raise RequestError('Enclosure retries and source localization require Final rendering, Best effort, and Native cleanup + OCR checks.')
+    if type(result['visibility_policy']) is not str or result['visibility_policy'] not in ('replacement-only','always-show'):
+        raise RequestError('Unknown translation visibility policy.')
+    if result['visibility_policy'] != 'replacement-only' and result['mode'] != 'render':
+        raise RequestError('Always show available translations requires Final rendering.')
     return result
 
 
@@ -125,6 +130,7 @@ def execute_job(config, job):
             replacement_policy=settings.get('replacement_policy', 'all'),
             layout_policy=settings.get('layout_policy', 'source-local'),
             source_localization=settings.get('source_localization', False),
+            visibility_policy=settings.get('visibility_policy', 'replacement-only'),
             quality_reread=settings.get('quality_reread', False), reread_model=config.reread_model,
             manga_reread_model=config.manga_reread_model if settings.get('quality_reread') else None, **kwargs)
     from ..translation.workflow import run_preview
@@ -172,6 +178,7 @@ class App:
                     'quality_reread': bool(pipeline.get('quality_reread', {}).get('enabled')),
                     'layout_policy': pipeline.get('layout_policy', 'source-local'),
                     'source_localization': bool(pipeline.get('source_localization', {}).get('enabled')), **settings}
+                settings.setdefault('visibility_policy',pipeline.get('visibility_policy','replacement-only'))
                 settings = options(settings, render_enabled=True)  # View old jobs even without a current font manifest.
                 images = [directory/name for name in ('input.png', 'input.jpg') if (directory/name).is_file()]
                 if len(images) != 1 or images[0].is_symlink():
@@ -368,7 +375,9 @@ class App:
                 crop_request_reason=crop_requests.get(unit['unit_id'], {}).get('reason'),
                 crop_request_status=crop_requests.get(unit['unit_id'], {}).get('status'),
                 localized_cleanup_attempt=row.get('localized_cleanup_attempt'),
-                enclosure_layout_attempt=row.get('enclosure_layout_attempt')))
+                enclosure_layout_attempt=row.get('enclosure_layout_attempt'),
+                display_status=row.get('display_status'),source_visibility=row.get('source_visibility'),
+                display_fallback=row.get('display_fallback')))
         if job['status'] == 'running':
             stage = 'rendering' if pipeline and pipeline.get('stage') == 'rendering' else preview.get('stage', 'starting')
             if stage == 'finished':
@@ -398,6 +407,8 @@ class App:
             quality_reread=(pipeline or {}).get('quality_reread'),
             layout_policy=rendering.get('layout_policy', (pipeline or {}).get('layout_policy', 'source-local')),
             source_localization=(pipeline or {}).get('source_localization'),
+            visibility_policy=rendering.get('visibility_policy',(pipeline or {}).get('visibility_policy','replacement-only')),
+            display_summary=rendering.get('display_summary',(pipeline or {}).get('display_summary')),
             error=job['error'] or (pipeline or {}).get('error') or preview.get('error'),
             artifacts=artifacts, notices=notices, output_directory=str(directory))
 

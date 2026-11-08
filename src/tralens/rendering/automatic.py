@@ -338,7 +338,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
 
 
 def _report_html(report):
@@ -355,6 +355,11 @@ def _report_html(report):
         +escape(json.dumps(report['coverage'], indent=2))+'</pre><p>Job '+escape(report['job_revision'])+'</p>'
         '<a href="manifest.json">Exact source, policy, hashes and per-unit reasons</a>')
     rows = []
+    if 'display_summary' in report:
+        rows.append('<h2>Visible translations — deliberately degraded display</h2><p><strong>'
+            +escape(report['display_summary'].get('warning','Fallback backing may cover artwork.'))
+            +'</strong> Captions retain their original source text; these are not clean replacements or verified reconstruction.</p><pre>'
+            +escape(json.dumps(report['display_summary'],indent=2))+'</pre>')
     if 'replacement_confidence' in report:
         rows.append('<p><strong>EXPERIMENTAL CONFIDENCE GATE: some translations remain text-only while their source lettering '
             'is preserved. OCR scores are not accuracy probabilities; cleanup support is assessed separately.</strong></p><pre>'
@@ -387,7 +392,11 @@ def _report_html(report):
             images = '<div class="grid">'+''.join('<figure><figcaption>'+name+'</figcaption><img alt="'+name+'" src="'
                 +f'unit-{index:03d}-specimen-{name}.png'+'"></figure>' for name in ('source', 'clean', 'text', 'composite'))+'</div>'
             images += '<div class="grid">'+''.join('<figure><figcaption>'+name+'</figcaption><img alt="'+name+'" src="'
-                +f'unit-{index:03d}-specimen-{name}.png'+'"></figure>' for name in ('foreground', 'applied-erase', 'layout', 'obstacles'))+'</div>'
+                 +f'unit-{index:03d}-specimen-{name}.png'+'"></figure>' for name in ('foreground', 'applied-erase', 'layout', 'obstacles'))+'</div>'
+        if row.get('display_fallback',{}).get('status') == 'displayed':
+            images += '<p><strong>'+escape(row['display_status'])+'; artwork may be obscured; source text removal is not certified.</strong></p>'
+            images += '<div class="grid">'+''.join('<figure><figcaption>'+suffix+'</figcaption><img alt="fallback '+suffix+'" src="'
+                +f'unit-{index:03d}-fallback-{suffix}.png'+'"></figure>' for suffix in ('patch','text','mask'))+'</div>'
         rows.append('<section><h2>'+escape(row['unit_id'])+' — '+escape(row['status'])+'</h2><p>'
             +escape(row.get('reason') or 'Automatically composed candidate; unverified wording/ownership')+'</p>'+background_note+typography_note+images
             +'<details><summary>Source evidence, settings and checks</summary><pre>'
@@ -428,7 +437,7 @@ def cleanup_settings(policy, render_policy, confidence_settings):
               'localized cleanup requires best-effort rendering and confidence-gated replacement')
 
 
-def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native'):
+def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', visibility_policy='replacement-only'):
     """Check rendering prerequisites before upstream inference, without a preview.
 
     This is not erase permission: run_automatic still validates the complete saved
@@ -438,6 +447,8 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
                                    replacement_policy, min_ocr_confidence)
     layout_settings(layout_policy, render_policy, confidence_settings)
     cleanup_settings(cleanup_policy, render_policy, confidence_settings)
+    from .visible_translations import settings as visibility_settings
+    visibility_settings(visibility_policy)
     image, fonts = Path(image).absolute(), Path(fonts).absolute()
     content = n.read_explicit(image, 32*1024*1024)
     font_manifest = n.read_explicit(fonts, 256*1024)
@@ -457,18 +468,22 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
         checked['layout_policy'] = layout_policy
     if cleanup_policy != 'native':
         checked['cleanup_policy'] = cleanup_policy
+    if visibility_policy != 'replacement-only':
+        checked['visibility_policy'] = visibility_policy
     if text_mask_model is not None:
         from . import segmentation
         checked['text_mask_model'] = segmentation.model_spec(text_mask_model)
     return checked
 
 
-def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', plan_localization=False):
+def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', plan_localization=False, visibility_policy='replacement-only'):
     """All current strict translated candidates, with explicit machine skip states."""
     confidence_settings = _options(min_size, max_size, max_units, background_method, render_policy,
                                    replacement_policy, min_ocr_confidence)
     layout_settings(layout_policy, render_policy, confidence_settings)
     cleanup_settings(cleanup_policy, render_policy, confidence_settings)
+    from . import visible_translations
+    visible_translations.settings(visibility_policy)
     n.require(type(plan_localization) is bool, 'localization planning needs explicit boolean enablement')
     if plan_localization:
         cleanup_settings('localized', render_policy, confidence_settings)
@@ -537,6 +552,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         report['layout_policy'] = layout_policy
     if cleanup_policy != 'native':
         report['cleanup_policy'] = cleanup_policy
+    if visibility_policy != 'replacement-only':
+        report['visibility_policy'] = visibility_policy
     restoration_context = None
     text_mask, text_mask_error = None, None
     if model_spec is not None:
@@ -605,7 +622,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         is_coverage = row['input_kind'] == tc.KIND
         if record['status'] != 'preview' or row['input_kind'] not in ('strict_utterance', tc.KIND):
             continue
-        if is_coverage and render_policy != 'best-effort':
+        if is_coverage and render_policy != 'best-effort' and visibility_policy != 'always-show':
             row.update(reason_code='coverage_requires_best_effort', reason='uncertain text-region replacements require best-effort rendering')
             continue
         try:
@@ -619,6 +636,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 binding = n.strict_result_binding(record, unit, request=contextual.get(unit.unit_id))
                 eligible += 1
             row.update(machine_selected=True, binding=binding)
+            if visibility_policy == 'always-show' and binding['text'] == unit.selected.text:
+                raise AutomaticSkip('replacement_unchanged_text', 'Target exactly matches source; intentionally keep original text.')
             if max_units is not None and eligible+coverage_eligible > max_units:
                 raise AutomaticSkip('evaluation_cap', 'explicit evaluation cap reached; candidate preserved, not rendered')
             if confidence_settings is not None:
@@ -758,7 +777,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 # Preserve native attempts/strict reservations; use the same
                 # single page inference and unchanged association/repair guards.
                 routes = (*routes[:-1], 'semantic', routes[-1])
-            if confidence_settings is not None:
+            if confidence_settings is not None or visibility_policy == 'always-show':
                 routes = tuple(route for route in routes if route != 'footprint')
             for route in routes:
                 reuse = route == 'reuse'
@@ -833,7 +852,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                         row['best_effort_attempts'].append({'method': 'source_local_art_overlay', 'status': 'attempted'})
                         layer, provenance, content = best_effort.fit(row['binding']['text'], font_data, coverage,
                             Image.fromarray(plan.layout.astype(np.uint8)*255), fallback_style, work=fallback_work)
-                    if confidence_settings is not None:
+                    if confidence_settings is not None or visibility_policy == 'always-show':
                         reason = rc.layout_rejection(provenance, min_size)
                         check(reason is None, 'replacement_layout_confidence', reason)
                     box = layer.getchannel('A').getbbox()
@@ -1080,6 +1099,31 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         protected[:] = True
         report['pixel_audit'] = n.pixel_audit(rgb, clean, composite, erase_union, alpha_union, protected)
         report['alpha_integrity'] = {'validated_pixels': 0, 'actual_pixels': 0, 'disagreement_pixels': 0}
+    display_tiles = {}
+    if visibility_policy == 'always-show':
+        native_composite, native_text = composite, text
+        try:
+            composite, text, patch_layer, fallback_text, display_mask, display_tiles, display_summary = visible_translations.display(
+                rgb, raw, units, report['units'], clean, native_text, native_composite, font_data, coverage, style,
+                max_displays=max(0,min(visible_translations.MAX_ATTEMPTS,(MAX_ARTIFACTS-24-14*len(plans))//3)),native_erase=erase_union)
+            report['display_summary'] = display_summary
+            report['pixel_audit_scope'] = 'native clean/text before separately audited opaque display overlays'
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            # Optional display failure cannot remove any successful native edit.
+            composite, text = native_composite, native_text
+            patch_layer, fallback_text = Image.new('RGBA',rgb.size), Image.new('RGBA',rgb.size)
+            display_mask = np.zeros((rgb.height,rgb.width),bool)
+            display_tiles = {}
+            for row in report['units']:
+                previous_display = row.get('display_status')
+                row['display_status'] = ('clean' if row['status']=='automatic_composed' else
+                    'missing' if 'binding' not in row else 'unchanged' if row.get('reason_code')=='replacement_unchanged_text'
+                    else 'undisplayed')
+                if previous_display in ('patch','caption'):
+                    row['display_fallback'].update(status='unresolved',reason='display_pass_rolled_back')
+            report['display_summary'] = {**visible_translations.display_counts(report['units']),
+                'policy':visible_translations.POLICY,'error':str(error),'rolled_back':True,'displayed_translations':
+                sum(r['status']=='automatic_composed'for r in report['units'])}
     rendered = sum(row['status'] == 'automatic_composed' for row in report['units'])
     strict_rendered = sum(row['status'] == 'automatic_composed' and row['input_kind'] == 'strict_utterance' for row in report['units'])
     report['coverage'] = {'saved_units': len(report['units']), 'strict_eligible': eligible, 'attempted': attempts,
@@ -1089,12 +1133,26 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         'strict_coverage_fraction': strict_rendered/eligible if eligible else None,
         'total_coverage_fraction': rendered/(eligible+coverage_eligible) if eligible+coverage_eligible else None,
         'has_rendered_output': bool(rendered)}
+    if visibility_policy == 'always-show':
+        report['native_alpha_integrity'] = report['alpha_integrity']
+        final_alpha = np.asarray(text.getchannel('A')) != 0
+        expected_alpha = alpha_union | (np.asarray(fallback_text.getchannel('A')) != 0)
+        report['alpha_integrity'] = {'validated_pixels':int(expected_alpha.sum()), 'actual_pixels':int(final_alpha.sum()),
+                                    'disagreement_pixels':int(np.count_nonzero(final_alpha != expected_alpha))}
+        report['coverage']['displayed_translations'] = report['display_summary'].get('displayed_translations',rendered)
+        report['coverage']['has_rendered_output'] = bool(report['coverage']['displayed_translations'])
+        if not report['display_summary'].get('rolled_back'):
+            report['coverage']['partial_output'] = bool(report['display_summary']['available_not_displayed']
+                                                       or report['display_summary']['missing_translations'])
+        protected &= ~display_mask
     best_count = sum(row['status'] == 'automatic_composed' and row.get('render_quality') == 'best_effort'
                      for row in report['units'])
     report['quality_summary'] = {'conservative_rendered': rendered-best_count, 'best_effort_rendered': best_count,
         'has_degraded_output': bool(best_count), 'best_effort_artwork_preservation': 'not_guaranteed' if best_count else 'not_used'}
     if confidence_settings is not None:
         report['replacement_confidence'] = rc.summary(report['units'])
+        if visibility_policy == 'always-show':
+            report['replacement_confidence']['note'] = 'Clean-replacement gate only; separate display_summary reports patches/captions and retained source text.'
     report['retained_masks'] = {'encoding': 'bitpacked_boolean_v1', 'plans': len(plans),
         'boolean_mask_bytes': sum(mask.nbytes for plan in plans.values() for mask in plan.masks.values()),
         'equivalent_unpacked_mask_bytes': 4*pixels*len(plans),
@@ -1131,9 +1189,19 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         add(name, value)
     for name, value in (('source', rgb), ('clean', clean), ('composite', composite), ('text', text)):
         png(name+'.png', value)
+    if visibility_policy == 'always-show':
+        for name, value in (('patch',patch_layer),('fallback-text',fallback_text),('native-text',native_text),('native-composite',native_composite)):
+            png(name+'.png',value)
+        png('fallback-mask.png',Image.fromarray(display_mask.astype(np.uint8)*255))
+        for i,(patch,lettering,xy) in display_tiles.items():
+            for suffix,tile in (('patch',patch),('text',lettering)):
+                layer = Image.new('RGBA',rgb.size);layer.paste(tile,xy)
+                png(f'unit-{i:03d}-fallback-{suffix}.png',layer)
+            mask = Image.new('L',rgb.size);mask.paste(patch.getchannel('A'),xy)
+            png(f'unit-{i:03d}-fallback-mask.png',mask)
     if text_mask is not None:
         png('text-probability.png', Image.fromarray(text_mask.raw))
-    for name, mask in (('erase-mask', erase_union), ('alpha-mask', alpha_union), ('protected-mask', protected),
+    for name, mask in (('erase-mask', erase_union), ('alpha-mask', np.asarray(text.getchannel('A'))!=0 if visibility_policy=='always-show' else alpha_union), ('protected-mask', protected),
                        ('cleanup-diff', np.any(np.asarray(clean) != np.asarray(rgb), axis=2)),
                        ('composite-diff', np.any(np.asarray(composite) != np.asarray(rgb), axis=2))):
         png(name+'.png', Image.fromarray(mask.astype(np.uint8)*255))

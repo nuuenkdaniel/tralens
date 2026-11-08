@@ -84,7 +84,8 @@ def quality_refiner(*, endpoint, model, manga_model):
 def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28,
                  max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort',
                  replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', quality_reread=False,
-                 reread_model='qwen3.8:latest', manga_reread_model=None, source_localization=False, **preview_options):
+                 reread_model='qwen3.8:latest', manga_reread_model=None, source_localization=False,
+                 visibility_policy='replacement-only', **preview_options):
     """Connect the existing OCR/translation preview to automatic rendering.
 
     Source/translation bindings stay strict; rendering quality follows the chosen
@@ -133,6 +134,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         rendering_options['layout_policy'] = layout_policy
     if source_localization:
         rendering_options['cleanup_policy'] = 'localized'
+    if visibility_policy != 'replacement-only':
+        rendering_options['visibility_policy'] = visibility_policy
     checked = preflight_automatic(**rendering_options)
     report = {'schema_version': 1, 'purpose': 'automatic_pipeline_candidate', 'status': 'running',
         'stage': 'preview', 'source': checked['source'], 'fonts_sha256': checked['fonts_sha256'],
@@ -152,6 +155,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         report['quality_reread'] = {'enabled': True, 'model': reread_model, 'truth_approval': False}
     if source_localization:
         report['source_localization'] = {'enabled': True, 'semantic_ownership_verified': False}
+    if visibility_policy != 'replacement-only':
+        report['visibility_policy'] = visibility_policy
     output.mkdir(mode=0o700)
     checkpoint = output/'pipeline.json'
     _atomic_json(checkpoint, report)
@@ -189,7 +194,7 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
             # preview binding. A source/font change cannot become a new job input.
             if preflight_automatic(**rendering_options) != checked or preview['input'] != checked['source']:
                 raise ValueError('pipeline image/font inputs changed after preflight')
-            if not strict_count and not (coverage_count and render_policy == 'best-effort'):
+            if not strict_count and not (coverage_count and (render_policy == 'best-effort' or visibility_policy == 'always-show')):
                 report['status'] = 'partial'
                 report['rendering'] = {'status': 'skipped', 'reason': 'coverage_requires_best_effort' if coverage_count else 'no_strict_translations',
                     'note': 'No composite was produced; original image and preview evidence remain unchanged.'}
@@ -200,7 +205,7 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                 render_preview = output/'preview/preview.json'
                 render_options = dict(rendering_options)
                 if source_localization:
-                    native_options = {**rendering_options, 'cleanup_policy': 'native'}
+                    native_options = {**rendering_options, 'cleanup_policy': 'native', 'visibility_policy':'replacement-only'}
                     started = time.monotonic()
                     native = run_automatic(preview=render_preview, output=output/'rendering-native',
                                            plan_localization=True, **native_options)
@@ -248,6 +253,10 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                      'quality_summary': rendered['quality_summary']}
                 if 'replacement_confidence' in rendered:
                     report['rendering']['replacement_confidence'] = rendered['replacement_confidence']
+                if 'display_summary' in rendered:
+                    report['display_summary'] = rendered['display_summary']
+                    report['rendering']['display_summary'] = rendered['display_summary']
+                    report['coverage']['displayed_translations'] = rendered['coverage']['displayed_translations']
                 report['coverage'].update(rendered=rendered['coverage']['rendered'],
                     strict_rendered=rendered['coverage']['strict_rendered'],
                     coverage_rendered=rendered['coverage']['coverage_rendered'],
@@ -295,7 +304,9 @@ def main(argv=None):
     parser.add_argument('--translation-context', choices=('isolated', 'nearby'), default='isolated',
                          help='opt-in nearby OCR context and one rendition per target; requires explicit generalist model/profile; no inferred reading order')
     parser.add_argument('--source-localization', action='store_true',
-                         help='opt-in bounded crop predictions using existing OCR; with render, retry failed cleanup as unverified whole strokes')
+                          help='opt-in bounded crop predictions using existing OCR; with render, retry failed cleanup as unverified whole strokes')
+    parser.add_argument('--visibility-policy', choices=('replacement-only','always-show'),default='replacement-only',
+                        help='render: always-show prioritizes visible translations; opaque patches may cover artwork, then nearby captions')
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--keep-alive", type=int, default=60)
     parser.add_argument("--num-predict", type=int, default=1024)
@@ -331,6 +342,8 @@ def main(argv=None):
         parser.error('--render requires --run-local-model and --fonts; no engine was initialized')
     if not args.render and (args.quality_reread or args.manga_reread_model is not None):
         parser.error('quality reread options require --render')
+    if not args.render and args.visibility_policy != 'replacement-only':
+        parser.error('--visibility-policy requires --render')
     if not args.render and any(getattr(args, name) is not None for name in ('fonts', 'font_id', 'min_size', 'max_size', 'max_units', 'background_method', 'text_mask_model', 'render_policy', 'replacement_policy', 'min_ocr_confidence', 'layout_policy')):
         parser.error('font/rendering options require --render')
     # Keep help/import and missing opt-in paths free of OCR/provider imports.
@@ -354,7 +367,8 @@ def main(argv=None):
                 background_method=args.background_method or 'auto', text_mask_model=args.text_mask_model,
                 render_policy=args.render_policy or 'best-effort', replacement_policy=args.replacement_policy or 'all',
                 min_ocr_confidence=args.min_ocr_confidence, layout_policy=args.layout_policy or 'source-local', quality_reread=args.quality_reread,
-                reread_model=args.reread_model, manga_reread_model=args.manga_reread_model, **preview_options)
+                reread_model=args.reread_model, manga_reread_model=args.manga_reread_model,
+                visibility_policy=args.visibility_policy, **preview_options)
             coverage = report['coverage'] or {}
             print(f"{report['status']}: {args.output / 'pipeline.json'}; "
                   f"strict translations={coverage.get('strict_translations', 0)}; rendered={coverage.get('rendered', 0)}; "

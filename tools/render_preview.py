@@ -35,7 +35,9 @@ def main(argv=None):
     parser.add_argument('--layout-policy', choices=('source-local', 'enclosed-retry'),
                          help='auto-compose: opt-in original-enclosure retry after native layout failure; no new erase permission')
     parser.add_argument('--cleanup-policy', choices=('native', 'localized'),
-                         help='auto-compose: opt-in crop-corroborated whole-stroke retry; requires saved source-localization evidence')
+                          help='auto-compose: opt-in crop-corroborated whole-stroke retry; requires saved source-localization evidence')
+    parser.add_argument('--visibility-policy', choices=('replacement-only','always-show'),
+                        help='auto-compose: always show available translations using opaque patches/captions after clean replacements; may cover artwork')
     for name in ('min-size', 'max-size', 'clearance', 'member-padding', 'glyph-padding', 'layout-inset'):
         parser.add_argument('--'+name, type=int)
     args = parser.parse_args(argv)
@@ -56,12 +58,14 @@ def main(argv=None):
                 background_method=args.background_method or 'auto', text_mask_model=args.text_mask_model,
                 render_policy=args.render_policy or 'best-effort', replacement_policy=args.replacement_policy or 'all',
                 min_ocr_confidence=args.min_ocr_confidence, layout_policy=args.layout_policy or 'source-local',
-                cleanup_policy=args.cleanup_policy or 'native')
+                cleanup_policy=args.cleanup_policy or 'native', visibility_policy=args.visibility_policy or 'replacement-only')
         except (ValueError, OSError, KeyError, TypeError) as error:
             parser.exit(2, f'automatic render rejected: {error}\n')
         print(f"Automatic candidate output: {report['coverage']['rendered']}/{report['coverage']['total_eligible']} total candidates rendered; "
               f"{report['quality_summary']['best_effort_rendered']} best-effort; "
               f"{report['coverage']['skipped']} saved units skipped; {args.output}/review.html; no human approval")
+        if 'display_summary' in report:
+            print('Translation display (not clean replacement):', report['display_summary'])
         return 0
     if args.max_units is not None:
         parser.error('--max-units is an automatic evaluation cap, not a manual/confirmation option')
@@ -77,6 +81,8 @@ def main(argv=None):
         parser.error('--layout-policy requires auto-compose')
     if args.cleanup_policy is not None:
         parser.error('--cleanup-policy requires auto-compose')
+    if args.visibility_policy is not None:
+        parser.error('--visibility-policy requires auto-compose')
     if args.mode in ('prepare', 'confirm-preparation'):
         if args.output is None or args.selection is not None or args.parent is not None or args.compare or any(
                 getattr(args, k) is not None for k in ('candidate', 'review', 'state', 'note')):

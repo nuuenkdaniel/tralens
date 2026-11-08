@@ -25,7 +25,7 @@ function previewStates(data, hasSource = false) {
     const available = outputReady(data, view);
     const skipped = data.options.mode !== "render" || Boolean(data.rendering_skipped) || upstreamFailed || failedAt === "translation";
     states[view] = {state: available ? "ready" : skipped ? "skipped" : failedAt === "rendering" ? "failed" : running && ["rendering", "finalizing"].includes(data.stage) ? "running" : "waiting",
-      label: available ? (view === "clean" ? "Cleanup layer" : `${data.rendering_coverage.rendered} replacement${data.rendering_coverage.rendered === 1 ? "" : "s"}`) : skipped ? "Not produced" : failedAt === "rendering" ? "Rendering failed" : running && ["rendering", "finalizing"].includes(data.stage) ? "Rendering…" : "Waiting for translation", available};
+      label: available ? (view === "clean" ? "Cleanup layer" : data.display_summary ? `${data.display_summary.displayed_translations} displayed` : `${data.rendering_coverage.rendered} replacement${data.rendering_coverage.rendered === 1 ? "" : "s"}`) : skipped ? "Not produced" : failedAt === "rendering" ? "Rendering failed" : running && ["rendering", "finalizing"].includes(data.stage) ? "Rendering…" : "Waiting for translation", available};
   }
   return states;
 }
@@ -47,6 +47,12 @@ function missingOutputMessage(data, view) {
 }
 function qualityNotice(data, rereadAvailable = false) {
   if (!data || !outputReady(data, "final")) return null;
+  if (data.visibility_policy === "always-show" || data.options?.visibility_policy === "always-show") {
+    const counts = data.display_summary;
+    return {copy: "Prioritizes visible translations; fallback patches may cover artwork. " +
+      (counts ? `${counts.clean_replacements} clean replacements · ${counts.patch_backed_translations} patch-backed translations · ${counts.nearby_captions} nearby captions · ${counts.intentionally_unchanged} intentionally unchanged · ${counts.available_not_displayed} available but not displayed · ${counts.missing_translations} missing translations. ` : "") +
+      "Captions retain Japanese source text. Patches and captions are not artwork reconstruction or human-verified translations.", action: null};
+  }
   if (data.replacement_policy !== "confidence-gated") return {
     copy: "This run used broad replacement without artwork checks. It can smear drawings and repaint bad OCR. Retry with native cleanup / OCR checks; unsupported edits will stay original, with translations retained.",
     action: rereadAvailable ? "Retry with quality checks" : "Retry with artwork protection"
@@ -106,6 +112,7 @@ if (typeof document !== "undefined") {
     $("quality-reread").disabled = value || !config?.quality_reread_available || $("mode").value !== "render" || $("translation-policy").value !== "coverage-first";
     $("layout-policy").disabled = value || $("mode").value !== "render";
     $("source-localization").disabled = value || $("mode").value !== "render";
+    $("visibility-policy").disabled = value || $("mode").value !== "render";
     $("quality-retry").disabled = value || !config?.render_enabled;
   }
   function settingsSummary() {
@@ -114,6 +121,7 @@ if (typeof document !== "undefined") {
     if ($("mode").value === "render") $("settings-summary").textContent += $("replacement-policy").value === "confidence-gated" ? " · artwork checks" : " · broad replacement";
     if ($("mode").value === "render" && $("layout-policy").value === "enclosed-retry") $("settings-summary").textContent += " · enclosure retry";
     if ($("mode").value === "render" && $("source-localization").checked) $("settings-summary").textContent += " · requested crop OCR";
+    if ($("mode").value === "render" && $("visibility-policy").value === "always-show") $("settings-summary").textContent += " · visible translations / artwork may be covered";
     setBusy(busy);
   }
   function ownership() {
@@ -228,6 +236,8 @@ if (typeof document !== "undefined") {
   }
   function unitStatus(unit) {
     if (selectedView === "ocr") return unit.status === "blocked" ? ["Needs review", "warning"] : ["Recognized", "ready"];
+    if (selectedView === "final" && unit.display_status === "patch") return ["Opaque patch", "warning"];
+    if (selectedView === "final" && unit.display_status === "caption") return ["Nearby caption · source retained", "warning"];
     if (["clean", "final"].includes(selectedView) && unit.render_status) {
       if (unit.render_status === "automatic_composed") return [unit.quality === "best_effort" ? "Best effort" : selectedView === "clean" ? "Cleaned" : "Replaced", unit.quality === "best_effort" ? "warning" : "ready"];
       return ["Not replaced", "warning"];
@@ -280,7 +290,7 @@ if (typeof document !== "undefined") {
       }
       if (unit.input_kind === "coverage_text_region" && unit.target) box.append(node("p", "Coverage-first OCR region: ownership, reading order and sentence completeness are not verified.", "note"));
       if (["clean", "final"].includes(selectedView) && unit.warnings.length) box.append(node("p", unit.warnings.join("\n"), "warning"));
-      if (unit.reasons.length || unit.render_reason || unit.fragments.length || unit.crop_request_reason || unit.enclosure_layout_attempt) {
+      if (unit.reasons.length || unit.render_reason || unit.fragments.length || unit.crop_request_reason || unit.enclosure_layout_attempt || unit.display_fallback) {
         const details = node("details"); details.open = open.has(unit.id); details.append(node("summary", "Why / details"));
         details.append(node("p", `Source boxes: ${unit.member_ids.join(", ")} · ${unit.status}`));
         for (const reason of unit.reasons) details.append(node("p", friendly(reason)));
@@ -288,6 +298,16 @@ if (typeof document !== "undefined") {
         if (unit.crop_request_reason) details.append(node("p", `Crop localization: ${friendly(unit.crop_request_status)} · ${friendly(unit.crop_request_reason)}`));
         for (const [label, attempt] of [["Localized cleanup", unit.localized_cleanup_attempt], ["Enclosure lettering", unit.enclosure_layout_attempt]]) {
           if (attempt) details.append(node("p", `${label}: ${friendly(attempt.status)}${attempt.reason ? " · " + attempt.reason : ""}`));
+        }
+        if (unit.display_fallback) {
+          const fallback = unit.display_fallback;
+          details.append(node("p", `Visible translation: ${friendly(fallback.kind || fallback.status)}${fallback.reason ? " · " + fallback.reason : ""}. Original source: ${friendly(unit.source_visibility)}.`));
+          if (fallback.layout) details.append(node("p", `Exact saved target at ${fallback.layout.size}px. Backing/leader footprint: ${fallback.footprint_pixels} pixels; artwork may be covered.`));
+          for (const [label, name] of [["Patch / caption backing", fallback.patch_artifact], ["Fallback text", fallback.text_artifact], ["Declared footprint", fallback.footprint_artifact]]) {
+            if (!name || !snapshot.artifacts.includes("run/rendering/" + name)) continue;
+            const link = node("a", label); link.href = artifactUrl("run/rendering/" + name); link.target = "_blank"; link.rel = "noopener";
+            details.append(node("p")); details.lastChild.append(link);
+          }
         }
         for (const fragment of unit.fragments) {
           details.append(node("p", `Review-only fragment: ${friendly(fragment.status)}`));
@@ -300,7 +320,7 @@ if (typeof document !== "undefined") {
     list.scrollTop = scroll;
   }
   function renderArtifacts(data) {
-    for (const [container, choices] of [["layers", [["clean", "Cleanplate"], ["text", "Translated text layer"], ["composite", "Composite"]]], ["masks", [["erase-mask", "Erase support"], ["alpha-mask", "Text alpha"], ["protected-mask", "Protected pixels"]]]]) {
+    for (const [container, choices] of [["layers", [["clean", "Cleanplate"], ["patch", "Opaque patches / caption backing"], ["text", "Translated text layer"], ["composite", "Composite"]]], ["masks", [["erase-mask", "Clean erasure support"], ["fallback-mask", "Declared fallback footprints"], ["alpha-mask", "Text alpha"], ["protected-mask", "Protected pixels"]]]]) {
       for (const [name, title] of choices) {
         const path = `run/rendering/${name}.png`;
         if (!data.rendering_coverage || !data.artifacts.includes(path) || $(container).querySelector(`[data-layer="${name}"]`)) continue;
@@ -341,6 +361,7 @@ if (typeof document !== "undefined") {
       $("quality-reread").checked = Boolean(data.options.quality_reread);
       $("layout-policy").value = data.options.layout_policy || "source-local";
       $("source-localization").checked = Boolean(data.options.source_localization);
+      $("visibility-policy").value = data.options.visibility_policy || "replacement-only";
       settingsJob = data.id; settingsSummary();
     }
     if (!pendingFile) $("filename").textContent = `Saved run · ${data.id.slice(0, 8)}`;
@@ -350,7 +371,7 @@ if (typeof document !== "undefined") {
     $("status").textContent = data.status === "running" ? `${{starting: "Starting local pipeline", ocr: "Finding and grouping text", translation: "Translating text", rendering: "Cleaning and lettering the page", finalizing: "Finishing outputs"}[data.stage] || "Processing"}… · ${data.elapsed_seconds}s`
       : `${data.status === "partial" || data.status === "complete_with_failures" ? "Finished with partial results" : data.status === "complete" ? "Ready to inspect" : "Run stopped"} · ${data.restored ? "saved run" : data.elapsed_seconds + "s"}`;
     $("status-dot").dataset.state = data.status;
-    $("summary").textContent = `${data.detections.length} regions · ${translations} translations${data.rendering_coverage ? ` · ${data.rendering_coverage.rendered} replacements` : ""}`;
+    $("summary").textContent = `${data.detections.length} regions · ${translations} translations${data.display_summary ? ` · ${data.display_summary.displayed_translations} displayed (${data.display_summary.clean_replacements} clean)` : data.rendering_coverage ? ` · ${data.rendering_coverage.rendered} replacements` : ""}`;
     const notice = qualityNotice(data, config?.quality_reread_available);
     $("quality-notice").hidden = !notice;
     $("quality-copy").textContent = notice?.copy || "";
@@ -414,6 +435,7 @@ if (typeof document !== "undefined") {
       quality_reread: rendering && $("translation-policy").value === "coverage-first" && !$("quality-reread").disabled && $("quality-reread").checked,
       layout_policy: rendering ? $("layout-policy").value : "source-local",
       source_localization: rendering && $("source-localization").checked};
+    settings.visibility_policy = rendering ? $("visibility-policy").value : "replacement-only";
     setBusy(true); showError(""); $("status").textContent = retry ? "Starting a fresh run with the saved image…" : "Uploading original image…";
     try {
       const result = retry
@@ -453,7 +475,7 @@ if (typeof document !== "undefined") {
       if (context.isPointInPath(path, x, y)) { const owner = owners.get(JSON.stringify(detection.source_id)); if (owner) chooseUnit(owner.unit.id, true); break; }
     }
   });
-  for (const id of ["mode", "budget", "translation-policy", "replacement-policy", "quality-reread", "layout-policy", "source-localization"]) $(id).addEventListener("input", settingsSummary);
+  for (const id of ["mode", "budget", "translation-policy", "replacement-policy", "quality-reread", "layout-policy", "source-localization", "visibility-policy"]) $(id).addEventListener("input", settingsSummary);
   for (const eventName of ["dragenter", "dragover"]) document.addEventListener(eventName, event => {
     if (event.dataTransfer?.types.includes("Files")) { event.preventDefault(); if (!busy) document.body.classList.add("dragging"); }
   });
