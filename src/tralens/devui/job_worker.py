@@ -22,7 +22,7 @@ def main(request):
     from tralens.devui.server import Config,execute_job
     from tralens.translation.workflow import _atomic_json
     config=doc['config']
-    for key in ('root','model_root','fonts','manga_reread_model','reconstruction_config'):
+    for key in ('root','model_root','fonts','manga_reread_model','reconstruction_config','text_mask_model'):
         if config.get(key) is not None:config[key]=Path(config[key])
     job=doc['job']
     for key in ('directory','image'):job[key]=Path(job[key])

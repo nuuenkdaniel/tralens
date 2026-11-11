@@ -338,7 +338,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'source_support.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
 
 
 def _report_html(report):
@@ -1111,10 +1111,21 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         report['alpha_integrity'] = {'validated_pixels': 0, 'actual_pixels': 0, 'disagreement_pixels': 0}
     recovery_artifacts = {}
     if removal_policy == 'aggressive':
+        backend=reconstruction.LocalLama(reconstruction_spec) if reconstruction_spec else None
+        if model_spec is not None and text_mask is None and text_mask_error is None:
+            # Coverage-only pages may never enter the strict semantic route.
+            # The explicitly configured evidence is also needed by recovery.
+            try:
+                text_mask=segmentation.TextMask(rgb,model_spec)
+                report['text_mask_inference']=text_mask.evidence
+            except (ValueError,OSError) as error:
+                text_mask_error=str(error)
+                report['text_mask_error']=text_mask_error
         try:
             report['units'],clean,text,composite,erase_union,layout_union,recovery_artifacts,report['reconstruction_summary'] = aggressive.recover(
                 rgb,source,raw,report['units'],clean,text,erase_union,layout_union,font_data,coverage,style,
-                backend=reconstruction.LocalLama(reconstruction_spec) if reconstruction_spec else None)
+                backend=backend,
+                probability=text_mask.raw if text_mask is not None else None)
         except reconstruction.BindingError:
             raise
         except (ValueError,OSError,MemoryError,cv2.error) as error:
@@ -1122,7 +1133,9 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 'error':type(error).__name__+': '+str(error)[:2000],'model_config':reconstruction_spec}
         from . import replacement
         report['units'],clean,text,composite,erase_union,layout_union,final_artifacts,report['removal_summary'] = replacement.finish(
-            rgb,raw,report['units'],clean,text,erase_union,layout_union,font_data,coverage,style)
+            rgb,raw,report['units'],clean,text,erase_union,layout_union,font_data,coverage,style,
+            probability=text_mask.raw if text_mask is not None else None,source=source,backend=backend,
+            budget=reconstruction.Budget(maximum_calls=4,maximum_seconds=40))
         recovery_artifacts.update(final_artifacts)
         alpha_union = np.asarray(text.getchannel('A')) != 0
         protected = ~(erase_union | layout_union)

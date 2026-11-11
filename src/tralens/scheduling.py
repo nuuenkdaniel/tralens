@@ -73,6 +73,12 @@ def remote_call(endpoint,call):
         response=call()
         if type(response) is dict and response.get('done') is True:
             path.unlink();sync_directory(path.parent)
+        else:
+            # An incomplete HTTP response is still not completion. Retain it in
+            # the durable incident before the caller can raise or exit, so an
+            # exception during diagnostic teardown cannot lose the only reply.
+            intent.update(response=response,response_received_unix=time.time())
+            atomic_bytes(path,(json.dumps(intent,ensure_ascii=False)+'\n').encode(),replace_owned=True)
         return response
 
 

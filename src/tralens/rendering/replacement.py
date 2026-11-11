@@ -1,8 +1,8 @@
 """Removal-first last resort for bound translations that precise routes cannot fit.
 
 Cleanup and English placement are independent transactions. Original geometry,
-cleanup support, opaque backing and actual glyph alpha remain distinct. No OCR,
-wording edits, model calls or implicit font reduction happen here.
+cleanup support, opaque backing and actual glyph alpha remain distinct. Optional
+local reconstruction uses fresh bound requests. No OCR or wording edits occur.
 """
 from copy import deepcopy
 import math
@@ -12,10 +12,10 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
-from . import natural as n, preparation as p, aggressive, typography
+from . import natural as n, preparation as p, aggressive, typography, source_support, reconstruction as rec
 
 
-POLICY = 'remove_then_source_centered_patch_v2'
+POLICY = 'remove_then_source_centered_patch_v4_semantic_cleanup'
 MAX_REGIONS = 128
 MAX_WORK = 32_000_000
 MAX_LAYOUT_WORK = 256_000_000
@@ -46,7 +46,7 @@ def extent(crop, own, protected):
     return p.dilate(support,1) & ~protected
 
 
-def patch_layout(text, font_data, coverage, bounds, blocked, style):
+def patch_layout(text, font_data, coverage, bounds, blocked, style, *, outline=0):
     """Widen a source-centered backing instead of shrinking or breaking words.
 
     Enumerate compact rectangles with the requested font range; score actual
@@ -73,7 +73,7 @@ def patch_layout(text, font_data, coverage, bounds, blocked, style):
         ImageDraw.Draw(mask).rectangle((6,6,w-7,h-7),fill=255)
         try:
             layer,proof,_=typography.layout_dialogue(text,font_data,coverage,mask,
-                {**style,'max_size':preferred,'outline':0})
+                {**style,'max_size':preferred,'outline':outline})
         except ValueError:
             continue
         ink=layer.getchannel('A').getbbox()
@@ -105,10 +105,14 @@ def patch_layout(text, font_data, coverage, bounds, blocked, style):
     return tile,(x,y),proof
 
 
-def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, style):
+def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, style, *, probability=None,
+           source=None, backend=None, budget=None):
     """Remove pending translated sources even when every placement attempt fails."""
     started=time.monotonic();rows=deepcopy(rows)
     original=np.asarray(rgb);plate=np.asarray(clean).copy();text=text.copy()
+    if probability is not None:
+        rec.require(type(probability) is np.ndarray and probability.dtype==np.uint8
+            and probability.shape==original.shape[:2],'native page text probability shape/type mismatch')
     erase=erase.copy();layout=layout.copy()
     protected=p.dilate(erase | (np.asarray(text.getchannel('A'))!=0),2)
     initial=protected.copy();before_text=np.asarray(text).copy();before_plate=plate.copy()
@@ -117,7 +121,9 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
         for m in row.get('binding',{}).get('member_ids',[])}
     summary={'policy':POLICY,'attempted':0,'removed':0,'placed':0,'unresolved':0,'work_pixels':0,
         'layout_work_pixels':0}
-    artifacts={}
+    artifacts={};budget=budget or rec.Budget();backend_error=None
+    summary.update(learned_calls=0,learned_failures=0,learned_seconds=0.,selected_learned=0,
+        limits={'learned_calls':budget.maximum_calls,'learned_seconds':budget.maximum_seconds})
     for i,row in enumerate(rows):
         if row['status']=='automatic_composed' or 'binding' not in row or row.get('reason_code') in aggressive.HARD_REASONS:
             continue
@@ -136,8 +142,40 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
             n.budget_check(summary['work_pixels']+own.size<=MAX_WORK,'removal fallback work budget')
             summary['work_pixels']+=own.size
             mask=extent(crop,own,obstacle)
+            prefix=f'recovery-final-{i:03d}'
+            if probability is not None:
+                try:
+                    mask,entry['support_evidence']=source_support.derive(crop,own,obstacle,probability[y:b,x:r])
+                except ValueError as error:
+                    entry['support_failure']=str(error)
             n.require(mask.any(),'source fully overlaps protected output')
             candidate,method=aggressive.cheap(crop,mask,obstacle)
+            if (method=='classical_telea_unverified' and 'support_evidence' in entry
+                    and source is not None and backend is not None and backend_error is None
+                    and max(crop.shape[:2])<=512 and budget.available()):
+                # Fresh inference on the CURRENT support, after earlier edits have
+                # been protected. Do not recycle rejected broad-mask candidates.
+                request=rec.request(source,row['binding'],bounds,crop,mask,mask,obstacle,
+                    attempt=0,model=rec.model_identity(backend.config))
+                artifacts[prefix+'-request.json']=rec.canonical(request).encode()
+                artifacts[prefix+'-inference-mask.png']=Image.fromarray(mask.astype(np.uint8)*255)
+                artifacts[prefix+'-protected-mask.png']=Image.fromarray(obstacle.astype(np.uint8)*255)
+                budget.calls+=1;summary['learned_calls']+=1;clock=time.monotonic()
+                try:
+                    result=backend.reconstruct(request,crop,mask,mask,obstacle,
+                        timeout=min(30,max(.1,budget.maximum_seconds-budget.seconds)))
+                    candidate=rec.compose(request,crop,mask,mask,obstacle,result)
+                    artifacts[prefix+'-backend.png']=Image.fromarray(result['pixels'])
+                    entry['backend_result']={k:v for k,v in result.items() if k!='pixels'}
+                    entry['request_revision']=request['revision']
+                    method='source_supported_lama'
+                    summary['selected_learned']+=1
+                except rec.BindingError:raise
+                except Exception as error:
+                    backend_error=type(error).__name__+': '+str(error)[:1000]
+                    entry['learned_failure']=backend_error;summary['learned_failures']+=1
+                finally:
+                    seconds=time.monotonic()-clock;budget.seconds+=seconds;summary['learned_seconds']+=seconds
             if method=='classical_telea_unverified':
                 # Broad Telea masks produce conspicuous radial smears and copied
                 # glyphs. At this final fallback prefer a plain, local surface.
@@ -155,7 +193,6 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
                 protected_source_pixels=int((own&obstacle).sum()),source_removal_verified=False,
                 artwork_loss_possible=True)
             summary['removed']+=1
-            prefix=f'recovery-final-{i:03d}'
             artifacts[prefix+'-original.png']=Image.fromarray(crop)
             artifacts[prefix+'-commit-mask.png']=Image.fromarray(mask.astype(np.uint8)*255)
             artifacts[prefix+'-cleanplate.png']=Image.fromarray(candidate)
@@ -180,6 +217,7 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
             entry.update(status='removed_and_placed',backing_bounds=[px,py,px+w,py+h])
             artifacts[prefix+'-text.png']=layer
             summary['placed']+=1
+        except rec.BindingError:raise
         except (ValueError,OSError,cv2.error) as error:
             entry['reason']=str(error)
             if entry['status']=='removed':

@@ -45,6 +45,7 @@ class Config:
     manga_reread_model: Path | None = None
     reread_model: str = 'qwen3.8:latest'
     reconstruction_config: Path | None = None
+    text_mask_model: Path | None = None
     isolated_workers: bool = False  # Embedding/test compatibility; CLI enables this.
     job_seconds: int = 1800
     job_storage_bytes: int = 2*1024**3
@@ -145,6 +146,7 @@ def execute_job(config, job):
             removal_policy=settings.get('removal_policy','legacy'),
             reconstruction_policy=settings.get('reconstruction_policy','classical'),
             reconstruction_config=config.reconstruction_config if settings.get('reconstruction_policy')=='lama' else None,
+            text_mask_model=config.text_mask_model,
             quality_reread=settings.get('quality_reread', False), reread_model=config.reread_model,
             manga_reread_model=config.manga_reread_model if settings.get('translation_policy','coverage-first')=='coverage-first' else None, **kwargs)
     from ..translation.workflow import run_preview
@@ -251,6 +253,7 @@ class App:
             page_pixel_limit=4_000_000, max_jobs=MAX_JOBS,
             quality_reread_available=self.config.manga_reread_model is not None, reread_model=self.config.reread_model,
             reconstruction_available=self.config.reconstruction_config is not None,
+            text_mask_available=self.config.text_mask_model is not None,
             cancellation_available=self.config.isolated_workers,
             worker_mode='isolated_process' if self.config.isolated_workers else 'embedded_thread',
             recovery_blocked=self.recovery_blocked)

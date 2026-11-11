@@ -11,10 +11,10 @@ import numpy as np
 from PIL import Image,ImageDraw
 
 from . import natural as n, preparation as p, typography
-from . import reconstruction as rec
+from . import reconstruction as rec, source_support
 
 
-POLICY='crop_local_aggressive_v3_independent_cleanup'
+POLICY='crop_local_aggressive_v6_source_supported_layout'
 MAX_REGIONS=64
 MAX_LOCAL_WORK=16_777_216
 HARD_REASONS={'runtime_locality','alpha_containment','erasure_obstacle','typography_containment',
@@ -87,9 +87,15 @@ def masks(crop,own,protected,*,probability=None):
     candidates=[]
     if probability is not None:
         rec.require(probability.shape==own.shape and probability.dtype==np.uint8,'local learned mask shape/type')
-        support=(probability>=77)&p.dilate(own,6)
-        candidates.append(('learned_support_expanded',p.dilate(support,2)&~protected))
-        candidates.append(('learned_support_plus_source_geometry',(p.dilate(support,3)|p.dilate(own,1))&~protected))
+        try:
+            support,details=source_support.derive(crop,own,protected,probability)
+            # Artwork contrast elsewhere in an oversized detector polygon is not
+            # evidence that a narrower lettering mask failed to remove its text.
+            contrast &= support
+            return contrast,[(source_support.POLICY,support),
+                (source_support.POLICY+'_expanded',p.dilate(support,2)&~protected)],details
+        except ValueError:
+            pass
     candidates.extend([('padded_source_polygons',p.dilate(own,1)&~protected),
         ('expanded_source_polygons',p.dilate(own,5)&~protected)])
     return contrast,candidates,{'predicted_lettering':'learned_probability' if probability is not None else 'unavailable',
@@ -140,7 +146,7 @@ def cheap(crop,mask,protected):
     return candidate,'classical_telea_unverified'
 
 
-def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style,*,backend=None,budget=None):
+def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style,*,backend=None,budget=None,probability=None):
     """Independent bounded pass; native successes are retained, then visibility runs.
 
     Every region gets one cheap attempt before any retry. Learned quota is separate
@@ -148,6 +154,9 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
     """
     started=time.monotonic();budget=budget or rec.Budget();geometry=Geometry(raw,rgb.size)
     original=np.asarray(rgb);plate=np.asarray(clean).copy();new_text=text.copy()
+    if probability is not None:
+        rec.require(type(probability) is np.ndarray and probability.dtype==np.uint8
+            and probability.shape==original.shape[:2],'native page text probability shape/type mismatch')
     erase=erase.copy();layout=layout.copy();rows=deepcopy(rows)
     alpha=np.asarray(text.getchannel('A'))!=0
     reserved=p.dilate(erase|alpha,2)
@@ -171,6 +180,8 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             bounds,own,protected=geometry.local(row['binding']['member_ids'],reserved,source_priority=True)
             x,y,r,b=bounds;crop=original[y:b,x:r].copy()
             rec.require(crop.size and own.any(),'empty recovery source')
+            predicted,ladder,evidence=masks(crop,own,protected,
+                probability=probability[y:b,x:r] if probability is not None else None)
             # Presentation space is independent of the larger inference context.
             # A failed layout still reaches the final removal-only transaction.
             allowed=p.dilate(own,24)&~protected
@@ -186,7 +197,24 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             except rec.BindingError:raise
             except ValueError as error:
                 entry['placement_failure']=str(error)
-            predicted,ladder,evidence=masks(crop,own,protected)
+                try:
+                    # A narrow Japanese column can require a wider English block.
+                    # Find that readable local placement before deciding whether
+                    # reconstruction would be wasted on an undisplayable target.
+                    n.require(evidence.get('policy')==source_support.POLICY,
+                        'source-centered reconstruction retry needs source-bound stroke support')
+                    from .replacement import patch_layout
+                    n.validate_text(row['binding']['text'],coverage)
+                    sx,sy,sw,sh=cv2.boundingRect(own.astype(np.uint8))
+                    dark=np.median(crop[own])<80
+                    tile,xy,proof=patch_layout(row['binding']['text'],font_data,coverage,
+                        (sx,sy,sx+sw,sy+sh),protected,{**style,'fill':[255 if dark else 0]*3,
+                            'outline_fill':[0 if dark else 255]*3},outline=1)
+                    layer=Image.new('RGBA',(crop.shape[1],crop.shape[0]))
+                    layer.alpha_composite(tile,dest=xy)
+                    entry['placement_retry']='source_centered_local_rectangle'
+                except ValueError as failure:
+                    entry['placement_retry_failure']=str(failure)
             entry.update(bounds=bounds,layout=proof,mask_evidence=evidence)
             artifacts[f'recovery-{i:03d}-original.png']=Image.fromarray(crop)
             artifacts[f'recovery-{i:03d}-lettering-evidence.png']=Image.fromarray(predicted.astype(np.uint8)*255)
@@ -212,6 +240,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             artifacts[prefix+'-request.json']=rec.canonical(req).encode()
             artifacts[prefix+'-inference-mask.png']=Image.fromarray(mask.astype(np.uint8)*255)
             artifacts[prefix+'-commit-mask.png']=Image.fromarray(mask.astype(np.uint8)*255)
+            artifacts[prefix+'-protected-mask.png']=Image.fromarray(protected.astype(np.uint8)*255)
             candidate,method=cheap(crop,mask,protected)
             attempt={'mask':name,'request_revision':req['revision'],'method':method,'status':'candidate'}
             cheap_signals=assess(crop,candidate,mask,job['predicted'],protected)
@@ -227,6 +256,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                         result=backend.reconstruct(req,crop,mask,mask,protected,
                             timeout=min(30,max(.1,budget.maximum_seconds-budget.seconds)))
                         candidate=rec.compose(req,crop,mask,mask,protected,result)
+                        artifacts[prefix+'-backend.png']=Image.fromarray(result['pixels'])
                         method='learned_lama';attempt['method']=method
                         attempt['backend_result']={k:v for k,v in result.items() if k!='pixels'}
                     except rec.BindingError:raise
