@@ -35,6 +35,10 @@ def pixels_hash(array):
     return hashlib.sha256(str((array.dtype.str,array.shape)).encode()+array.tobytes()).hexdigest()
 
 
+def model_identity(config):
+    return {key:config.get(key) for key in ('backend','sha256','config_revision')}
+
+
 def configuration(path):
     """Validate explicit operator config and bytes before any upstream inference."""
     path=Path(path).expanduser().absolute()
@@ -104,12 +108,15 @@ class LocalLama:
 
     def reconstruct(self,req,crop,inference,commit,protected,*,timeout=30):
         validate(req,crop,inference,commit,protected)
+        require(req.get('model')==model_identity(self.config),'request/model configuration mismatch')
         # Each native session is in a killable process; no parser/model lifetime
         # survives timeout/OOM. Inputs/outputs use PNG and JSON, never pickle.
         with tempfile.TemporaryDirectory(prefix='tralens-reconstruct-') as directory:
             directory=Path(directory)
             Image.fromarray(crop).save(directory/'input.png')
             Image.fromarray(inference.astype(np.uint8)*255).save(directory/'mask.png')
+            Image.fromarray(commit.astype(np.uint8)*255).save(directory/'commit.png')
+            Image.fromarray(protected.astype(np.uint8)*255).save(directory/'protected.png')
             (directory/'request.json').write_text(canonical({'request':req,'config':self.config}))
             worker=Path(__file__).with_name('reconstruction_worker.py')
             env={**os.environ,'OMP_NUM_THREADS':'2','OPENBLAS_NUM_THREADS':'1','MKL_NUM_THREADS':'2',
@@ -119,11 +126,14 @@ class LocalLama:
             result=subprocess.run([self.config['python'],'-c',entry,str(worker),str(directory)],env=env,
                 stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=min(30,timeout),check=False)
             if result.returncode:
+                if (directory/'binding-error.json').exists():
+                    raise BindingError('reconstruction worker rejected input binding')
                 raise RuntimeError('LaMa worker failed (exit '+str(result.returncode)+'): '+result.stderr.decode(errors='replace')[-1500:])
             with Image.open(directory/'output.png') as image:
                 require(image.mode=='RGB' and image.size==(crop.shape[1],crop.shape[0]),'invalid worker output image')
                 output=np.asarray(image).copy()
             meta=json.loads((directory/'result.json').read_bytes())
-            require(type(meta) is dict and meta.get('request_revision')==req['revision'] and meta.get('model_sha256')==self.config['sha256'],
+            require(type(meta) is dict and meta.get('request_revision')==req['revision'] and meta.get('model_sha256')==self.config['sha256']
+                and meta.get('output_pixels_sha256')==pixels_hash(output),
                 'worker output binding changed')
             return {**meta,'pixels':output,'wall_seconds':time.monotonic()-start}

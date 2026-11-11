@@ -88,7 +88,7 @@ def run(root,config,stage):
                 destination=folder/f'attempt-{index}';destination.mkdir()
                 req=rec.request({'size':[320,256],'sha256':case['files']['source.png']},
                     {'member_ids':['synthetic'],'request_revision':case['files']['geometry.png'],'text':'Outline!?'},
-                    [0,0,320,256],crop,mask,mask,protected,attempt=index)
+                    [0,0,320,256],crop,mask,mask,protected,attempt=index,model=rec.model_identity(backend.config))
                 save(destination/'request.json',req)
                 candidate,cheap=aggressive.cheap(crop,mask,protected)
                 candidates={cheap:candidate}

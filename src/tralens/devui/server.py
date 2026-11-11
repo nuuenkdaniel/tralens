@@ -160,6 +160,10 @@ class App:
         self.lock = threading.Lock()
         self.jobs, self.active = {}, None
         self.started_jobs = 0
+        self.recovery_blocked = []
+        if config.isolated_workers:
+            from .jobs import recover_jobs
+            self.recovery_blocked = recover_jobs(self.root)
         self._restore_jobs()
 
     def _restore_jobs(self):
@@ -245,7 +249,9 @@ class App:
             page_pixel_limit=4_000_000, max_jobs=MAX_JOBS,
             quality_reread_available=self.config.manga_reread_model is not None, reread_model=self.config.reread_model,
             reconstruction_available=self.config.reconstruction_config is not None,
-            cancellation_available=self.config.isolated_workers)
+            cancellation_available=self.config.isolated_workers,
+            worker_mode='isolated_process' if self.config.isolated_workers else 'embedded_thread',
+            recovery_blocked=self.recovery_blocked)
 
     def list_jobs(self):
         with self.lock:
@@ -254,7 +260,10 @@ class App:
     def start(self, data, supplied, *, retry_of=None):
         settings = options(supplied, render_enabled=self.config.fonts is not None)
         if self.config.isolated_workers:
-            from .jobs import tree_bytes
+            from .jobs import tree_bytes, recover_jobs
+            self.recovery_blocked = recover_jobs(self.root)
+            if self.recovery_blocked:
+                raise RequestError('Unresolved worker ownership prevents another isolated job; inspect worker recovery records.',409)
             if tree_bytes(self.root)>=self.config.root_storage_bytes-self.config.job_storage_bytes:
                 raise RequestError('Retained job storage is full. Archive old evidence before starting another run.',409)
         if settings['reconstruction_policy']=='lama':

@@ -176,7 +176,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             name,mask=job['ladder'][round_index]
             if not mask.any():entry['reason']='protected_source_overlap';continue
             req=rec.request(source,row['binding'],job['bounds'],crop,mask,mask,protected,attempt=round_index,
-                model={k:backend.config.get(k) for k in ('backend','sha256','config_revision')} if backend else None)
+                model=rec.model_identity(backend.config) if backend else None)
             prefix=f'recovery-{i:03d}-{round_index}'
             artifacts[prefix+'-request.json']=rec.canonical(req).encode()
             artifacts[prefix+'-inference-mask.png']=Image.fromarray(mask.astype(np.uint8)*255)

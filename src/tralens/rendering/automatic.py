@@ -1276,7 +1276,10 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     n.require(all(n.read_explicit(path) == value for path, value in zip(paths, contents)), 'automatic source inputs changed before publication')
     n.load_fonts(fonts_doc)  # Current explicit font/license bytes must still match.
     output.mkdir(mode=0o700)
+    from ..storage import atomic_bytes, sync_directory
+    sync_directory(output.parent)
+    # A complete manifest is the publication marker; partial runs retain only
+    # complete earlier artifacts, never a half-written manifest/image.
     for name, value in blobs.items():
-        with (output/name).open('xb') as stream:
-            stream.write(value)
+        atomic_bytes(output/name,value)
     return report

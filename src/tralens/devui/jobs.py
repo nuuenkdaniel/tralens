@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 
 
 def tree_bytes(root):
@@ -27,11 +28,18 @@ def supervise(command,directory,cancel,*,seconds,storage_bytes,env=None):
     state=directory/'worker-state.json'
     started=time.monotonic()
     with (directory/'worker.log').open('xb') as log:
-        process=subprocess.Popen(command,stdout=log,stderr=log,env=env,start_new_session=True)
+        from ..processes import identity
+        token=uuid.uuid4().hex
+        env={**(os.environ if env is None else env),'TRALENS_WORKER_TOKEN':token}
+        entry='import runpy,sys; runpy.run_path(sys.argv[1])["main"](sys.argv[2:])'
+        launcher=[sys.executable,'-c',entry,str(Path(__file__).with_name('process_launcher.py')),*command]
+        process=subprocess.Popen(launcher,stdin=subprocess.PIPE,stdout=log,stderr=log,env=env,start_new_session=True)
         evidence={'pid':process.pid,'process_group':process.pid,'status':'running','wall_limit_seconds':seconds,
-            'storage_limit_bytes':storage_bytes,'automatic_retries':0}
+            'storage_limit_bytes':storage_bytes,'automatic_retries':0,'token':token,
+            'owner':identity(os.getpid()),'worker':identity(process.pid)}
         try:
             _atomic_json(state,evidence)
+            process.stdin.write(b'G');process.stdin.close()
             failure=None
             while process.poll() is None:
                 if cancel.is_set():failure=('cancelled','Job cancelled; completed checkpoints retained.')
@@ -40,7 +48,8 @@ def supervise(command,directory,cancel,*,seconds,storage_bytes,env=None):
                 if failure:break
                 cancel.wait(.2)
             if failure:
-                os.killpg(process.pid,signal.SIGTERM)
+                try:os.killpg(process.pid,signal.SIGTERM)
+                except ProcessLookupError:pass
                 try:process.wait(timeout=2)
                 except subprocess.TimeoutExpired:os.killpg(process.pid,signal.SIGKILL);process.wait()
             else:process.wait()
@@ -54,10 +63,37 @@ def supervise(command,directory,cancel,*,seconds,storage_bytes,env=None):
                 'message':f'Worker exited {process.returncode}; inspect worker.log and retained stage checkpoints.'}}
             return None
         finally:
+            if not process.stdin.closed:process.stdin.close()
             # Descendants (e.g. reconstruction) must not outlive their owned job.
             try:os.killpg(process.pid,signal.SIGKILL)
             except ProcessLookupError:pass
             process.wait()
+
+
+def recover_jobs(root):
+    """Never resume jobs; retain an additional restart-recovery record."""
+    from ..processes import recover
+    from ..translation.workflow import _atomic_json
+    blocked=[]
+    for directory in root.iterdir():
+        if directory.is_symlink() or not directory.is_dir():continue
+        path=directory/'worker-state.json'
+        if not path.is_file() or path.is_symlink():continue
+        try:
+            if path.stat().st_size>65536:raise ValueError('oversized worker state')
+            state=json.loads(path.read_bytes())
+            if state.get('status')!='running':continue
+            recovered=directory/'worker-recovery.json'
+            if recovered.is_file() and not recovered.is_symlink():
+                previous=json.loads(recovered.read_bytes())
+                if previous.get('previous_worker')==state:continue
+            status=recover(state)
+            if status in ('legacy_unverifiable','live_supervisor','identity_mismatch'):
+                blocked.append({'job':directory.name,'reason':status});continue
+            _atomic_json(directory/'worker-recovery.json',{'status':status,'previous_worker':state},replace_owned=True)
+        except (ValueError,OSError,KeyError,TypeError) as error:
+            blocked.append({'job':directory.name,'reason':str(error)})
+    return blocked
 
 
 def run(config,job,cancel):

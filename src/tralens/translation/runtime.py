@@ -510,6 +510,12 @@ class OllamaRuntime:
         from urllib.request import ProxyHandler, Request, build_opener
         if self.transport is not None:
             return self.transport(path, body, timeout)
+        from ..scheduling import remote_call
+        return remote_call(self.endpoint,lambda:self._http_post(path,body,timeout))
+
+    def _http_post(self,path,body,timeout):
+        from urllib.error import URLError
+        from urllib.request import ProxyHandler, Request, build_opener
         request = Request(self.endpoint + path, data=canonical(body).encode(),
                           headers={"Content-Type": "application/json"}, method="POST")
         # No ambient proxy credentials/configuration and no cross-origin redirects.

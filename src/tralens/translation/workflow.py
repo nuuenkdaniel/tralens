@@ -86,20 +86,8 @@ def _atomic_json(path, value, *, replace_owned=False):
     content = json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8") + b"\n"
     if len(content) > 64 * 1024 * 1024:
         raise ValueError("preview JSON exceeds 64 MiB")
-    descriptor, temporary = tempfile.mkstemp(prefix=".preview-", dir=path.parent)
-    temporary = Path(temporary)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        if replace_owned:
-            os.replace(temporary, path)
-        else:
-            # Exclusive publication: never replace a pre-existing artifact.
-            os.link(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    from ..storage import atomic_bytes
+    atomic_bytes(path,content,replace_owned=replace_owned)
 
 
 def _close_ocr(engine):

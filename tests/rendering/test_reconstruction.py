@@ -107,5 +107,20 @@ class Integrated(unittest.TestCase):
                 self.run_case('foreign',reconstruction_policy='lama',reconstruction_config='explicit.json')
         self.assertFalse((self.f.root/'foreign').exists())
 
+    def test_failed_publication_never_exposes_a_partial_completion_manifest(self):
+        from tralens import storage
+        import errno
+        real=storage.atomic_bytes
+        def write(path,content,**kwargs):
+            if path.name=='manifest.json':raise OSError(errno.ENOSPC,'injected full disk')
+            return real(path,content,**kwargs)
+        with patch.object(storage,'atomic_bytes',side_effect=write):
+            with self.assertRaises(OSError):self.run_case('partial-publication')
+        folder=self.f.root/'partial-publication'
+        self.assertFalse((folder/'manifest.json').exists())
+        for name in ('source.png','clean.png','text.png','composite.png'):
+            with Image.open(folder/name) as image:image.verify()
+        self.assertEqual((folder/'original-file.bin').read_bytes(),self.f.image.read_bytes())
+
 
 if __name__=='__main__':unittest.main()

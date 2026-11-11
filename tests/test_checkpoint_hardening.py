@@ -1,0 +1,149 @@
+"""Fault injection at actual publication, worker and HTTP boundaries; no models."""
+import errno
+import io
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from unittest.mock import patch
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+
+import numpy as np
+from PIL import Image
+
+from tralens import storage,processes,scheduling
+from tralens.devui.jobs import supervise,recover_jobs
+from tralens.rendering import reconstruction as rec,reconstruction_worker as worker
+from tralens.translation.runtime import OllamaRuntime
+from tralens.translation.workflow import _atomic_json
+
+
+class Hardening(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.root=Path(self.temp.name)
+        self.env=patch.dict(os.environ,{'TRALENS_STATE_ROOT':str(self.root/'state')})
+        self.env.start();self.addCleanup(self.env.stop)
+
+    def test_worker_rejects_decoded_pixel_mask_and_model_drift_before_loading(self):
+        rgb=np.full((32,40,3),180,np.uint8);mask=np.zeros((32,40),bool);mask[8:20,10:22]=True
+        protected=np.zeros_like(mask);config={'backend':'lama-onnx-512','sha256':rec.MODEL_SHA256,'config_revision':'config'}
+        request=rec.request({'size':[40,32],'sha256':'source'},
+            {'member_ids':[1],'request_revision':'translation','text':'Exact'},[0,0,40,32],rgb,mask,mask,protected,
+            attempt=0,model=rec.model_identity(config))
+        def write():
+            Image.fromarray(rgb).save(self.root/'input.png')
+            for name,value in (('mask',mask),('commit',mask),('protected',protected)):
+                Image.fromarray(value.astype(np.uint8)*255).save(self.root/(name+'.png'))
+            (self.root/'request.json').write_text(json.dumps({'request':request,'config':config}))
+        write();self.assertTrue(np.array_equal(worker.inputs(self.root)[2],rgb))
+        for file in ('input','mask','commit','protected'):
+            write();image=Image.open(self.root/(file+'.png')).copy();image.putpixel((0,0),(0,0,0) if file=='input' else 255)
+            image.save(self.root/(file+'.png'))
+            with self.assertRaises(rec.BindingError):worker.inputs(self.root)
+        write();doc=json.loads((self.root/'request.json').read_text());doc['config']['sha256']='foreign'
+        (self.root/'request.json').write_text(json.dumps(doc))
+        with self.assertRaises(rec.BindingError):worker.inputs(self.root)
+
+    def test_disk_full_before_replace_preserves_old_checkpoint(self):
+        path=self.root/'checkpoint.json';_atomic_json(path,{'stage':'complete'})
+        before=path.read_bytes()
+        with patch.object(storage.os,'fsync',side_effect=OSError(errno.ENOSPC,'injected disk full')):
+            with self.assertRaises(OSError):_atomic_json(path,{'stage':'new'},replace_owned=True)
+        self.assertEqual(path.read_bytes(),before)
+        self.assertFalse(list(self.root.glob('.publish-*')))
+        with self.assertRaises(FileExistsError):_atomic_json(path,{'overwrite':True})
+        self.assertEqual(path.read_bytes(),before)
+
+    def test_no_job_code_before_durable_admission(self):
+        target=self.root/'must-not-run'
+        command=[sys.executable,'-c',f'from pathlib import Path;Path({str(target)!r}).touch()']
+        with patch('tralens.translation.workflow._atomic_json',side_effect=OSError(errno.ENOSPC,'full')):
+            with self.assertRaises(OSError):supervise(command,self.root,threading.Event(),seconds=5,storage_bytes=10000)
+        self.assertFalse(target.exists())
+
+    def test_storage_quota_retains_completed_stage(self):
+        script=f'from pathlib import Path;import time;Path({str(self.root/"done")!r}).write_bytes(b"x"*2000);time.sleep(10)'
+        report=supervise([sys.executable,'-c',script],self.root,threading.Event(),seconds=3,storage_bytes=1500)
+        self.assertEqual(report['error']['type'],'storage_limit')
+        self.assertEqual((self.root/'done').stat().st_size,2000)
+
+    def test_restart_kills_owned_descendant_and_never_a_foreign_group(self):
+        job=self.root/'a'
+        job.mkdir();ready=job/'descendant'
+        descendant=f'import os,time,pathlib;pathlib.Path({str(ready)!r}).write_text(str(os.getpid()));time.sleep(30)'
+        command=[sys.executable,'-c',f'import subprocess,sys,time;subprocess.Popen([sys.executable,"-c",{descendant!r}]);time.sleep(30)']
+        script=('from tralens.devui.jobs import supervise\nfrom pathlib import Path\nimport threading\n'
+            f'supervise({command!r},Path({str(job)!r}),threading.Event(),seconds=30,storage_bytes=1000000)')
+        env={**os.environ,'PYTHONPATH':str(Path(__file__).resolve().parents[1]/'src')}
+        parent=subprocess.Popen([sys.executable,'-c',script],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        try:
+            deadline=time.monotonic()+5
+            while not ready.exists() and time.monotonic()<deadline:time.sleep(.02)
+            self.assertTrue(ready.exists())
+            parent.kill();parent.wait(timeout=3)
+            self.assertEqual(recover_jobs(self.root),[])
+            record=json.loads((job/'worker-recovery.json').read_bytes())
+            self.assertEqual(record['status'],'owned_group_killed')
+            deadline=time.monotonic()+3
+            while processes.group_members(record['previous_worker']['process_group']) and time.monotonic()<deadline:time.sleep(.02)
+            self.assertEqual(processes.group_members(record['previous_worker']['process_group']),[])
+        finally:
+            if parent.poll() is None:parent.kill();parent.wait()
+            state=job/'worker-state.json'
+            if state.exists():processes.recover(json.loads(state.read_bytes()))
+        stranger=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],start_new_session=True)
+        try:
+            stale={'owner':{**processes.identity(os.getpid()),'start_ticks':-1},'token':'not-the-token','process_group':stranger.pid}
+            self.assertEqual(processes.recover(stale),'identity_mismatch')
+            self.assertIsNone(stranger.poll())
+        finally:stranger.kill();stranger.wait()
+
+    def test_remote_timeout_blocks_dispatch_across_runtime_instances(self):
+        entered=threading.Event();finish=threading.Event();calls=[]
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*args):pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']));calls.append(1);entered.set()
+                finish.wait(3)
+                body=b'{"done":true,"message":{"content":"ok"}}'
+                try:
+                    self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+                except (BrokenPipeError,ConnectionResetError):pass
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        endpoint=f'http://127.0.0.1:{server.server_port}'
+        try:
+            with self.assertRaises(TimeoutError):OllamaRuntime(endpoint)._post('/api/chat',{},.1)
+            self.assertTrue(entered.is_set())
+            with self.assertRaisesRegex(RuntimeError,'may still be running'):
+                OllamaRuntime(endpoint)._post('/api/chat',{},1)
+            self.assertEqual(len(calls),1)
+            path=scheduling.remote_state_path(endpoint);intent=json.loads(path.read_bytes())
+            with self.assertRaises(ValueError):scheduling.acknowledge_remote_completion(endpoint,'stale')
+            finish.set()  # Synthetic provider completion, not an idle-model-list assumption.
+            scheduling.acknowledge_remote_completion(endpoint,intent['request_id'])
+            self.assertTrue(OllamaRuntime(endpoint)._post('/api/chat',{},1)['done'])
+            self.assertFalse(path.exists())
+        finally:finish.set();server.shutdown();server.server_close();thread.join()
+
+    def test_embedding_reports_its_actual_mode_and_finishes_after_history_disk_full(self):
+        from tralens.devui.server import App,Config
+        app=App(Config(root=self.root,model_root=self.root),runner=lambda *_:{'status':'complete'})
+        self.assertEqual(app.public_config()['worker_mode'],'embedded_thread')
+        self.assertFalse(app.public_config()['cancellation_available'])
+        buffer=io.BytesIO();Image.new('RGB',(30,30),'white').save(buffer,format='PNG')
+        original=app._save_job
+        def save(job,*,replace_owned=False):
+            if replace_owned:raise OSError(errno.ENOSPC,'history full')
+            original(job)
+        with patch.object(app,'_save_job',side_effect=save):
+            key=app.start(buffer.getvalue(),{'mode':'ocr'});self.assertTrue(app.jobs[key]['done'].wait(3))
+        self.assertIsNone(app.active);self.assertEqual(app.jobs[key]['status'],'complete')
+        self.assertIn('history full',app.jobs[key]['history_warning'])
