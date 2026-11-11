@@ -28,9 +28,19 @@ def settings(policy):
 
 
 def display_counts(rows):
-    return {name:sum(row.get('display_status')==status for row in rows)for name,status in (
+    counts = {name:sum(row.get('display_status')==status for row in rows)for name,status in (
         ('clean_replacements','clean'),('patch_backed_translations','patch'),('nearby_captions','caption'),
         ('intentionally_unchanged','unchanged'),('available_not_displayed','undisplayed'),('missing_translations','missing'))}
+    if any('reconstruction' in row for row in rows):
+        counts.update(learned_reconstructions=sum(row.get('display_status')=='learned' for row in rows),
+            aggressive_replacements=sum(row.get('display_status')=='aggressive' for row in rows))
+    return counts
+
+
+def composed_status(row):
+    if row.get('reconstruction',{}).get('status')=='composed_unverified':
+        return 'learned' if row.get('cleanup_method')=='learned_lama' else 'aggressive'
+    return 'clean'
 
 
 def key(value):
@@ -171,7 +181,7 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
         -(pair[1][1].get('replacement_confidence',{}).get('minimum_main_line_score') or 0), pair[0]))
     for i,(unit,row) in order:
         if row['status'] == 'automatic_composed':
-            row.update(display_status='clean',source_visibility='clean_replacement_unverified')
+            row.update(display_status=composed_status(row),source_visibility='clean_replacement_unverified' if composed_status(row)=='clean' else 'aggressive_removal_unverified')
             continue
         if 'binding' not in row:
             row['display_status'] = 'missing'
@@ -237,7 +247,7 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
     clean_changed = int(np.any(before[native_erase] != after[native_erase],axis=1).sum())
     n.require(outside == 0 and native_changed == 0 and clean_changed == 0,'visible translation pixel locality/native preservation failure')
     summary = display_counts(rows)
-    summary.update(displayed_translations=summary['clean_replacements']+summary['patch_backed_translations']+summary['nearby_captions'],
+    summary.update(displayed_translations=summary['clean_replacements']+summary['patch_backed_translations']+summary['nearby_captions']+summary.get('learned_reconstructions',0)+summary.get('aggressive_replacements',0),
         bound_available_translations=sum('binding'in row for row in rows),caption_sources_retained=summary['nearby_captions'],
         policy=POLICY,warning=WARNING,attempted=attempts,maximum_attempts=MAX_ATTEMPTS,
         raster_work_bound=work,maximum_work=MAX_WORK,maximum_displays=max_displays,seconds=time.monotonic()-started,

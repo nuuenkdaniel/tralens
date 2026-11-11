@@ -45,6 +45,7 @@ def main(argv=None):
     parser.add_argument('--manga-reread-model', type=Path,
                         help='existing local Manga OCR snapshot; enables the optional quality-reread control, never downloads')
     parser.add_argument('--reread-model', default='qwen3.8:latest', help='installed local vision tag for opt-in quality rereads')
+    parser.add_argument('--reconstruction-config',type=Path,help='explicit approved local LaMa/runtime configuration; no downloads')
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error('port must be 1–65535')
@@ -61,7 +62,7 @@ def main(argv=None):
         device=args.device, fonts=args.fonts.expanduser().absolute() if args.fonts else None,
         font_id=args.font_id, model=args.model, profile=args.profile, endpoint=endpoint,
         manga_reread_model=args.manga_reread_model.expanduser().absolute() if args.manga_reread_model else None,
-        reread_model=args.reread_model))
+        reread_model=args.reread_model,reconstruction_config=args.reconstruction_config,isolated_workers=True))
     with create_server(app, args.port) as server:
         print(f'Pipeline viewer: http://127.0.0.1:{args.port}', flush=True)
         print(f'Ollama endpoint: {endpoint}', flush=True)

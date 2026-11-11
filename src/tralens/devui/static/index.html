@@ -21,6 +21,7 @@
         <label class="file-button" for="file">＋ Choose image<input id="file" class="visually-hidden" type="file" accept="image/png,image/jpeg"></label>
         <div class="file-info"><strong id="filename">No image selected</strong><span id="file-info">PNG or JPEG · up to 32 MiB / 4M pixels</span></div>
         <button id="run" class="primary-button" disabled>Run pipeline <span aria-hidden="true">→</span></button>
+        <button id="cancel" type="button" hidden>Cancel run</button>
       </div>
       <details id="settings" class="run-settings">
         <summary>Run settings <span id="settings-summary">Loading local settings…</span></summary>
@@ -29,6 +30,8 @@
           <label>Translation call budget<input id="budget" type="number" min="0" max="64" value="64" required><small>Up to 64. Failed calls count too. A small budget leaves text unattempted.</small></label>
           <label>Translation coverage<select id="translation-policy"><option value="coverage-first">Coverage first</option><option value="conservative">Conservative</option></select><small>Coverage first also attempts OCR text with uncertain ownership, crop isolation or orientation.</small></label>
           <label>Rendering policy<select id="policy"><option value="best-effort">Best effort</option><option value="conservative">Conservative</option></select></label>
+          <label>Source removal<select id="removal-policy"><option value="aggressive">Aggressive local removal</option><option value="preserve">Preserve uncertain artwork</option><option value="legacy">Legacy replacement behavior</option></select><small>Independent of final visibility. Aggressive cuts may remove local artwork.</small></label>
+          <label>Reconstruction<select id="reconstruction-policy"><option value="classical">Classical only (no learned model)</option><option value="lama">Local LaMa · private evaluation</option></select><small>LaMa requires an operator-configured approved local runtime.</small></label>
           <label>Translation visibility<select id="visibility-policy"><option value="replacement-only">Existing replacement choices only</option><option value="always-show">Always show available translations</option></select><small>Prioritizes visible translations; fallback patches may cover artwork.</small></label>
           <label>Artwork protection<select id="replacement-policy"><option value="all">Broad replacement (may smear artwork)</option><option value="confidence-gated">Native cleanup + OCR checks (experimental)</option></select><small>Checks preserve unsupported regions, while keeping their translations available.</small></label>
           <div><label class="checkbox-label"><input id="quality-reread" type="checkbox"> Paired OCR quality rereads (experimental)</label><small id="reread-availability">Requires existing local readers. Agreement is not proof of correct text.</small></div>

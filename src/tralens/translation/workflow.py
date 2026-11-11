@@ -9,6 +9,7 @@ from pathlib import Path
 import tempfile
 import time
 import unicodedata
+from ..scheduling import serialized
 
 
 FRAGMENT_SCHEDULING_REVISION = "strict_then_kana_han_stable_v1"
@@ -130,6 +131,7 @@ def _retain_event(output, prefix, event):
     return evidence
 
 
+@serialized
 def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_local_model=False,
                 model="translategemma:27b", profile="translategemma", endpoint="http://127.0.0.1:11434", max_attempts=2,
                 timeout=120, keep_alive=60, num_predict=1024, selected_ids=(), ocr_factory=None, runtime=None,

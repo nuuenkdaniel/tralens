@@ -338,7 +338,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
 
 
 def _report_html(report):
@@ -437,7 +437,7 @@ def cleanup_settings(policy, render_policy, confidence_settings):
               'localized cleanup requires best-effort rendering and confidence-gated replacement')
 
 
-def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', visibility_policy='replacement-only'):
+def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical', reconstruction_config=None):
     """Check rendering prerequisites before upstream inference, without a preview.
 
     This is not erase permission: run_automatic still validates the complete saved
@@ -449,6 +449,9 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
     cleanup_settings(cleanup_policy, render_policy, confidence_settings)
     from .visible_translations import settings as visibility_settings
     visibility_settings(visibility_policy)
+    from . import aggressive, reconstruction
+    aggressive.settings(removal_policy,reconstruction_policy,reconstruction_config)
+    reconstruction_spec = reconstruction.configuration(reconstruction_config) if reconstruction_policy=='lama' else None
     image, fonts = Path(image).absolute(), Path(fonts).absolute()
     content = n.read_explicit(image, 32*1024*1024)
     font_manifest = n.read_explicit(fonts, 256*1024)
@@ -462,6 +465,8 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
     selected, _ = _font(n.document(font_manifest), font_id)
     n.require(n.features.check_feature('raqm'), 'RAQM unavailable')
     checked = {'source': source, 'fonts_sha256': n.digest(font_manifest), 'font_id': selected, 'render_policy': render_policy}
+    if removal_policy!='legacy':
+        checked.update(removal_policy=removal_policy,reconstruction_policy=reconstruction_policy,reconstruction_config=reconstruction_spec)
     if confidence_settings is not None:
         checked['replacement_policy'] = confidence_settings
     if layout_policy != 'source-local':
@@ -476,7 +481,7 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
     return checked
 
 
-def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', plan_localization=False, visibility_policy='replacement-only'):
+def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', plan_localization=False, visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical', reconstruction_config=None):
     """All current strict translated candidates, with explicit machine skip states."""
     confidence_settings = _options(min_size, max_size, max_units, background_method, render_policy,
                                    replacement_policy, min_ocr_confidence)
@@ -484,6 +489,9 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     cleanup_settings(cleanup_policy, render_policy, confidence_settings)
     from . import visible_translations
     visible_translations.settings(visibility_policy)
+    from . import aggressive, reconstruction
+    aggressive.settings(removal_policy,reconstruction_policy,reconstruction_config)
+    reconstruction_spec = reconstruction.configuration(reconstruction_config) if reconstruction_policy=='lama' else None
     n.require(type(plan_localization) is bool, 'localization planning needs explicit boolean enablement')
     if plan_localization:
         cleanup_settings('localized', render_policy, confidence_settings)
@@ -545,6 +553,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         'engine': {'pillow': n.pillow_version, 'opencv': cv2.__version__, 'raqm': n.features.version_feature('raqm'),
                    'harfbuzz': n.features.version_feature('harfbuzz'), 'freetype': n.features.version_module('freetype2')}}
     plans, tiles, content_masks = {}, {}, {}
+    if removal_policy!='legacy':
+        report.update(removal_policy=removal_policy,reconstruction_policy=reconstruction_policy,reconstruction_config=reconstruction_spec)
     layout_retry_plans = {}
     if confidence_settings is not None:
         report['replacement_policy'] = confidence_settings
@@ -777,7 +787,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 # Preserve native attempts/strict reservations; use the same
                 # single page inference and unchanged association/repair guards.
                 routes = (*routes[:-1], 'semantic', routes[-1])
-            if confidence_settings is not None or visibility_policy == 'always-show':
+            if confidence_settings is not None or visibility_policy == 'always-show' or removal_policy != 'legacy':
                 routes = tuple(route for route in routes if route != 'footprint')
             for route in routes:
                 reuse = route == 'reuse'
@@ -852,7 +862,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                         row['best_effort_attempts'].append({'method': 'source_local_art_overlay', 'status': 'attempted'})
                         layer, provenance, content = best_effort.fit(row['binding']['text'], font_data, coverage,
                             Image.fromarray(plan.layout.astype(np.uint8)*255), fallback_style, work=fallback_work)
-                    if confidence_settings is not None or visibility_policy == 'always-show':
+                    if confidence_settings is not None or visibility_policy == 'always-show' or removal_policy != 'legacy':
                         reason = rc.layout_rejection(provenance, min_size)
                         check(reason is None, 'replacement_layout_confidence', reason)
                     box = layer.getchannel('A').getbbox()
@@ -1099,6 +1109,21 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         protected[:] = True
         report['pixel_audit'] = n.pixel_audit(rgb, clean, composite, erase_union, alpha_union, protected)
         report['alpha_integrity'] = {'validated_pixels': 0, 'actual_pixels': 0, 'disagreement_pixels': 0}
+    recovery_artifacts = {}
+    if removal_policy == 'aggressive':
+        try:
+            report['units'],clean,text,composite,erase_union,layout_union,recovery_artifacts,report['reconstruction_summary'] = aggressive.recover(
+                rgb,source,raw,report['units'],clean,text,erase_union,layout_union,font_data,coverage,style,
+                backend=reconstruction.LocalLama(reconstruction_spec) if reconstruction_spec else None)
+        except reconstruction.BindingError:
+            raise
+        except (ValueError,OSError,MemoryError,cv2.error) as error:
+            report['reconstruction_summary']={'policy':aggressive.POLICY,'status':'failed_primary_preserved',
+                'error':type(error).__name__+': '+str(error)[:2000],'model_config':reconstruction_spec}
+        alpha_union = np.asarray(text.getchannel('A')) != 0
+        protected = ~(erase_union | layout_union)
+        report['pixel_audit'] = n.pixel_audit(rgb,clean,composite,erase_union,alpha_union,protected)
+        report['alpha_integrity'] = {'validated_pixels':int(alpha_union.sum()),'actual_pixels':int(alpha_union.sum()),'disagreement_pixels':0}
     display_tiles = {}
     if visibility_policy == 'always-show':
         native_composite, native_text = composite, text
@@ -1116,7 +1141,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             display_tiles = {}
             for row in report['units']:
                 previous_display = row.get('display_status')
-                row['display_status'] = ('clean' if row['status']=='automatic_composed' else
+                row['display_status'] = (visible_translations.composed_status(row) if row['status']=='automatic_composed' else
                     'missing' if 'binding' not in row else 'unchanged' if row.get('reason_code')=='replacement_unchanged_text'
                     else 'undisplayed')
                 if previous_display in ('patch','caption'):
@@ -1173,13 +1198,25 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     if cleanup_policy != 'native':
         report['background_summary']['localized_whole_stroke_rendered'] = sum(row['status'] == 'automatic_composed'
             and row.get('cleanup_method') == 'localized_whole_stroke_flat_fill' for row in report['units'])
+    if removal_policy!='legacy':
+        # Exact target availability survives overflow, budgets and model failures.
+        report['transcript'] = [{'unit_id':row['unit_id'],'binding':row['binding'],
+            'image_display':row.get('display_status',visible_translations.composed_status(row) if row['status']=='automatic_composed' else 'undisplayed')}
+            for row in report['units'] if 'binding' in row]
+        report['transcript_only'] = sum(item['image_display']=='undisplayed' for item in report['transcript'])
     report['job_revision'] = n.revision({k: v for k, v in report.items() if k not in ('job_revision', 'artifacts')})
-    blobs, total = {}, 0
+    blobs, total, recovery_total = {}, 0, 0
     def add(name, value):
-        nonlocal total
+        nonlocal total, recovery_total
+        if name.startswith('recovery-'):
+            recovery_total += len(value)
+            n.budget_check(recovery_total <= 64*1024*1024 and sum(k.startswith('recovery-') for k in blobs)<1024,
+                'separate reconstruction artifact budget')
+            blobs[name] = value
+            return
         total += len(value)
         n.budget_check(len(value) <= 64*1024*1024 and total <= 128*1024*1024, 'automatic artifact byte budget')
-        n.budget_check(len(blobs) < MAX_ARTIFACTS, 'automatic artifact count budget')
+        n.budget_check(sum(not k.startswith('recovery-') for k in blobs) < MAX_ARTIFACTS, 'automatic artifact count budget')
         blobs[name] = value
     def png(name, value):
         stream = BytesIO()
@@ -1189,6 +1226,11 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         add(name, value)
     for name, value in (('source', rgb), ('clean', clean), ('composite', composite), ('text', text)):
         png(name+'.png', value)
+    for name,value in recovery_artifacts.items():
+        if isinstance(value,bytes):add(name,value)
+        else:png(name,value)
+    if removal_policy!='legacy':
+        add('transcript.json',(n.canonical(report['transcript'])+'\n').encode())
     if visibility_policy == 'always-show':
         for name, value in (('patch',patch_layer),('fallback-text',fallback_text),('native-text',native_text),('native-composite',native_composite)):
             png(name+'.png',value)
@@ -1207,7 +1249,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         png(name+'.png', Image.fromarray(mask.astype(np.uint8)*255))
     for i, plan in plans.items():
         row = report['units'][i]
-        applied = plan.erase if row['status'] == 'automatic_composed' else np.zeros_like(plan.erase)
+        applied = plan.erase if row['status'] == 'automatic_composed' and not row.get('reconstruction',{}).get('status')=='composed_unverified' else np.zeros_like(plan.erase)
         masks = {'interior': plan.layout, 'foreground': plan.foreground, 'applied-erase': applied,
                  'layout': plan.layout, 'obstacles': plan.obstacles}
         metadata, rasters = n.specimen_rasters(rgb, clean, composite, masks, tiles.get(i))

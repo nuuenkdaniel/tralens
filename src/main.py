@@ -8,6 +8,15 @@ from collections import Counter
 import hashlib
 from pathlib import Path
 import time
+from functools import wraps
+
+
+def serialized(function):
+    @wraps(function)
+    def run(*args,**kwargs):
+        from tralens.scheduling import inference_lease
+        with inference_lease():return function(*args,**kwargs)
+    return run
 
 
 def crop_localization_pass(preview, plan, *, image, output, device, model_root, ocr_factory=None):
@@ -81,11 +90,13 @@ def quality_refiner(*, endpoint, model, manga_model):
     return refine
 
 
+@serialized
 def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28,
                  max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort',
                  replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', quality_reread=False,
                  reread_model='qwen3.8:latest', manga_reread_model=None, source_localization=False,
-                 visibility_policy='replacement-only', **preview_options):
+                 visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical',
+                 reconstruction_config=None, **preview_options):
     """Connect the existing OCR/translation preview to automatic rendering.
 
     Source/translation bindings stay strict; rendering quality follows the chosen
@@ -136,6 +147,9 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         rendering_options['cleanup_policy'] = 'localized'
     if visibility_policy != 'replacement-only':
         rendering_options['visibility_policy'] = visibility_policy
+    if removal_policy!='legacy' or reconstruction_policy!='classical' or reconstruction_config is not None:
+        rendering_options.update(removal_policy=removal_policy,reconstruction_policy=reconstruction_policy,
+            reconstruction_config=reconstruction_config)
     checked = preflight_automatic(**rendering_options)
     report = {'schema_version': 1, 'purpose': 'automatic_pipeline_candidate', 'status': 'running',
         'stage': 'preview', 'source': checked['source'], 'fonts_sha256': checked['fonts_sha256'],
@@ -157,6 +171,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         report['source_localization'] = {'enabled': True, 'semantic_ownership_verified': False}
     if visibility_policy != 'replacement-only':
         report['visibility_policy'] = visibility_policy
+    for key in ('removal_policy','reconstruction_policy','reconstruction_config'):
+        if key in checked:report[key]=checked[key]
     output.mkdir(mode=0o700)
     checkpoint = output/'pipeline.json'
     _atomic_json(checkpoint, report)
@@ -205,7 +221,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                 render_preview = output/'preview/preview.json'
                 render_options = dict(rendering_options)
                 if source_localization:
-                    native_options = {**rendering_options, 'cleanup_policy': 'native', 'visibility_policy':'replacement-only'}
+                    native_options = {**rendering_options, 'cleanup_policy': 'native', 'visibility_policy':'replacement-only',
+                        'removal_policy':'preserve','reconstruction_policy':'classical','reconstruction_config':None}
                     started = time.monotonic()
                     native = run_automatic(preview=render_preview, output=output/'rendering-native',
                                            plan_localization=True, **native_options)
@@ -307,6 +324,9 @@ def main(argv=None):
                           help='opt-in bounded crop predictions using existing OCR; with render, retry failed cleanup as unverified whole strokes')
     parser.add_argument('--visibility-policy', choices=('replacement-only','always-show'),default='replacement-only',
                         help='render: always-show prioritizes visible translations; opaque patches may cover artwork, then nearby captions')
+    parser.add_argument('--removal-policy',choices=('legacy','preserve','aggressive'),default='legacy')
+    parser.add_argument('--reconstruction-policy',choices=('classical','lama'),default='classical')
+    parser.add_argument('--reconstruction-config',type=Path,help='explicit approved local model/runtime JSON; never downloaded')
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--keep-alive", type=int, default=60)
     parser.add_argument("--num-predict", type=int, default=1024)
@@ -344,6 +364,8 @@ def main(argv=None):
         parser.error('quality reread options require --render')
     if not args.render and args.visibility_policy != 'replacement-only':
         parser.error('--visibility-policy requires --render')
+    if not args.render and (args.removal_policy!='legacy' or args.reconstruction_policy!='classical' or args.reconstruction_config):
+        parser.error('removal/reconstruction options require --render')
     if not args.render and any(getattr(args, name) is not None for name in ('fonts', 'font_id', 'min_size', 'max_size', 'max_units', 'background_method', 'text_mask_model', 'render_policy', 'replacement_policy', 'min_ocr_confidence', 'layout_policy')):
         parser.error('font/rendering options require --render')
     # Keep help/import and missing opt-in paths free of OCR/provider imports.
@@ -368,7 +390,8 @@ def main(argv=None):
                 render_policy=args.render_policy or 'best-effort', replacement_policy=args.replacement_policy or 'all',
                 min_ocr_confidence=args.min_ocr_confidence, layout_policy=args.layout_policy or 'source-local', quality_reread=args.quality_reread,
                 reread_model=args.reread_model, manga_reread_model=args.manga_reread_model,
-                visibility_policy=args.visibility_policy, **preview_options)
+                visibility_policy=args.visibility_policy,removal_policy=args.removal_policy,
+                reconstruction_policy=args.reconstruction_policy,reconstruction_config=args.reconstruction_config, **preview_options)
             coverage = report['coverage'] or {}
             print(f"{report['status']}: {args.output / 'pipeline.json'}; "
                   f"strict translations={coverage.get('strict_translations', 0)}; rendered={coverage.get('rendered', 0)}; "

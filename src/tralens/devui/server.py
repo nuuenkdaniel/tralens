@@ -44,16 +44,21 @@ class Config:
     endpoint: str = 'http://127.0.0.1:11434'
     manga_reread_model: Path | None = None
     reread_model: str = 'qwen3.8:latest'
+    reconstruction_config: Path | None = None
+    isolated_workers: bool = False  # Embedding/test compatibility; CLI enables this.
+    job_seconds: int = 1800
+    job_storage_bytes: int = 2*1024**3
+    root_storage_bytes: int = 8*1024**3
 
 
 def options(value, *, render_enabled):
     if type(value) is not dict or set(value) - {'mode', 'max_attempts', 'allow_fragments', 'render_policy', 'translation_policy',
-                                             'replacement_policy', 'quality_reread', 'layout_policy', 'source_localization', 'visibility_policy'}:
+                                             'replacement_policy', 'quality_reread', 'layout_policy', 'source_localization', 'visibility_policy', 'removal_policy', 'reconstruction_policy'}:
         raise RequestError('Unknown run options.')
     result = dict(mode='render' if render_enabled else 'ocr', max_attempts=64,
         allow_fragments=False, render_policy='best-effort', translation_policy='coverage-first',
         replacement_policy='all', quality_reread=False, layout_policy='source-local', source_localization=False,
-        visibility_policy='replacement-only')
+        visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical')
     result.update(value)
     if type(result['mode']) is not str or result['mode'] not in ('ocr', 'translate', 'render'):
         raise RequestError('Choose OCR, translation, or rendering.')
@@ -87,6 +92,10 @@ def options(value, *, render_enabled):
         raise RequestError('Unknown translation visibility policy.')
     if result['visibility_policy'] != 'replacement-only' and result['mode'] != 'render':
         raise RequestError('Always show available translations requires Final rendering.')
+    if result['removal_policy'] not in ('legacy','preserve','aggressive') or result['reconstruction_policy'] not in ('classical','lama'):
+        raise RequestError('Unknown removal or reconstruction policy.')
+    if result['reconstruction_policy']=='lama' and (result['mode']!='render' or result['removal_policy']!='aggressive'):
+        raise RequestError('LaMa requires Final rendering and Aggressive removal.')
     return result
 
 
@@ -131,6 +140,9 @@ def execute_job(config, job):
             layout_policy=settings.get('layout_policy', 'source-local'),
             source_localization=settings.get('source_localization', False),
             visibility_policy=settings.get('visibility_policy', 'replacement-only'),
+            removal_policy=settings.get('removal_policy','legacy'),
+            reconstruction_policy=settings.get('reconstruction_policy','classical'),
+            reconstruction_config=config.reconstruction_config if settings.get('reconstruction_policy')=='lama' else None,
             quality_reread=settings.get('quality_reread', False), reread_model=config.reread_model,
             manga_reread_model=config.manga_reread_model if settings.get('quality_reread') else None, **kwargs)
     from ..translation.workflow import run_preview
@@ -179,6 +191,8 @@ class App:
                     'layout_policy': pipeline.get('layout_policy', 'source-local'),
                     'source_localization': bool(pipeline.get('source_localization', {}).get('enabled')), **settings}
                 settings.setdefault('visibility_policy',pipeline.get('visibility_policy','replacement-only'))
+                settings.setdefault('removal_policy',pipeline.get('removal_policy','legacy'))
+                settings.setdefault('reconstruction_policy',pipeline.get('reconstruction_policy','classical'))
                 settings = options(settings, render_enabled=True)  # View old jobs even without a current font manifest.
                 images = [directory/name for name in ('input.png', 'input.jpg') if (directory/name).is_file()]
                 if len(images) != 1 or images[0].is_symlink():
@@ -218,7 +232,7 @@ class App:
     def _save_job(self, job, *, replace_owned=False):
         from ..translation.workflow import _atomic_json
         value = {key: job.get(key) for key in
-                 ('id', 'size', 'source_sha256', 'options', 'status', 'error', 'retry_of')}
+                 ('id', 'size', 'source_sha256', 'options', 'status', 'error', 'retry_of', 'cancel_requested')}
         value.update(purpose='development_viewer_job', schema_version=1,
             elapsed_seconds=round(job.get('ended', time.monotonic())-job['started'], 1))
         _atomic_json(job['directory']/'viewer.json', value, replace_owned=replace_owned)
@@ -229,7 +243,9 @@ class App:
             model_root=str(self.config.model_root), fonts=str(self.config.fonts) if self.config.fonts else None,
             render_enabled=self.config.fonts is not None, max_upload_bytes=MAX_UPLOAD,
             page_pixel_limit=4_000_000, max_jobs=MAX_JOBS,
-            quality_reread_available=self.config.manga_reread_model is not None, reread_model=self.config.reread_model)
+            quality_reread_available=self.config.manga_reread_model is not None, reread_model=self.config.reread_model,
+            reconstruction_available=self.config.reconstruction_config is not None,
+            cancellation_available=self.config.isolated_workers)
 
     def list_jobs(self):
         with self.lock:
@@ -237,6 +253,15 @@ class App:
 
     def start(self, data, supplied, *, retry_of=None):
         settings = options(supplied, render_enabled=self.config.fonts is not None)
+        if self.config.isolated_workers:
+            from .jobs import tree_bytes
+            if tree_bytes(self.root)>=self.config.root_storage_bytes-self.config.job_storage_bytes:
+                raise RequestError('Retained job storage is full. Archive old evidence before starting another run.',409)
+        if settings['reconstruction_policy']=='lama':
+            if self.config.reconstruction_config is None:
+                raise RequestError('Start the viewer with an explicit --reconstruction-config to enable local LaMa evaluation.')
+            from ..rendering.reconstruction import configuration
+            configuration(self.config.reconstruction_config)
         if settings['quality_reread'] and self.config.manga_reread_model is None:
             raise RequestError('Start the viewer with --manga-reread-model pointing to the existing local snapshot to enable quality rereads.')
         if not 0 < len(data) <= MAX_UPLOAD:
@@ -300,7 +325,11 @@ class App:
 
     def _run(self, job):
         try:
-            report = self.runner(self.config, job)
+            if self.config.isolated_workers:
+                from .jobs import run
+                with self.lock:job.setdefault('cancel',threading.Event())
+                report=run(self.config,job,job['cancel'])
+            else:report = self.runner(self.config, job)
             status = report['status']
             error = report.get('error')
         except (Exception, KeyboardInterrupt) as failure:
@@ -313,6 +342,17 @@ class App:
                 job['history_warning'] = 'Could not save viewer history: '+str(failure)[:500]
             self.active = None
             job['done'].set()
+
+    def cancel(self,identity):
+        with self.lock:
+            job=self.jobs.get(identity)
+            if job is None:raise RequestError('Job not found.',404)
+            if job['status']!='running':raise RequestError('Job is not running.',409)
+            if not self.config.isolated_workers:raise RequestError('Cancellation requires the isolated CLI worker.',409)
+            job.setdefault('cancel',threading.Event()).set()
+            job['cancel_requested']=True
+            self._save_job(job,replace_owned=True)
+        return identity
 
     def job(self, identity):
         with self.lock:
@@ -479,7 +519,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.local_request()
             retry = re.fullmatch('/api/jobs/([0-9a-f]{32})/retry', self.path)
-            if self.path != '/api/jobs' and retry is None:
+            cancel = re.fullmatch('/api/jobs/([0-9a-f]{32})/cancel', self.path)
+            if self.path != '/api/jobs' and retry is None and cancel is None:
                 raise RequestError('Not found.', 404)
             if not secrets.compare_digest(self.headers.get('X-Tralens-Token', ''), self.server.app.token):
                 raise RequestError('Invalid session token; reload the page.', 403)
@@ -492,14 +533,14 @@ class Handler(BaseHTTPRequestHandler):
             data = self.rfile.read(length)
             if len(data) != length:
                 raise RequestError('Incomplete request.')
-            supplied = data if retry else self.headers.get('X-Tralens-Options', '{}')
+            supplied = data if retry or cancel else self.headers.get('X-Tralens-Options', '{}')
             if len(supplied) > 2048:
                 raise RequestError('Run options too large.')
             try:
                 supplied = json.loads(supplied)
             except ValueError as error:
                 raise RequestError('Invalid run options JSON.') from error
-            identity = self.server.app.retry(retry.group(1), supplied) if retry else self.server.app.start(data, supplied)
+            identity = self.server.app.cancel(cancel.group(1)) if cancel else self.server.app.retry(retry.group(1), supplied) if retry else self.server.app.start(data, supplied)
             self.json(202, dict(id=identity))
         except RequestError as error:
             self.json(error.status, dict(error=str(error)))

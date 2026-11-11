@@ -50,7 +50,7 @@ function qualityNotice(data, rereadAvailable = false) {
   if (data.visibility_policy === "always-show" || data.options?.visibility_policy === "always-show") {
     const counts = data.display_summary;
     return {copy: "Prioritizes visible translations; fallback patches may cover artwork. " +
-      (counts ? `${counts.clean_replacements} clean replacements · ${counts.patch_backed_translations} patch-backed translations · ${counts.nearby_captions} nearby captions · ${counts.intentionally_unchanged} intentionally unchanged · ${counts.available_not_displayed} available but not displayed · ${counts.missing_translations} missing translations. ` : "") +
+      (counts ? `${counts.clean_replacements} clean replacements · ${counts.learned_reconstructions || 0} learned reconstructions · ${counts.aggressive_replacements || 0} aggressive removals · ${counts.patch_backed_translations} patch-backed translations · ${counts.nearby_captions} nearby captions · ${counts.intentionally_unchanged} intentionally unchanged · ${counts.available_not_displayed} available but not displayed · ${counts.missing_translations} missing translations. ` : "") +
       "Captions retain Japanese source text. Patches and captions are not artwork reconstruction or human-verified translations.", action: null};
   }
   if (data.replacement_policy !== "confidence-gated") return {
@@ -113,6 +113,9 @@ if (typeof document !== "undefined") {
     $("layout-policy").disabled = value || $("mode").value !== "render";
     $("source-localization").disabled = value || $("mode").value !== "render";
     $("visibility-policy").disabled = value || $("mode").value !== "render";
+    $("removal-policy").disabled = value || $("mode").value !== "render";
+    $("reconstruction-policy").disabled = value || $("mode").value !== "render";
+    $("reconstruction-policy").querySelector('[value="lama"]').disabled = !config?.reconstruction_available;
     $("quality-retry").disabled = value || !config?.render_enabled;
   }
   function settingsSummary() {
@@ -352,6 +355,7 @@ if (typeof document !== "undefined") {
     image.src = url;
   }
   function display(data) {
+    $("cancel").hidden = data.status !== "running" || !config?.cancellation_available;
     snapshot = data;
     if (settingsJob !== data.id) {
       $("mode").value = data.options.mode; $("budget").value = data.options.max_attempts;
@@ -362,6 +366,8 @@ if (typeof document !== "undefined") {
       $("layout-policy").value = data.options.layout_policy || "source-local";
       $("source-localization").checked = Boolean(data.options.source_localization);
       $("visibility-policy").value = data.options.visibility_policy || "replacement-only";
+      $("removal-policy").value = data.options.removal_policy || "legacy";
+      $("reconstruction-policy").value = data.options.reconstruction_policy || "classical";
       settingsJob = data.id; settingsSummary();
     }
     if (!pendingFile) $("filename").textContent = `Saved run · ${data.id.slice(0, 8)}`;
@@ -436,6 +442,8 @@ if (typeof document !== "undefined") {
       layout_policy: rendering ? $("layout-policy").value : "source-local",
       source_localization: rendering && $("source-localization").checked};
     settings.visibility_policy = rendering ? $("visibility-policy").value : "replacement-only";
+    settings.removal_policy = rendering ? $("removal-policy").value : "legacy";
+    settings.reconstruction_policy = rendering ? $("reconstruction-policy").value : "classical";
     setBusy(true); showError(""); $("status").textContent = retry ? "Starting a fresh run with the saved image…" : "Uploading original image…";
     try {
       const result = retry
@@ -443,6 +451,13 @@ if (typeof document !== "undefined") {
         : await request("/api/jobs", {method: "POST", headers: {"Content-Type": "application/octet-stream", "X-Tralens-Token": config.token, "X-Tralens-Options": JSON.stringify(settings)}, body: file});
       const choice = node("option", `${retry ? "Retry " + parent.slice(0, 8) : file.name} · ${result.id.slice(0, 8)}`); choice.value = result.id; $("jobs").append(choice); $("jobs").value = result.id; selectJob(result.id, true);
     } catch (error) { showError(error.message); $("status").textContent = "Run was not started."; setBusy(false); }
+  });
+  $("cancel").addEventListener("click", async () => {
+    if (!current) return;
+    try {
+      await request(`/api/jobs/${current}/cancel`, {method:"POST",headers:{"Content-Type":"application/json","X-Tralens-Token":config.token},body:"{}"});
+      $("cancel").hidden = true;
+    } catch (error) { showError(error.message); }
   });
   $("quality-retry").addEventListener("click", () => {
     if (busy || !snapshot || !config.render_enabled) return;
@@ -475,7 +490,7 @@ if (typeof document !== "undefined") {
       if (context.isPointInPath(path, x, y)) { const owner = owners.get(JSON.stringify(detection.source_id)); if (owner) chooseUnit(owner.unit.id, true); break; }
     }
   });
-  for (const id of ["mode", "budget", "translation-policy", "replacement-policy", "quality-reread", "layout-policy", "source-localization", "visibility-policy"]) $(id).addEventListener("input", settingsSummary);
+  for (const id of ["mode", "budget", "translation-policy", "replacement-policy", "quality-reread", "layout-policy", "source-localization", "visibility-policy", "removal-policy", "reconstruction-policy"]) $(id).addEventListener("input", settingsSummary);
   for (const eventName of ["dragenter", "dragover"]) document.addEventListener(eventName, event => {
     if (event.dataTransfer?.types.includes("Files")) { event.preventDefault(); if (!busy) document.body.classList.add("dragging"); }
   });
@@ -487,6 +502,8 @@ if (typeof document !== "undefined") {
   });
   request("/api/config").then(async value => {
     config = value;
+    $("reconstruction-policy").value = config.reconstruction_available ? "lama" : "classical";
+    $("visibility-policy").value = "always-show";
     $("configuration").textContent = `${config.device} · ${config.model} · Ollama: ${config.endpoint || "configured local service"} · OCR: ${config.model_root}${config.fonts ? " · Fonts: " + config.fonts : " · No --fonts: rendering disabled"}`;
     $("reread-availability").textContent = config.quality_reread_available ? `Optional crop presentations go to ${config.reread_model} on the configured private Ollama endpoint, with local Manga OCR corroboration. No downloads; agreement is not truth.` : "Not configured: start with --manga-reread-model and an existing snapshot. Artwork checks work without rereads.";
     $("mode").querySelector('[value="render"]').disabled = !config.render_enabled; $("mode").value = config.render_enabled ? "render" : "ocr"; settingsSummary(); setBusy(false);
