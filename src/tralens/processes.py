@@ -27,11 +27,12 @@ def group_members(group):
 def recover(state):
     """Recover only a dead supervisor's token-marked group, including descendants."""
     owner=state.get('owner');token=state.get('token');group=state.get('process_group')
-    if not owner or not token or type(group) is not int or group<=1:
+    if type(group) is not int or group<=1:
         return 'legacy_unverifiable'
-    if owner.get('boot_id')!=Path('/proc/sys/kernel/random/boot_id').read_text().strip():return 'previous_boot'
+    if owner and owner.get('boot_id')!=Path('/proc/sys/kernel/random/boot_id').read_text().strip():return 'previous_boot'
     members=group_members(group)
     if not members:return 'already_stopped'
+    if not owner or not token:return 'legacy_unverifiable'
     if identity(owner['pid'])==owner:return 'live_supervisor'
     marker=('TRALENS_WORKER_TOKEN='+token).encode()
     if any(marker not in environ for _,environ in members):return 'identity_mismatch'

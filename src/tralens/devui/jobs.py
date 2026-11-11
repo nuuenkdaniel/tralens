@@ -82,12 +82,15 @@ def recover_jobs(root):
         try:
             if path.stat().st_size>65536:raise ValueError('oversized worker state')
             state=json.loads(path.read_bytes())
-            if state.get('status')!='running':continue
             recovered=directory/'worker-recovery.json'
             if recovered.is_file() and not recovered.is_symlink():
                 previous=json.loads(recovered.read_bytes())
                 if previous.get('previous_worker')==state:continue
             status=recover(state)
+            # A supervisor can die after publishing its terminal state but before
+            # its finally block kills descendants. Terminal status is not proof
+            # that the owned process group is empty.
+            if state.get('status')!='running' and status in ('already_stopped','previous_boot'):continue
             if status in ('legacy_unverifiable','live_supervisor','identity_mismatch'):
                 blocked.append({'job':directory.name,'reason':status});continue
             _atomic_json(directory/'worker-recovery.json',{'status':status,'previous_worker':state},replace_owned=True)

@@ -87,6 +87,67 @@ class Hardening(unittest.TestCase):
             with self.assertRaises(OSError):supervise(command,self.root,threading.Event(),seconds=5,storage_bytes=10000)
         self.assertFalse(target.exists())
 
+    def test_process_crash_on_either_side_of_replace_keeps_complete_checkpoint(self):
+        env={**os.environ,'PYTHONPATH':str(Path(__file__).resolve().parents[1]/'src')}
+        for after in (False,True):
+            with self.subTest(after_replace=after):
+                directory=self.root/str(after);directory.mkdir()
+                target=directory/'checkpoint.json';ready=directory/'ready'
+                _atomic_json(target,{'stage':'old'})
+                script=('from pathlib import Path\nimport time\nfrom tralens import storage\n'
+                    'from tralens.translation.workflow import _atomic_json\n'
+                    f'def pause(*args):\n Path({str(ready)!r}).touch()\n time.sleep(30)\n'
+                    +('storage.sync_directory=pause\n' if after else 'storage.os.replace=pause\n')
+                    +f'_atomic_json(Path({str(target)!r}),{{"stage":"new"}},replace_owned=True)\n')
+                child=subprocess.Popen([sys.executable,'-c',script],env=env)
+                try:
+                    deadline=time.monotonic()+5
+                    while not ready.exists() and time.monotonic()<deadline:time.sleep(.02)
+                    self.assertTrue(ready.exists());child.kill();child.wait(timeout=3)
+                    self.assertEqual(json.loads(target.read_bytes()),{'stage':'new' if after else 'old'})
+                finally:
+                    if child.poll() is None:child.kill();child.wait()
+
+    def test_terminal_state_does_not_hide_orphan_descendant(self):
+        job=self.root/'terminal';job.mkdir();ready=job/'terminal-published'
+        descendant=job/'descendant-ready'
+        descendant_script=f'from pathlib import Path;import time;Path({str(descendant)!r}).touch();time.sleep(30)'
+        command=[sys.executable,'-c',
+            'import subprocess,sys,time,pathlib\n'
+            f'subprocess.Popen([sys.executable,"-c",{descendant_script!r}])\n'
+            f'while not pathlib.Path({str(descendant)!r}).exists():time.sleep(.01)']
+        script=('import time,threading\nfrom pathlib import Path\nfrom tralens.devui.jobs import supervise\n'
+            'from tralens.translation import workflow\noriginal=workflow._atomic_json\n'
+            'def publish(path,value,**kwargs):\n original(path,value,**kwargs)\n'
+            f' if path.name=="worker-state.json" and value.get("status")=="complete":\n  Path({str(ready)!r}).touch()\n  time.sleep(30)\n'
+            'workflow._atomic_json=publish\n'
+            f'supervise({command!r},Path({str(job)!r}),threading.Event(),seconds=10,storage_bytes=1000000)')
+        env={**os.environ,'PYTHONPATH':str(Path(__file__).resolve().parents[1]/'src')}
+        parent=subprocess.Popen([sys.executable,'-c',script],env=env)
+        try:
+            deadline=time.monotonic()+5
+            while not ready.exists() and time.monotonic()<deadline:time.sleep(.02)
+            self.assertTrue(ready.exists());parent.kill();parent.wait(timeout=3)
+            self.assertEqual(recover_jobs(self.root),[])
+            record=json.loads((job/'worker-recovery.json').read_bytes())
+            self.assertEqual(record['previous_worker']['status'],'complete')
+            self.assertEqual(record['status'],'owned_group_killed')
+        finally:
+            if parent.poll() is None:parent.kill();parent.wait()
+            state=job/'worker-state.json'
+            if state.exists():processes.recover(json.loads(state.read_bytes()))
+
+    def test_stopped_legacy_job_does_not_block_but_live_unowned_group_does(self):
+        job=self.root/'legacy';job.mkdir()
+        child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],start_new_session=True)
+        try:
+            _atomic_json(job/'worker-state.json',{'status':'complete','process_group':child.pid})
+            self.assertEqual(recover_jobs(self.root),[{'job':'legacy','reason':'legacy_unverifiable'}])
+            self.assertIsNone(child.poll());child.kill();child.wait(timeout=3)
+            self.assertEqual(recover_jobs(self.root),[])
+        finally:
+            if child.poll() is None:child.kill();child.wait()
+
     def test_storage_quota_retains_completed_stage(self):
         script=f'from pathlib import Path;import time;Path({str(self.root/"done")!r}).write_bytes(b"x"*2000);time.sleep(10)'
         report=supervise([sys.executable,'-c',script],self.root,threading.Event(),seconds=3,storage_bytes=1500)
