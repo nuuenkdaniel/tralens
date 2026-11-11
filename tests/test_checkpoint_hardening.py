@@ -13,6 +13,8 @@ import time
 import unittest
 from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 from PIL import Image
@@ -43,6 +45,23 @@ class Hardening(unittest.TestCase):
                 Image.fromarray(value.astype(np.uint8)*255).save(self.root/(name+'.png'))
             (self.root/'request.json').write_text(json.dumps({'request':request,'config':config}))
         write();self.assertTrue(np.array_equal(worker.inputs(self.root)[2],rgb))
+        session=Mock()
+        session.get_inputs.return_value=[SimpleNamespace(name='image',type='tensor(float)',shape=['batch',3,512,512]),
+            SimpleNamespace(name='mask',type='tensor(float)',shape=['batch',1,512,512])]
+        def infer(_,feed):
+            self.assertEqual(feed['image'].shape,(1,3,512,512))
+            expected=np.pad(mask,((0,480),(0,472)),mode='symmetric')
+            self.assertTrue(np.array_equal(feed['mask'][0,0],expected))
+            return [np.full((1,3,512,512),123,np.float32)]
+        session.run.side_effect=infer;session.get_providers.return_value=['synthetic-test-only']
+        runtime=SimpleNamespace(SessionOptions=SimpleNamespace,ExecutionMode=SimpleNamespace(ORT_SEQUENTIAL=0),
+            InferenceSession=Mock(return_value=session),__version__='synthetic')
+        with patch.dict(sys.modules,{'onnxruntime':runtime}),patch.object(worker.resource,'setrlimit'), \
+                patch.object(worker,'model_bytes',return_value=b'synthetic-model'):
+            worker.main(self.root)
+        metadata=json.loads((self.root/'result.json').read_bytes())
+        self.assertEqual(metadata['output_pixels_sha256'],rec.pixels_hash(np.full_like(rgb,123)))
+        session.run.assert_called_once()
         for file in ('input','mask','commit','protected'):
             write();image=Image.open(self.root/(file+'.png')).copy();image.putpixel((0,0),(0,0,0) if file=='input' else 255)
             image.save(self.root/(file+'.png'))

@@ -34,6 +34,15 @@ def inputs(directory):
         raise rec.BindingError('worker input binding failure') from error
 
 
+def model_bytes(directory,config):
+    model=Path(config['model']).read_bytes()
+    if (config['sha256']!='1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6'
+            or len(model)!=208044816 or hashlib.sha256(model).hexdigest()!=config['sha256']):
+        (directory/'binding-error.json').write_text(json.dumps({'error':'model bytes changed'}))
+        raise ValueError('model bytes changed before worker inference')
+    return model
+
+
 def main(directory):
     # Limits precede native imports/model parsing; CPU execution only.
     resource.setrlimit(resource.RLIMIT_AS,(6*1024**3,6*1024**3))
@@ -44,11 +53,7 @@ def main(directory):
     from PIL import Image
     config,req,rgb,mask=inputs(directory)
     import onnxruntime as ort
-    model=Path(config['model']).read_bytes()
-    if (config['sha256']!='1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6'
-            or len(model)!=208044816 or hashlib.sha256(model).hexdigest()!=config['sha256']):
-        (directory/'binding-error.json').write_text(json.dumps({'error':'model bytes changed'}))
-        raise ValueError('model bytes changed before worker inference')
+    model=model_bytes(directory,config)
     h,w=mask.shape
     if rgb.shape!=(h,w,3) or not 0<max(h,w)<=512:raise ValueError('invalid native crop')
     # Reflect masked lettering as masked too. Zero mask padding would expose
@@ -59,9 +64,9 @@ def main(directory):
     options.execution_mode=ort.ExecutionMode.ORT_SEQUENTIAL
     started=time.monotonic();session=ort.InferenceSession(model,sess_options=options,providers=['CPUExecutionProvider'])
     session.disable_fallback()
-    inputs=session.get_inputs()
+    model_inputs=session.get_inputs()
     feed={}
-    for value in inputs:
+    for value in model_inputs:
         if value.type!='tensor(float)' or len(value.shape)!=4 or value.shape[0] not in (1,'batch'):
             raise ValueError('unexpected LaMa input type/batch')
         if value.shape[1:]==[3,512,512]:feed[value.name]=image.transpose(2,0,1)[None].astype(np.float32)/255
