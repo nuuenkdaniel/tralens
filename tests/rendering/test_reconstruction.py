@@ -78,7 +78,7 @@ class Integrated(unittest.TestCase):
             native=automatic.run_automatic(**self.fixture.inputs(),output=self.f.root/'native',removal_policy='preserve',min_size=14,max_size=28)
             report=self.run_case('aggressive',visibility_policy='always-show')
         self.assertGreater(report['reconstruction_summary']['attempted'],0)
-        self.assertGreater(report['reconstruction_summary']['selected_classical'],0)
+        self.assertGreater(report['reconstruction_summary']['selected_classical']+report['reconstruction_summary']['selected_fill'],0)
         self.assertGreater(report['display_summary']['aggressive_replacements'],0)
         for layer in ('clean','text'):
             before=np.asarray(Image.open(self.f.root/'native'/f'{layer}.png'))
@@ -94,6 +94,12 @@ class Integrated(unittest.TestCase):
         self.assertEqual(len(report['transcript']),2)
 
     def test_timeout_and_oom_fall_back_but_foreign_output_is_hard(self):
+        # Force a nonflat cheap candidate so this contract test exercises the
+        # worker even when the synthetic page qualifies for a dominant fill.
+        real=aggressive.cheap
+        force_classical=lambda *a: (real(*a)[0],'classical_telea_unverified')
+        forcing=patch.object(aggressive,'cheap',side_effect=force_classical)
+        forcing.start();self.addCleanup(forcing.stop)
         for index,error in enumerate((subprocess.TimeoutExpired('isolated-worker',.1),MemoryError('OOM'))):
             with patch.object(rec,'configuration',return_value={'sha256':rec.MODEL_SHA256}), \
                  patch.object(rec.LocalLama,'reconstruct',side_effect=error):

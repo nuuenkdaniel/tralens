@@ -43,7 +43,8 @@ class PipelineTests(unittest.TestCase):
     def run_pipeline(self, name='job', **options):
         kwargs = dict(fonts=self.fonts, device='cpu', model_root=self.fixture.weights,
             run_local_ocr=True, run_local_model=True, ocr_factory=self.fixture.factory,
-            runtime=SimpleNamespace(generate=self.provider), render_policy='conservative')
+            runtime=SimpleNamespace(generate=self.provider), render_policy='conservative',
+            removal_policy='legacy',visibility_policy='replacement-only')
         kwargs.update(options)
         with patch('socket.socket', side_effect=AssertionError('no live network')):
             return main.run_pipeline(self.fixture.image, self.root/name, **kwargs)
@@ -157,6 +158,19 @@ class PipelineTests(unittest.TestCase):
         manifest = json.loads((self.root/'job/rendering/manifest.json').read_text())
         self.assertEqual(manifest['pixel_audit']['clean_changed_pixels'], 0)
         self.assertEqual(sum(report['coverage']['render_skip_reasons'].values()), 2)
+
+    def test_new_defaults_remove_source_even_when_requested_font_cannot_fit(self):
+        report=main.run_pipeline(self.fixture.image,self.root/'removal-defaults',fonts=self.fonts,
+            device='cpu',model_root=self.fixture.weights,run_local_ocr=True,run_local_model=True,
+            ocr_factory=self.fixture.factory,runtime=SimpleNamespace(generate=self.provider),
+            min_size=144,max_size=144)
+        self.assertEqual(report['removal_policy'],'aggressive')
+        self.assertEqual(report['visibility_policy'],'always-show')
+        manifest=json.loads((self.root/'removal-defaults/rendering/manifest.json').read_bytes())
+        self.assertGreater(manifest['pixel_audit']['clean_changed_pixels'],0)
+        self.assertEqual(manifest['pixel_audit']['outside_cleanup_changed_pixels'],0)
+        self.assertEqual(manifest['coverage']['rendered'],0)
+        self.assertEqual(manifest['removal_summary']['removed'],2)
 
     def test_no_strict_results_skips_rendering_and_keeps_preview(self):
         for name, budget in (('zero', 0), ('failed-results', 2)):

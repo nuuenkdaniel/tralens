@@ -1,6 +1,19 @@
 # Private best-effort checkpoint (not release-ready)
 
-## Verified continuation v2
+## Current: removal-first continuation v3
+
+[Results, visual failures, costs and evidence index](production-best-effort-results-v3.md).
+The coordinator/viewer now default to source removal independent of English fit.
+Polarity-aware grouping, solid reverse lettering, source-centered fallback layout,
+and a narrowly selected optional Manga OCR reread have demonstrated local gains.
+The four final replay pages still have serious language errors and artwork loss.
+Automatic reuse of failed-placement learned cleanplates was rejected visually.
+
+The v3 full suite passed **1,049 tests**. An independent saved-evidence audit checked
+**9,055 artifacts across 33 renders**, including exact recomposition and preservation
+of prior cleanup/English. These are integrity results, not a page-quality score.
+
+## Historical: verified continuation v2
 
 Started from actual HEAD `23d90d2`, not only implementation ancestor `8d9832d`.
 Independent replay verified **3,853 manifest artifacts across 15 v1 page runs**,
@@ -224,17 +237,13 @@ Reference judgments remain reused provisional agent assessments, not bilingual g
     durable blocking enforces that limitation. Sustained live-model end-to-end soak
     and embedded memory stability remain unvalidated.
 
-All v1 and v2 approved inference allocations are exhausted. The old proposed context
-test has now run; do not repeat it. Next steps are to obtain independent bilingual
-labels and genuinely untouched permitted examples, check the frozen language
-request/adapter contracts, then request a **separate** <=36-call / 3,000-call-second
-comparison. At most four changed-source TG27 calls (<=240s) are conditional on an
-actually validated changed selection; no such selection currently exists. No
-language allocation has been granted. New reconstruction methods need their own
-frozen controls/approval. New model families still require separate provenance and
-resource decisions; the existing assets do not have production clearance.
+The allocation restrictions recorded for v1/v2 were superseded by the user's v3
+authorization for routine local experiments. V3 ran and retained the actual trials
+and costs linked above. Application resource bounds remain separate: eight learned
+reconstruction calls / 120 learned seconds per page, native crops only. Production
+model provenance and independent bilingual validation remain unresolved.
 
-## Release checklist
+## Historical v2 release checklist
 
 Engineering scope is the private single-user Linux viewer/coordinator, explicitly
 configured existing local assets, native reconstruction crops <=512² and bound

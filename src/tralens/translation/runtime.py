@@ -301,7 +301,7 @@ def make_payload(request, profile, *, images=()):
 
 class PreviewTranslator:
     def __init__(self, runtime, *, model="qwen3.8:latest", profile=GENERALIST,
-                 max_attempts=1, timeout=60.0, generation_options=GenerationOptions()):
+                 max_attempts=1, timeout=60.0, generation_options=GenerationOptions(), single_rendition=False):
         if type(max_attempts) is not int or not 1 <= max_attempts <= 3:
             raise ValueError("max_attempts must be 1..3")
         if type(timeout) not in (int, float) or not 0 < timeout <= 300:
@@ -312,6 +312,8 @@ class PreviewTranslator:
         self.runtime, self.model, self.profile = runtime, model, profile
         self.max_attempts, self.timeout = max_attempts, timeout
         self.generation_options = generation_options
+        if type(single_rendition) is not bool:raise ValueError('single rendition must be boolean')
+        self.single_rendition=single_rendition
 
     def translate(self, request, *, cancelled=lambda: False, images=(), observe=None):
         if type(request) is not TranslationRequest:
@@ -339,6 +341,7 @@ class PreviewTranslator:
         return self._execute(request,cancelled=cancelled,images=images,observe=observe,fragment=False,alternate=True)
 
     def _execute(self, request, *, cancelled, images, observe, fragment, alternate=False):
+        rendition_evidence={}
         def result(status, **kwargs):
             if alternate:
                 from .ocr_review import AlternateResult
@@ -355,7 +358,8 @@ class PreviewTranslator:
                     profile=self.profile.name, execution_metadata_json=execution_metadata(request,self.profile,self.generation_options), **kwargs)
             return TranslationResult(request.revision, status, provider=type(self.runtime).__name__,
                 model=self.model, profile=self.profile.name,
-                execution_metadata_json=execution_metadata(request, self.profile, self.generation_options), **kwargs)
+                execution_metadata_json=canonical({**strict_json(execution_metadata(request, self.profile, self.generation_options)),
+                    **({'rendition_retry':rendition_evidence} if rendition_evidence else {})}), **kwargs)
         def notify(event):
             try:
                 if observe is not None:
@@ -427,6 +431,30 @@ class PreviewTranslator:
             if time.monotonic() - started >= self.timeout:
                 failure, detail = "timeout", "runtime exceeded total generation deadline"
                 break
+            from . import rendition
+            if (self.single_rendition and self.profile.specialist_chat and not fragment and not alternate
+                    and isinstance(text,str) and rendition.needs_retry(request.units[0].selected.text,text)):
+                primary=text
+                rendition_evidence.update(policy=rendition.POLICY,primary_translation=primary,selected='primary',
+                    semantic_accuracy_verified=False)
+                remaining=self.timeout-(time.monotonic()-started)
+                if remaining>1 and not cancelled():
+                    try:
+                        attempts+=1
+                        candidate=self.runtime.generate(model=self.model,payload=rendition.payload(payload),timeout=remaining)
+                        raw=candidate.response_json if isinstance(candidate,Generation) else canonical({'text':candidate})
+                        failed=notify({'attempt':attempts,'status':'response','purpose':rendition.POLICY,'response_json':raw})
+                        if failed is not None:return failed
+                        candidate=candidate.text if isinstance(candidate,Generation) else candidate
+                        rendition_evidence['candidate_translation']=candidate
+                        if (isinstance(candidate,str) and candidate.strip() and len(candidate)<=self.generation_options.max_output_chars
+                                and ' / ' not in candidate and not cancelled() and time.monotonic()-started<self.timeout):
+                            text=candidate;rendition_evidence['selected']='single_rendition'
+                    except Exception as error:
+                        rendition_evidence['error']=type(error).__name__+': '+str(error)[:512]
+                        failed=notify({'attempt':attempts,'status':'rendition_retry_failed',
+                            'purpose':rendition.POLICY,'response_json':getattr(error,'response_json',None)})
+                        if failed is not None:return failed
             try:
                 if not isinstance(text, str):
                     raise ValueError("runtime must return text")

@@ -338,7 +338,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
 
 
 def _report_html(report):
@@ -1120,6 +1120,10 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         except (ValueError,OSError,MemoryError,cv2.error) as error:
             report['reconstruction_summary']={'policy':aggressive.POLICY,'status':'failed_primary_preserved',
                 'error':type(error).__name__+': '+str(error)[:2000],'model_config':reconstruction_spec}
+        from . import replacement
+        report['units'],clean,text,composite,erase_union,layout_union,final_artifacts,report['removal_summary'] = replacement.finish(
+            rgb,raw,report['units'],clean,text,erase_union,layout_union,font_data,coverage,style)
+        recovery_artifacts.update(final_artifacts)
         alpha_union = np.asarray(text.getchannel('A')) != 0
         protected = ~(erase_union | layout_union)
         report['pixel_audit'] = n.pixel_audit(rgb,clean,composite,erase_union,alpha_union,protected)
@@ -1249,7 +1253,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         png(name+'.png', Image.fromarray(mask.astype(np.uint8)*255))
     for i, plan in plans.items():
         row = report['units'][i]
-        applied = plan.erase if row['status'] == 'automatic_composed' and not row.get('reconstruction',{}).get('status')=='composed_unverified' else np.zeros_like(plan.erase)
+        applied = plan.erase if row['status'] == 'automatic_composed' and not row.get('reconstruction',{}).get('status')=='composed_unverified' and not row.get('removal_fallback') else np.zeros_like(plan.erase)
         masks = {'interior': plan.layout, 'foreground': plan.foreground, 'applied-erase': applied,
                  'layout': plan.layout, 'obstacles': plan.obstacles}
         metadata, rasters = n.specimen_rasters(rgb, clean, composite, masks, tiles.get(i))

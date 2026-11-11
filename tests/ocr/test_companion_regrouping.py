@@ -229,7 +229,7 @@ class SavedCompanionTests(unittest.TestCase):
             batch = a.propose_automatic_units(raw,image,complementary_ownership=True,regroup_companions=True)
             regrouped_calls = components.call_count
             self.assertEqual(sum(call.args[0].shape == page_shape for call in components.call_args_list),previous_page_calls)
-            self.assertEqual(previous_page_calls,4)
+            self.assertEqual(previous_page_calls,5)  # Includes the original dark-surface labels.
             self.assertEqual(regrouped_calls,previous_calls+1)
             components.reset_mock()
             merged = next(p for p in batch.proposals if len(p.main_ids) == 5)
@@ -264,8 +264,8 @@ class SavedCompanionTests(unittest.TestCase):
         counts = Counter()
         for page in saved["pages"]:
             _,image,provenance,raw = load_unit_page(page["comparison_path"],self.root)
-            old = a.propose_automatic_units(raw,image,complementary_ownership=True)
-            new = a.propose_automatic_units(raw,image,complementary_ownership=True,regroup_companions=True)
+            old = a.propose_automatic_units(raw,image,complementary_ownership=True,policy=a.LEGACY_POLICY)
+            new = a.propose_automatic_units(raw,image,complementary_ownership=True,regroup_companions=True,policy=a.LEGACY_POLICY)
             saved_batch = expected_batches[provenance.page_id]
             self.assertEqual(json.loads(json.dumps([asdict(d) for d in new.detections])),saved_batch["detections"])
             historical = {tuple(p["main_ids"]):p for p in saved_batch["proposals"]}

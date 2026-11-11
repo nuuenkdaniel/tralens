@@ -250,8 +250,8 @@ class ComplementaryOwnershipTests(unittest.TestCase):
         for page in saved["pages"]:
             _,image,provenance,raw = load_unit_page(page["comparison_path"],root)
             content = Path(provenance.image_path).read_bytes()
-            baseline = propose_automatic_units(raw,image)
-            repaired = propose_automatic_units(raw,image,complementary_ownership=True)
+            baseline = propose_automatic_units(raw,image,policy='automatic_manga_structure_v2')
+            repaired = propose_automatic_units(raw,image,complementary_ownership=True,policy='automatic_manga_structure_v2')
             single_page = provenance.page_id == "lmgJZ-comparison"
             changed_children = {38,43} if single_page else set()
             self.assertEqual(repaired.detections,baseline.detections)

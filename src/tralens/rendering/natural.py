@@ -655,6 +655,9 @@ def bind(preview, image_path, rgb, image_bytes, preview_bytes, selection, fonts_
         for candidate in flatten_candidates(candidates[0]):
             if candidate.get('engine') == reread_engine:
                 validate_pixels(candidate, rgb, preview['ocr']['raw_detections'][0])
+            from ..ocr import manga_dialogue
+            if candidate.get('engine')==manga_dialogue.ENGINE:
+                manga_dialogue.validate_pixels(candidate,rgb)
     records = preview["units"]
     require([r["unit"] for r in records] == [json.loads(canonical(asdict(u))) for u in units], "saved unit/source evidence drift")
     from ..translation.context import saved_requests

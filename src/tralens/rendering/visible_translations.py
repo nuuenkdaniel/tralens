@@ -38,6 +38,8 @@ def display_counts(rows):
 
 
 def composed_status(row):
+    if row.get('removal_fallback',{}).get('status')=='removed_and_placed':
+        return 'aggressive'
     if row.get('reconstruction',{}).get('status')=='composed_unverified':
         return 'learned' if row.get('cleanup_method')=='learned_lama' else 'aggressive'
     return 'clean'
@@ -225,7 +227,8 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
             occupied = np.zeros(shape,bool);occupied[py:py+ph,px:px+pw] = mask
             reserved |= p.dilate(occupied,2)
             tiles[i] = patch,lettering,xy
-            row.update(display_status=kind,source_visibility='original_retained' if kind=='caption' else 'partly_covered_source_remnants_unverified')
+            row.update(display_status=kind,source_visibility='source_removed_unverified' if row.get('removal_fallback',{}).get('status')=='removed'
+                else 'original_retained' if kind=='caption' else 'partly_covered_source_remnants_unverified')
             attempt.update(status='displayed',kind=kind,warning=WARNING,source_bounds=[x,y,x+w,y+h],
                 bounds=[px,py,px+pw,py+ph],footprint_pixels=int(mask.sum()),
                 layout=proof,patch_artifact=f'unit-{i:03d}-fallback-patch.png',
@@ -248,7 +251,8 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
     n.require(outside == 0 and native_changed == 0 and clean_changed == 0,'visible translation pixel locality/native preservation failure')
     summary = display_counts(rows)
     summary.update(displayed_translations=summary['clean_replacements']+summary['patch_backed_translations']+summary['nearby_captions']+summary.get('learned_reconstructions',0)+summary.get('aggressive_replacements',0),
-        bound_available_translations=sum('binding'in row for row in rows),caption_sources_retained=summary['nearby_captions'],
+        bound_available_translations=sum('binding'in row for row in rows),caption_sources_retained=sum(
+            row.get('display_status')=='caption' and row.get('source_visibility')=='original_retained' for row in rows),
         policy=POLICY,warning=WARNING,attempted=attempts,maximum_attempts=MAX_ATTEMPTS,
         raster_work_bound=work,maximum_work=MAX_WORK,maximum_displays=max_displays,seconds=time.monotonic()-started,
         fallback_footprint_pixels=int(footprint.sum()),outside_fallback_changed_pixels=outside,

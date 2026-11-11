@@ -281,6 +281,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                     if ocr_refine is not None:
                         state['ocr']['original_unit_proposals'] = _snapshot(getattr(engine, 'original_unit_proposals', ()))
                         state['ocr']['quality_rereads'] = _snapshot(getattr(engine, 'quality_rereads', {}))
+                        state['ocr']['dialogue_readings'] = _snapshot(getattr(engine,'dialogue_readings',{}))
                     if source_localization:
                         state['ocr']['source_localization'] = _snapshot(getattr(engine, 'source_localization', {}))
                     if len(batches) == 1 and batches[0] is not None and len(engine.raw_detections) == 1:
@@ -326,14 +327,16 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 "attempts_started": 0, "generation_evidence": [], "fragment_previews": [], "fragment_rejection_reasons": []}
             fragment_requests[unit.unit_id] = []
             if review_ocr: record["visual_alternates"] = []
-            if unit.disposition == "preview":
+            from ..ocr.manga_dialogue import preferred_reading as dialogue_reading
+            preferred_dialogue=dialogue_reading(unit) if ocr_refine is not None else None
+            if unit.disposition == "preview" and preferred_dialogue is None:
                 state["strict_eligible_units"] += 1
-            elif translation_policy == 'coverage-first' and not coverage.rejection_reasons(unit):
-                reading_revision = None
+            elif translation_policy == 'coverage-first' and (preferred_dialogue is not None or not coverage.rejection_reasons(unit)):
+                reading_revision = preferred_dialogue.revision if preferred_dialogue else None
                 if ocr_refine is not None:
                     from ..ocr.quality_reread import preferred_reading
                     preferred = preferred_reading(unit)
-                    reading_revision = preferred.revision if preferred is not None else None
+                    reading_revision = preferred.revision if preferred is not None else reading_revision
                 derived = coverage.derive(unit, reading_revision)
                 request = TranslationRequest((derived,), (derived.unit_id,))
                 record.update(input_kind=coverage.KIND, translation_input=_snapshot(derived),
@@ -443,7 +446,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                         counted = _CountedRuntime(provider, state, max_attempts)
                         state["settings"]["provider"] = type(provider).__name__
                         translator = PreviewTranslator(counted, model=model, profile=capability,
-                            max_attempts=1, timeout=timeout, generation_options=options)
+                            max_attempts=1, timeout=timeout, generation_options=options,single_rendition=True)
                     counted.record = record
                     def observe(event):
                         record["generation_evidence"].append(_retain_event(output,prefix,event))

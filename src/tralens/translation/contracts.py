@@ -278,13 +278,14 @@ def flatten_candidates(candidates):
     result = []
     for candidate in candidates:
         candidate = strict_json(canonical(asdict(candidate) if is_dataclass(candidate) else candidate))
-        if type(candidate) is dict and 'candidates' in candidate and 'crop' not in candidate:
+        if type(candidate) is dict and 'candidates' in candidate and 'text' not in candidate:
             if (type(candidate['candidates']) is not list or type(candidate.get('attempts')) is not int
                     or candidate.get('attempts') not in (0, 1)
                     or (candidate['candidates'] and candidate.get('attempts') != 1)):
                 raise ValueError('invalid retained recognition result')
             for reading in candidate['candidates']:
-                if reading.get('crop', {}).get('proposal_id') != candidate.get('proposal_id'):
+                if (type(reading) is not dict or type(reading.get('crop')) is not dict
+                        or reading['crop'].get('proposal_id') != candidate.get('proposal_id')):
                     raise ValueError('recognition result/candidate proposal drift')
                 result.append(reading)
         else:
@@ -328,6 +329,9 @@ def automatic_units(batch, candidates=()):
                     ensure_ascii=False).encode()).hexdigest()
                 or c["reference_main_text"] != "".join(by_id[i]["text"] for i in p["main_ids"])):
             raise ValueError("candidate provenance drift")
+        from ..ocr import manga_dialogue
+        if c['engine']==manga_dialogue.ENGINE:
+            manga_dialogue.validate_candidate(c,batch)
     result = []
     if len({row[0] for row in batch["regions"]}) != len(batch["regions"]):
         raise ValueError("duplicate/conflicting region ownership records")

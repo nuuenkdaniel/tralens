@@ -371,7 +371,7 @@ def validate(preview, image_path, rgb, image_hash, image_bytes):
                     "main_detections": 0, "annotation_detections": 0, "unassigned_detections": 0,
                     "missing_source_ids": [], "unit_count": 0, "unit_status_counts": {}, "blocked_reason_counts": {}}
     page = batch["page"]
-    require(batch["policy"] == "automatic_manga_structure_v2" and batch["reviewed"] is False,
+    require(batch["policy"] in ("automatic_manga_structure_v2","automatic_manga_structure_v3_polarity") and batch["reviewed"] is False,
             "unsupported automatic batch policy/review claim")
     if page["image_sha256"] != image_hash or page["pixels_sha256"] != pixels or page["image_path"] != source["path"]:
         raise ValueError("stale or foreign proposal page")

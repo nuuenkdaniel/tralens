@@ -5,7 +5,7 @@ import unicodedata
 from dataclasses import asdict, dataclass
 from difflib import SequenceMatcher
 
-from .automatic_units import (POLICY, COMPLEMENTARY_OWNERSHIP_POLICY, COMPANION_POLICY, crop_conflicts,
+from .automatic_units import (POLICY, LEGACY_POLICY, COMPLEMENTARY_OWNERSHIP_POLICY, COMPANION_POLICY, crop_conflicts,
                               detection_evidence_sha256, propose_automatic_units)
 from .recognition_units import _valid_polygon, image_fingerprint
 
@@ -89,7 +89,7 @@ def prepare_automatic_crop(proposal, batch, image, *, original_image_bytes):
     if (any(type(i) not in (int,str) or i == "" for i in ids) or len(set(ids)) != len(ids)
             or any(d.page != batch.page for d in batch.detections)):
         return None,None,"foreign_or_duplicate_raw_ids_or_page"
-    if batch.policy != POLICY or batch.reviewed is not False or proposal.reviewed is not False:
+    if batch.policy not in (POLICY,LEGACY_POLICY) or batch.reviewed is not False or proposal.reviewed is not False:
         return None,None,"invalid_automatic_policy_or_review_claim"
     if batch.ownership_policy not in ("production8",COMPLEMENTARY_OWNERSHIP_POLICY):
         return None,None,"invalid_automatic_ownership_policy"
@@ -109,6 +109,7 @@ def prepare_automatic_crop(proposal, batch, image, *, original_image_bytes):
     if any(x < 0 or y < 0 or x > image.width or y > image.height for d in batch.detections for x,y in d.polygon):
         return None,None,"clipped_raw_geometry"
     fresh = propose_automatic_units(batch.detections,image,max_detections=max(512,len(batch.detections)),
+        policy=batch.policy,
         complementary_ownership=batch.ownership_policy == COMPLEMENTARY_OWNERSHIP_POLICY,
         regroup_companions=batch.companion_policy == COMPANION_POLICY)
     if batch != fresh:

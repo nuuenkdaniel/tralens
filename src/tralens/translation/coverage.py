@@ -17,11 +17,16 @@ KIND = 'coverage_text_region'
 COMPLETENESS = 'unverified_ocr_region_not_certified_full_utterance'
 MAX_CALLS = 64
 WAIVABLE = frozenset({'unknown_region_ownership', 'mixed_region_ownership', 'unknown_reading_orientation',
-                     'crop_isolation_unresolved', 'unsafe_crop'})
+                     'crop_isolation_unresolved', 'unsafe_crop', 'ambiguous_annotation_parents',
+                     'ambiguous_annotation_chain_or_role', 'unresolved_annotation_relationship',
+                     'annotation_role_unresolved_not_independent_text_proof'})
 INFORMATIONAL_STRUCTURE = frozenset({'automatic_not_human_reviewed', 'complementary_component_ownership',
     'annotation_crosses_original_boundary', 'annotation_geometry_crosses_distinct_regions',
     'original_glyph_scale_not_smaller_than_main', 'original_glyph_flow_inconsistent_with_reading_annotation',
-    'automatic_terminal_row_hypothesis', 'automatic_vertical_continuation_hypothesis'})
+    'automatic_terminal_row_hypothesis', 'automatic_vertical_continuation_hypothesis',
+    'original_light_lettering_on_dark_surface', 'different_original_lettering_polarity',
+    'relative_side_extent_alignment_and_scale', 'missing_kana_and_main_kanji_corroboration',
+    'original_glyph_support_inconclusive'})
 
 
 def validate_policy(policy):
@@ -99,15 +104,20 @@ def provenance(unit, reading_revision=None):
     if reading_revision is not None:
         from ..ocr.quality_reread import preferred_reading, POLICY as reread_policy
         candidate = preferred_reading(unit)
+        if candidate is None:
+            from ..ocr.manga_dialogue import preferred_reading, POLICY as reread_policy
+            candidate=preferred_reading(unit)
         if candidate is None or candidate.revision != reading_revision:
             raise ValueError('reread selection is not the exact corroborated source-bound candidate')
         result.update(reread_selected_revision=reading_revision, reread_policy=reread_policy,
-            scope='exact unverified paired-reread candidate; original raw reading retained; no source truth or erasure certification')
+            scope='exact unverified source-bound reread candidate; original raw reading retained; no source truth or erasure certification')
     return result
 
 
 def derive(unit, reading_revision=None):
     rejected = rejection_reasons(unit)
+    if reading_revision is not None and rejected==('strict_preview_available',):
+        rejected=()
     if rejected:
         raise ValueError('coverage input rejected: '+', '.join(rejected))
     bound = provenance(unit, reading_revision)

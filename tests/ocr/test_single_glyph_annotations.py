@@ -205,7 +205,7 @@ class SavedSingleGlyphTests(unittest.TestCase):
         counts = Counter()
         for page in saved["pages"]:
             _,image,provenance,raw = load_unit_page(page["comparison_path"],self.root)
-            batch = a.propose_automatic_units(raw,image,complementary_ownership=True)
+            batch = a.propose_automatic_units(raw,image,complementary_ownership=True,policy=a.LEGACY_POLICY)
             self.assertEqual(json.loads(json.dumps([asdict(d) for d in batch.detections])),page["batch"]["detections"])
             previous = {tuple(p["main_ids"]):p for p in page["batch"]["proposals"]}
             old_parents = {tuple(pair) for p in previous.values() for pair in p["annotation_parents"]}

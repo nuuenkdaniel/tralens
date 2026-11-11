@@ -100,8 +100,7 @@ class CoverageTests(unittest.TestCase):
         self.assertNotEqual(derived.revision, grouped.revision)
 
     def test_hard_structural_faults_and_review_only_inputs_cannot_be_waived(self):
-        for reason in ('unresolved_annotation_relationship', 'ambiguous_annotation_parents',
-                       'annotation_role_unresolved_not_independent_text_proof', 'new_unknown_fault'):
+        for reason in ('blank_main_reading', 'unresolved_paddle_association', 'new_unknown_fault'):
             for field in ('blocked_reasons', 'structural_reasons'):
                 unit = replace(self.units[0], **{field: getattr(self.units[0], field)+(reason,)})
                 with self.subTest(reason=reason, field=field), self.assertRaises(ValueError):
@@ -110,6 +109,16 @@ class CoverageTests(unittest.TestCase):
         fragment = fragment_plan(self.units[0], allow_fragment_previews=True)[0][0]
         with self.assertRaises(ValueError):
             c.derive(fragment)
+
+    def test_uncertain_annotation_roles_keep_raw_disjoint_membership(self):
+        for reason in ('unresolved_annotation_relationship','ambiguous_annotation_parents',
+                'annotation_role_unresolved_not_independent_text_proof','original_light_lettering_on_dark_surface'):
+            unit=replace(self.units[0],structural_reasons=self.units[0].structural_reasons+(reason,))
+            derived=c.derive(unit)
+            self.assertEqual(derived.member_ids,unit.member_ids)
+            self.assertEqual(derived.selected,unit.selected)
+            self.assertTrue(derived.source_uncertain)
+            self.assertFalse(c.provenance(unit)['complete_utterance_claimed'])
 
     def test_rejected_ambiguous_malformed_or_changed_raw_evidence_stays_blocked(self):
         unit = self.units[0]

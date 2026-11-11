@@ -28,6 +28,32 @@ class OriginalInkEvidence:
         _,white,white_stats,_ = cv2.connectedComponentsWithStats(cv2.bitwise_not(self.ink),connectivity=8)
         return dark,stats,white,white_stats
 
+    def reverse_lettering(self, boxes):
+        """Light glyph runs on a shared original dark surface, without ink edits.
+
+        A solid black background is not a divider between white text columns.
+        Use the same foreground-boundary algorithm at the correct polarity;
+        actual light dividers still veto merging.
+        """
+        inverse=OriginalInkEvidence(cv2.cvtColor(255-self.gray,cv2.COLOR_GRAY2BGR))
+        inverse.endpoint_probe_scales=1
+        _,labels,_,_=cv2.connectedComponentsWithStats((self.gray<80).astype(np.uint8),connectivity=8)
+        supported={}
+        for box in boxes:
+            x,y,r,b=box.bbox
+            mask=np.zeros((b-y,r-x),np.uint8)
+            cv2.fillPoly(mask,[box.poly.astype(np.int32)-np.array([x,y])],1)
+            values=labels[y:b,x:r][mask!=0]
+            votes=np.bincount(values)
+            if len(votes)<2:continue
+            label=int(np.argmax(votes[1:])+1)
+            ratio=float(votes[label]/len(values))
+            glyph=inverse.glyphs(box)
+            if (ratio>=.65 and glyph.component_count>=2 and glyph.scale>=3
+                    and glyph.flow==GroupingMixin._manga_direction(box)):
+                supported[box.box_id]=(label,ratio,glyph)
+        return inverse,supported
+
     def single_glyph_position(self, child, parent, child_glyphs, parent_glyphs, context, other_boxes=()):
         """Conservative leading vertical-glyph attachment evidence, not transcription.
 
@@ -368,7 +394,7 @@ class OriginalInkEvidence:
         # Connected/white balloon interiors can be divided only near a tail or
         # connector beyond the glyph ends. Probe two glyph scales there, without
         # widening the inter-column corridor or changing any recognition crop.
-        endpoint_probe = int(np.ceil(2*scale))
+        endpoint_probe = int(np.ceil(getattr(self,'endpoint_probe_scales',2)*scale))
         if axis == "vertical":
             y1,y2 = max(0,y1-endpoint_probe),min(self.ink.shape[0],y2+endpoint_probe)
         else:

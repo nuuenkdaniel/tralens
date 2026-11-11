@@ -14,7 +14,7 @@ from . import natural as n, preparation as p, typography
 from . import reconstruction as rec
 
 
-POLICY='crop_local_aggressive_v2'
+POLICY='crop_local_aggressive_v3_independent_cleanup'
 MAX_REGIONS=64
 MAX_LOCAL_WORK=16_777_216
 HARD_REASONS={'runtime_locality','alpha_containment','erasure_obstacle','typography_containment',
@@ -44,13 +44,21 @@ class Geometry:
             for tx in range(x//128,(r-1)//128+1):
                 for ty in range(y//128,(b-1)//128+1):self.grid.setdefault((tx,ty),set()).add(key)
 
-    def local(self,member_ids,reserved,margin=48):
+    def local(self,member_ids,reserved,margin=48,maximum_side=512,source_priority=False):
         keys={(type(i).__name__,i) for i in member_ids}
         rec.require(keys and keys<=self.raw.keys() and len(keys)==len(member_ids),'foreign/duplicate recovery membership')
         boxes=[self.boxes[k] for k in keys]
         x=max(0,min(b[0] for b in boxes)-margin);y=max(0,min(b[1] for b in boxes)-margin)
         r=min(self.size[0],max(b[2] for b in boxes)+margin);b=min(self.size[1],max(b[3] for b in boxes)+margin)
-        n.budget_check(max(r-x,b-y)<=512,'native reconstruction crop exceeds fixed 512 model/context scope')
+        if r-x>maximum_side:
+            left,right=min(v[0] for v in boxes),max(v[2] for v in boxes)
+            n.budget_check(right-left<=maximum_side,'native source extent exceeds context scope')
+            x=max(0,min(left-(maximum_side-(right-left))//2,self.size[0]-maximum_side));r=x+maximum_side
+        if b-y>maximum_side:
+            top,bottom=min(v[1] for v in boxes),max(v[3] for v in boxes)
+            n.budget_check(bottom-top<=maximum_side,'native source extent exceeds context scope')
+            y=max(0,min(top-(maximum_side-(bottom-top))//2,self.size[1]-maximum_side));b=y+maximum_side
+        n.budget_check(max(r-x,b-y)<=maximum_side,'native reconstruction crop exceeds requested context scope')
         nearby=set()
         for tx in range(x//128,(r-1)//128+1):
             for ty in range(y//128,(b-1)//128+1):nearby.update(self.grid.get((tx,ty),()))
@@ -60,7 +68,12 @@ class Geometry:
             if br<=x or bb<=y or bx>=r or by>=b:continue
             target=own if key in keys else other
             ImageDraw.Draw(target).polygon([(px-x,py-y) for px,py in self.raw[key]['polygon']],fill=255)
-        protected=p.dilate(np.asarray(other)!=0,2)|reserved[y:b,x:r]
+        protected=p.dilate(np.asarray(other)!=0,2)
+        if source_priority:
+            # An oversized neighboring detection is not authority to leave the
+            # current source's ink intact. Accepted edits always remain protected.
+            protected &= ~(np.asarray(own)!=0)
+        protected |= reserved[y:b,x:r]
         return [x,y,r,b],np.asarray(own)!=0,protected
 
 
@@ -112,6 +125,17 @@ def cheap(crop,mask,protected):
         if np.max(np.abs(samples.astype(np.int16)-color))<=3:
             candidate=crop.copy();candidate[mask]=color
             return candidate,'measured_uniform_fill'
+        # A few clipped glyph edges used to send otherwise flat balloons through
+        # inpainting, which can copy those very edges back into the cleanplate.
+        # Require a dominant neutral collar AND matching interior background.
+        # This is an explicitly approximate fill, not the exact-collar route.
+        difference=np.max(np.abs(samples.astype(np.int16)-color),axis=1)
+        interior=np.max(np.abs(crop[mask].astype(np.int16)-color),axis=1)
+        if (int(color.max())-int(color.min())<=12 and (int(color.min())>=210 or int(color.max())<=35)
+                and len(interior) and ((np.mean(difference<=3)>=.85 and np.mean(interior<=5)>=.45)
+                    or (np.mean(difference<=3)>=.55 and np.mean(interior<=5)>=.7))):
+            candidate=crop.copy();candidate[mask]=color
+            return candidate,'dominant_surface_fill'
     candidate=cv2.inpaint(crop,mask.astype(np.uint8)*255,3,cv2.INPAINT_TELEA)
     return candidate,'classical_telea_unverified'
 
@@ -144,22 +168,29 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
         if len(jobs)>=MAX_REGIONS:
             entry['reason']='region_budget';summary['budget_exclusions']+=1;continue
         try:
-            bounds,own,protected=geometry.local(row['binding']['member_ids'],reserved)
+            bounds,own,protected=geometry.local(row['binding']['member_ids'],reserved,source_priority=True)
             x,y,r,b=bounds;crop=original[y:b,x:r].copy()
             rec.require(crop.size and own.any(),'empty recovery source')
-            # Keep fonts/wording fixed before any destructive work/model dispatch.
             # Presentation space is independent of the larger inference context.
+            # A failed layout still reaches the final removal-only transaction.
             allowed=p.dilate(own,24)&~protected
-            n.validate_text(row['binding']['text'],coverage)
-            layer,proof,content=typography.layout_dialogue(row['binding']['text'],font_data,coverage,
-                Image.fromarray(allowed.astype(np.uint8)*255),{**style,'fill':[0,0,0],'outline':1,'outline_fill':[255,255,255]})
-            rec.require(proof['original_text']==row['binding']['text'] and proof['size']>=style['min_size'],
-                'reconstruction layout dropped wording or reduced requested floor')
+            layer=proof=content=None
+            try:
+                n.validate_text(row['binding']['text'],coverage)
+                dark=np.median(crop[own])<80
+                layer,proof,content=typography.layout_dialogue(row['binding']['text'],font_data,coverage,
+                    Image.fromarray(allowed.astype(np.uint8)*255),{**style,'fill':[255 if dark else 0]*3,
+                        'outline':1,'outline_fill':[0 if dark else 255]*3})
+                rec.require(proof['original_text']==row['binding']['text'] and proof['size']>=style['min_size'],
+                    'reconstruction layout dropped wording or reduced requested floor')
+            except rec.BindingError:raise
+            except ValueError as error:
+                entry['placement_failure']=str(error)
             predicted,ladder,evidence=masks(crop,own,protected)
             entry.update(bounds=bounds,layout=proof,mask_evidence=evidence)
             artifacts[f'recovery-{i:03d}-original.png']=Image.fromarray(crop)
             artifacts[f'recovery-{i:03d}-lettering-evidence.png']=Image.fromarray(predicted.astype(np.uint8)*255)
-            artifacts[f'recovery-{i:03d}-layout.png']=content
+            if content is not None:artifacts[f'recovery-{i:03d}-layout.png']=content
             jobs.append({'i':i,'bounds':bounds,'crop':crop,'protected':protected,'predicted':predicted,
                 'ladder':ladder,'layer':layer,'proof':proof,'best':None,'retry':False})
         except rec.BindingError:raise
@@ -185,8 +216,9 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             attempt={'mask':name,'request_revision':req['revision'],'method':method,'status':'candidate'}
             cheap_signals=assess(crop,candidate,mask,job['predicted'],protected)
             defer_learned=round_index==0 and cheap_signals['outer_residual_pixels']>0
-            if method!='measured_uniform_fill' and backend is not None:
-                if defer_learned:attempt['learned_skipped']='deferred_until_residual_mask_expansion'
+            if method not in ('measured_uniform_fill','dominant_surface_fill') and backend is not None:
+                if job['layer'] is None:attempt['learned_skipped']='placement_unavailable_final_surface_cleanup'
+                elif defer_learned:attempt['learned_skipped']='deferred_until_residual_mask_expansion'
                 elif backend_error:attempt['learned_skipped']='backend_circuit_open: '+backend_error
                 elif not budget.available():attempt['learned_skipped']='separate_learned_budget';summary['budget_exclusions']+=1
                 else:
@@ -207,7 +239,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             signals=assess(crop,candidate,mask,job['predicted'],protected)
             attempt['assessment']=signals;entry['attempts'].append(attempt)
             artifacts[prefix+'-cleanplate.png']=Image.fromarray(candidate)
-            priority={'measured_uniform_fill':0,'learned_lama':1,'classical_telea_unverified':2}[method]
+            priority={'measured_uniform_fill':0,'dominant_surface_fill':0,'learned_lama':1,'classical_telea_unverified':2}[method]
             # Residual evidence precedes footprint cost. Do not optimize smoothness
             # or claim an aesthetic oracle; a valid learned result precedes cheap
             # classical output on equally complete masks.
@@ -218,12 +250,18 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
         if job['best'] is None:continue
         i=job['i'];row=rows[i];entry=row['reconstruction']
         _,candidate,mask,method,chosen,signals=job['best'];x,y,r,b=job['bounds'];layer=job['layer']
-        local_alpha=np.asarray(layer.getchannel('A'))!=0
+        local_alpha=np.asarray(layer.getchannel('A'))!=0 if layer is not None else np.zeros_like(mask)
         membership={(type(m).__name__,m) for m in row['binding']['member_ids']}
         # Reservations may have grown since layout planning. Reject atomically;
         # neither old English nor earlier cleanup can be overwritten by a later job.
-        if membership & members or ((mask|local_alpha)&reserved[y:b,x:r]).any():
-            entry.update(status='collision_retained_primary',reason='earlier_output_reserved');continue
+        if membership & members:
+            entry.update(status='collision_retained_primary',reason='membership_already_displayed');continue
+        if layer is None or ((mask|local_alpha)&reserved[y:b,x:r]).any():
+            # Retain candidate evidence. Automatic reuse in final cleanup was
+            # rejected after visual trials showed copied/hallucinated lettering.
+            entry.update(status='cleanup_candidate_only',reason=entry.get('placement_failure','earlier_output_reserved'),
+                selected_attempt=chosen,method=method,assessment=signals)
+            continue
         plate[y:b,x:r][mask]=candidate[mask];erase[y:b,x:r]|=mask;layout[y:b,x:r]|=local_alpha
         new_text.alpha_composite(layer,dest=(x,y));alpha[y:b,x:r]|=local_alpha
         occupied=mask|local_alpha
@@ -236,7 +274,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             best_effort={'warnings':['Bounded aggressive removal may damage local artwork; reconstructed pixels are speculative.']})
         artifacts[f'recovery-{i:03d}-text.png']=layer
         summary[{'learned_lama':'selected_learned','classical_telea_unverified':'selected_classical',
-            'measured_uniform_fill':'selected_fill'}[method]]+=1
+            'measured_uniform_fill':'selected_fill','dominant_surface_fill':'selected_fill'}[method]]+=1
     final_clean=Image.fromarray(plate);composite=Image.alpha_composite(final_clean.convert('RGBA'),new_text).convert('RGB')
     rec.require(np.array_equal(plate[initial_reserved],native_plate[initial_reserved]),'recovery overwrote committed cleanup')
     rec.require(np.array_equal(np.asarray(new_text)[initial_reserved],native_text[initial_reserved]),'recovery overwrote accepted English')

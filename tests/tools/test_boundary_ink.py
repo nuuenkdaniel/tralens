@@ -224,7 +224,8 @@ class SavedBoundaryInkTests(unittest.TestCase):
         warnings = []
         for page in replay["pages"]:
             _,image,_,raw = load_unit_page(page["comparison_path"],root)
-            batch = propose_automatic_units(raw,image,complementary_ownership=True,regroup_companions=True)
+            batch = propose_automatic_units(raw,image,complementary_ownership=True,regroup_companions=True,
+                policy='automatic_manga_structure_v2')
             before = copy.deepcopy(asdict(batch))
             bgr = cv2.cvtColor(np.asarray(image),cv2.COLOR_RGB2BGR)
             assessments = diagnostics.observe_boundary_ink(batch.proposals,batch.detections,bgr)

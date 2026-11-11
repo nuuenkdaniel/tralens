@@ -225,7 +225,7 @@ class SavedComponentShapeTests(unittest.TestCase):
         for page in saved["pages"]:
             with self.subTest(page=page["page"]["page_id"]):
                 _,image,provenance,raw = load_unit_page(page["comparison_path"],root)
-                batch = propose_automatic_units(raw,image)
+                batch = propose_automatic_units(raw,image,policy='automatic_manga_structure_v2')
                 # Includes immutable raw evidence, relationship parents/rejections,
                 # ordered membership, regions, crop geometry and exact conflicts.
                 expected = dict(page["batch"],ownership_policy="production8",ownership_repairs=[],
@@ -249,7 +249,7 @@ class SavedComponentShapeTests(unittest.TestCase):
         for page in saved["pages"]:
             _,image,provenance,raw = load_unit_page(page["comparison_path"],root)
             original = Path(provenance.image_path).read_bytes()
-            batch = propose_automatic_units(raw,image)
+            batch = propose_automatic_units(raw,image,policy='automatic_manga_structure_v2')
             self.assertEqual(len(batch.proposals),len(page["units"]))
             for proposal,record in zip(batch.proposals,page["units"]):
                 with self.subTest(page=provenance.page_id,members=proposal.member_ids):

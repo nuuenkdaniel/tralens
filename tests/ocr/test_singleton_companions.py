@@ -192,7 +192,7 @@ class SavedSingletonCompanionTests(unittest.TestCase):
             components.reset_mock()
             batch = a.propose_automatic_units(raw,image,complementary_ownership=True,regroup_companions=True)
             self.assertEqual(sum(call.args[0].shape == page_shape for call in components.call_args_list),before)
-            self.assertEqual(before,6)
+            self.assertEqual(before,7)  # Includes the original dark-surface labels.
             components.reset_mock()
             proposal = next(p for p in batch.proposals if p.main_ids == (44,42,41))
             self.assertIsNone(prepare_automatic_crop(proposal,batch,image,
@@ -222,7 +222,7 @@ class SavedSingletonCompanionTests(unittest.TestCase):
         totals = Counter()
         for page in baseline["pages"]:
             _,image,provenance,raw = load_unit_page(page["comparison_path"],self.root)
-            batch = a.propose_automatic_units(raw,image,complementary_ownership=True,regroup_companions=True)
+            batch = a.propose_automatic_units(raw,image,complementary_ownership=True,regroup_companions=True,policy=a.LEGACY_POLICY)
             previous_batch = page["batch"]
             self.assertEqual(json.loads(json.dumps([asdict(d) for d in batch.detections])),previous_batch["detections"])
             self.assertEqual(json.loads(json.dumps([asdict(r) for r in batch.relationships])),previous_batch["relationships"])
@@ -236,7 +236,7 @@ class SavedSingletonCompanionTests(unittest.TestCase):
                 expected_added = {45,46}
                 self.assertTrue({13,16} <= {i for p in batch.proposals for i in p.main_ids})
                 reversed_batch = a.propose_automatic_units(tuple(reversed(raw)),image,
-                    complementary_ownership=True,regroup_companions=True)
+                    complementary_ownership=True,regroup_companions=True,policy=a.LEGACY_POLICY)
                 self.assertEqual(batch.proposals,reversed_batch.proposals)
                 self.assertEqual(batch.companion_regroupings,reversed_batch.companion_regroupings)
             else:

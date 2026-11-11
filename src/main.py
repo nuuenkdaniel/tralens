@@ -90,12 +90,41 @@ def quality_refiner(*, endpoint, model, manga_model):
     return refine
 
 
+def dialogue_refiner(model_path):
+    """Construct an explicitly configured local reader; no automatic downloads."""
+    import json
+    path=Path(model_path).expanduser().resolve(strict=True)
+    required=('config.json','preprocessor_config.json','pytorch_model.bin','vocab.txt',
+        'special_tokens_map.json','tokenizer_config.json')
+    if not path.is_dir() or any(not (path/name).is_file() for name in required):
+        raise ValueError('dialogue reread requires a complete existing Manga OCR snapshot')
+    identity=json.dumps({'path':str(path),'sha256':{name:hashlib.sha256((path/name).read_bytes()).hexdigest()
+        for name in required}},sort_keys=True)
+    def refine(engine,*,output):
+        from io import BytesIO
+        from PIL import Image
+        from tralens.ocr import manga_dialogue
+        from tralens.ocr.manga_adapter import MangaOCRAdapter
+        import torch
+        original=Path(engine.image_path).read_bytes()
+        old_threads=torch.get_num_threads()
+        try:
+            torch.set_num_threads(2)
+            reader=MangaOCRAdapter(path)
+            with Image.open(BytesIO(original)) as source:
+                manga_dialogue.refine(engine,source.convert('RGB'),original,
+                    reader=lambda crop:reader(crop,source_box_id='bound-dialogue',crop_bounds=(0,0,*crop.size)),
+                    model_identity=identity,output=output)
+        finally:torch.set_num_threads(old_threads)
+    return refine
+
+
 @serialized
 def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28,
                  max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort',
                  replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', quality_reread=False,
                  reread_model='qwen3.8:latest', manga_reread_model=None, source_localization=False,
-                 visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical',
+                 visibility_policy='always-show', removal_policy='aggressive', reconstruction_policy='classical',
                  reconstruction_config=None, **preview_options):
     """Connect the existing OCR/translation preview to automatic rendering.
 
@@ -115,6 +144,7 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
     from tralens.translation.coverage import validate_policy
 
     translation_policy = validate_policy(preview_options.get('translation_policy', 'coverage-first'))
+    preview_options.setdefault('max_attempts',64)
     if type(source_localization) is not bool:
         raise ValueError('source localization requires explicit boolean enablement')
     if preview_options.get('translation_context', 'isolated') != 'isolated':
@@ -124,7 +154,7 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
             GENERALIST if preview_options.get('profile') == 'generalist' else TRANSLATEGEMMA)
         if preview_options.get('review_ocr'):
             raise ValueError('nearby translation context and visual alternate review must be separate experiments')
-    if type(quality_reread) is not bool or (not quality_reread and manga_reread_model is not None):
+    if type(quality_reread) is not bool:
         raise ValueError('quality reread requires explicit enablement and existing local model assets')
     if quality_reread:
         if manga_reread_model is None or translation_policy != 'coverage-first':
@@ -135,6 +165,10 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
             raise ValueError('choose the built-in quality refiner or an injected refinement callback')
         preview_options['ocr_refine'] = quality_refiner(endpoint=preview_options.get('endpoint', 'http://127.0.0.1:11434'),
             model=reread_model, manga_model=manga_reread_model)
+    elif manga_reread_model is not None:
+        if translation_policy!='coverage-first' or 'ocr_refine' in preview_options:
+            raise ValueError('local dialogue reread requires coverage-first and one refinement callback')
+        preview_options['ocr_refine']=dialogue_refiner(manga_reread_model)
 
     rendering_options = dict(image=Path(image).expanduser().absolute(), fonts=Path(fonts).expanduser().absolute(),
         font_id=font_id, min_size=min_size, max_size=max_size, max_units=max_units, background_method=background_method,
@@ -315,16 +349,16 @@ def main(argv=None):
     parser.add_argument("--profile", choices=("generalist", "translategemma"), default="translategemma",
                         help="capability profile (default: translategemma); Qwen overrides require generalist")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434")
-    parser.add_argument("--max-attempts", type=int, default=2, help="global model call budget, 0..64; no retries")
+    parser.add_argument("--max-attempts", type=int, default=64, help="global model call budget, 0..64, including single-rendition retries")
     parser.add_argument('--translation-policy', choices=('coverage-first', 'conservative'), default='coverage-first',
                          help='default coverage-first: attempt source-bound OCR text despite uncertain ownership/crop/orientation')
     parser.add_argument('--translation-context', choices=('isolated', 'nearby'), default='isolated',
                          help='opt-in nearby OCR context and one rendition per target; requires explicit generalist model/profile; no inferred reading order')
     parser.add_argument('--source-localization', action='store_true',
                           help='opt-in bounded crop predictions using existing OCR; with render, retry failed cleanup as unverified whole strokes')
-    parser.add_argument('--visibility-policy', choices=('replacement-only','always-show'),default='replacement-only',
+    parser.add_argument('--visibility-policy', choices=('replacement-only','always-show'),default=None,
                         help='render: always-show prioritizes visible translations; opaque patches may cover artwork, then nearby captions')
-    parser.add_argument('--removal-policy',choices=('legacy','preserve','aggressive'),default='legacy')
+    parser.add_argument('--removal-policy',choices=('legacy','preserve','aggressive'),default=None)
     parser.add_argument('--reconstruction-policy',choices=('classical','lama'),default='classical')
     parser.add_argument('--reconstruction-config',type=Path,help='explicit approved local model/runtime JSON; never downloaded')
     parser.add_argument("--timeout", type=float, default=120)
@@ -352,7 +386,7 @@ def main(argv=None):
     parser.add_argument('--quality-reread', action='store_true',
                         help='render: opt-in enclosed terminal grouping and paired visual/line OCR rereads; original readings retained')
     parser.add_argument('--reread-model', default='qwen3.8:latest', help='existing local vision model for quality rereads; never downloaded')
-    parser.add_argument('--manga-reread-model', type=Path, help='existing local Manga OCR snapshot, required with --quality-reread')
+    parser.add_argument('--manga-reread-model', type=Path, help='existing local Manga OCR snapshot; enables isolated low-score dialogue rereading, or paired visual rereads with --quality-reread')
     args = parser.parse_args(argv)
     if not args.run_local_ocr:
         parser.error("image processing requires explicit --run-local-ocr; no engine was initialized")
@@ -362,9 +396,9 @@ def main(argv=None):
         parser.error('--render requires --run-local-model and --fonts; no engine was initialized')
     if not args.render and (args.quality_reread or args.manga_reread_model is not None):
         parser.error('quality reread options require --render')
-    if not args.render and args.visibility_policy != 'replacement-only':
+    if not args.render and args.visibility_policy not in (None,'replacement-only'):
         parser.error('--visibility-policy requires --render')
-    if not args.render and (args.removal_policy!='legacy' or args.reconstruction_policy!='classical' or args.reconstruction_config):
+    if not args.render and (args.removal_policy not in (None,'legacy') or args.reconstruction_policy!='classical' or args.reconstruction_config):
         parser.error('removal/reconstruction options require --render')
     if not args.render and any(getattr(args, name) is not None for name in ('fonts', 'font_id', 'min_size', 'max_size', 'max_units', 'background_method', 'text_mask_model', 'render_policy', 'replacement_policy', 'min_ocr_confidence', 'layout_policy')):
         parser.error('font/rendering options require --render')
@@ -390,7 +424,7 @@ def main(argv=None):
                 render_policy=args.render_policy or 'best-effort', replacement_policy=args.replacement_policy or 'all',
                 min_ocr_confidence=args.min_ocr_confidence, layout_policy=args.layout_policy or 'source-local', quality_reread=args.quality_reread,
                 reread_model=args.reread_model, manga_reread_model=args.manga_reread_model,
-                visibility_policy=args.visibility_policy,removal_policy=args.removal_policy,
+                visibility_policy=args.visibility_policy or 'always-show',removal_policy=args.removal_policy or 'aggressive',
                 reconstruction_policy=args.reconstruction_policy,reconstruction_config=args.reconstruction_config, **preview_options)
             coverage = report['coverage'] or {}
             print(f"{report['status']}: {args.output / 'pipeline.json'}; "

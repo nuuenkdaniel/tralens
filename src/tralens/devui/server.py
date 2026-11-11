@@ -59,6 +59,8 @@ def options(value, *, render_enabled):
         allow_fragments=False, render_policy='best-effort', translation_policy='coverage-first',
         replacement_policy='all', quality_reread=False, layout_policy='source-local', source_localization=False,
         visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical')
+    if value.get('mode',result['mode'])=='render':
+        result.update(visibility_policy='always-show',removal_policy='aggressive')
     result.update(value)
     if type(result['mode']) is not str or result['mode'] not in ('ocr', 'translate', 'render'):
         raise RequestError('Choose OCR, translation, or rendering.')
@@ -144,7 +146,7 @@ def execute_job(config, job):
             reconstruction_policy=settings.get('reconstruction_policy','classical'),
             reconstruction_config=config.reconstruction_config if settings.get('reconstruction_policy')=='lama' else None,
             quality_reread=settings.get('quality_reread', False), reread_model=config.reread_model,
-            manga_reread_model=config.manga_reread_model if settings.get('quality_reread') else None, **kwargs)
+            manga_reread_model=config.manga_reread_model if settings.get('translation_policy','coverage-first')=='coverage-first' else None, **kwargs)
     from ..translation.workflow import run_preview
     return run_preview(job['image'], job['directory']/'run'/'preview', **kwargs)
 

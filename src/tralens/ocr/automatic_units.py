@@ -19,7 +19,8 @@ from .recognition_units import (PageProvenance, _area, _intersection, _rectangle
                                 _valid_polygon, image_fingerprint, snapshot_detections)
 
 
-POLICY = "automatic_manga_structure_v2"
+POLICY = "automatic_manga_structure_v3_polarity"
+LEGACY_POLICY = "automatic_manga_structure_v2"
 COMPLEMENTARY_OWNERSHIP_POLICY = "enclosed_complementary_connectivity_v2"
 COMPANION_POLICY = "bounded_vertical_companions_v2"
 
@@ -416,7 +417,7 @@ def _regroup_companions(groups, regions, by_id, glyphs, ink, annotations, detect
 
 
 def propose_automatic_units(detections, image, *, max_detections=512, complementary_ownership=False,
-                            regroup_companions=False):
+                            regroup_companions=False, policy=POLICY):
     """Concrete engine-free proposals from immutable snapshots + original RGB image.
 
     Every valid in-page detection is exactly one main OR tentative annotation;
@@ -455,6 +456,14 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
     by_id = {raw.source_id: (raw, box, index) for index, (raw, box) in enumerate(ordered)}
     ink = OriginalInkEvidence(bgr)
     glyphs = {raw.source_id: ink.glyphs(box) for raw,box in ordered}
+    if policy not in (POLICY,LEGACY_POLICY):raise ValueError('unknown automatic structure policy')
+    inverse,dark_runs=ink.reverse_lettering(boxes) if policy==POLICY else (ink,{})
+    for source_id,(label,support,glyph) in dark_runs.items():
+        glyphs[source_id]=glyph
+        regions[by_id[source_id][2]]=(-1_000_000-label,support)
+
+    def foreground_for(*ids):
+        return inverse if all(i in dark_runs for i in ids) else ink
     possibilities, relationship_reasons, rejected_relationships = {}, {}, []
     relation_evidence = {}
     single_context, single_supports = None, {}
@@ -465,9 +474,11 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
                 continue
             ci, pi = by_id[child.source_id][2], by_id[parent.source_id][2]
             child_glyphs, parent_glyphs = glyphs[child.source_id], glyphs[parent.source_id]
-            boundary = ink.boundary_between(child_box,parent_box,
+            boundary = foreground_for(child.source_id,parent.source_id).boundary_between(child_box,parent_box,
                 first_glyphs=child_glyphs,second_glyphs=parent_glyphs)
             rejects = []
+            if (child.source_id in dark_runs)!=(parent.source_id in dark_runs):
+                rejects.append("different_original_lettering_polarity")
             if ci in regions and pi in regions and regions[ci][0] != regions[pi][0]:
                 rejects.append("annotation_geometry_crosses_distinct_regions")
             if boundary["blocked"]:
@@ -566,6 +577,8 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
     def merge_guard(first,second):
         members = tuple(sorted((box.box_id for box in first+second),key=_key))
         reasons, barriers = [], []
+        if any(i in dark_runs for i in members) and not all(i in dark_runs for i in members):
+            return False
         unsupported = [i for i in members if glyphs[i].component_count < 2
                        and not (_kana(by_id[i][0].text) or _kanji(by_id[i][0].text))]
         if len(members) > 2 and unsupported:
@@ -580,7 +593,7 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
                     included = tuple((box,glyphs[box.box_id]) for box in first+second
                                      if box.box_id not in pair) if not unassigned else ()
                     nonmembers = tuple(box for box in boxes if box.box_id not in members)
-                    boundary_cache[key] = ink.boundary_between(left,right,
+                    boundary_cache[key] = foreground_for(*pair).boundary_between(left,right,
                         first_glyphs=glyphs[left.box_id],second_glyphs=glyphs[right.box_id],
                         included_members=included,nonmember_boxes=nonmembers)
                 evidence = boundary_cache[key]
@@ -629,6 +642,8 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
             safe = False
             crop_reasons.extend(conflict.reason for conflict in conflicts)
         structural = ["automatic_not_human_reviewed"]
+        if all(i in dark_runs for i in main_ids):
+            structural.append("original_light_lettering_on_dark_surface")
         if repaired_ids.intersection(members):
             structural.append("complementary_component_ownership")
         if group.method in ("companion_geometry","singleton_companion_geometry"):
@@ -660,7 +675,7 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
             words.append("annotation_wording_corroboration_missing")
         if any(not by_id[i][0].text.strip() for i in attached):
             words.append("blank_annotation_reading")
-        identity = {"policy": POLICY, "page": asdict(page), "main_ids": main_ids,
+        identity = {"policy": policy, "page": asdict(page), "main_ids": main_ids,
                     "members": members, "member_polygons": [(i, by_id[i][0].polygon) for i in members],
                     "annotation_parents": parents, "direction": group.direction}
         if complementary_ownership:
@@ -677,7 +692,7 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
         tuple((raw.source_id, *regions[index]) for index, (raw, _) in enumerate(ordered) if index in regions), region_status,
         rejected_merges=tuple(rejected_merges[key] for key in sorted(rejected_merges,key=lambda ids: tuple(map(_key,ids)))),
         evidence_sha256=detection_evidence_sha256(detections),
-        ownership_policy=COMPLEMENTARY_OWNERSHIP_POLICY if complementary_ownership else "production8",
+        policy=policy,ownership_policy=COMPLEMENTARY_OWNERSHIP_POLICY if complementary_ownership else "production8",
         ownership_repairs=ownership_repairs, companion_policy=COMPANION_POLICY if regroup_companions else "disabled",
         companion_regroupings=companion_regroupings,companion_rejections=companion_rejections)
 

@@ -1,0 +1,202 @@
+"""Removal-first last resort for bound translations that precise routes cannot fit.
+
+Cleanup and English placement are independent transactions. Original geometry,
+cleanup support, opaque backing and actual glyph alpha remain distinct. No OCR,
+wording edits, model calls or implicit font reduction happen here.
+"""
+from copy import deepcopy
+import math
+import time
+
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw
+
+from . import natural as n, preparation as p, aggressive, typography
+
+
+POLICY = 'remove_then_source_centered_patch_v2'
+MAX_REGIONS = 128
+MAX_WORK = 32_000_000
+MAX_LAYOUT_WORK = 256_000_000
+
+
+def extent(crop, own, protected):
+    """Bounded whole-stroke expansion, including light lettering on dark surfaces.
+
+    Components intersecting source geometry may extend up to twelve pixels; a
+    connected panel/face cannot pull the mask arbitrarily far away from the text.
+    Attached art inside that bound remains an accepted best-effort risk.
+    """
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    collar = p.dilate(own,8) & ~p.dilate(own,3) & ~protected
+    light = not collar.any() or np.median(gray[collar]) >= 128
+    ink = gray < 210 if light else gray > 60
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8),8)
+    ids = np.unique(labels[own & ink]); ids = ids[ids != 0]
+    support = p.dilate(own,4)
+    limit = p.dilate(own,12)
+    for i in ids:
+        x,y,w,h,area = map(int,stats[i])
+        if max(w,h)>128 or area>8192:
+            continue
+        component = labels[y:y+h,x:x+w] == i
+        if not (component & ~limit[y:y+h,x:x+w]).any():
+            support[y:y+h,x:x+w] |= component
+    return p.dilate(support,1) & ~protected
+
+
+def patch_layout(text, font_data, coverage, bounds, blocked, style):
+    """Widen a source-centered backing instead of shrinking or breaking words.
+
+    Enumerate compact rectangles with the requested font range; score actual
+    occupied area and displacement. Other source polygons and committed pixels
+    remain obstacles, but local artwork may be covered.
+    """
+    left,top,right,bottom = bounds
+    height,width = blocked.shape
+    cx,cy = (left+right)//2,(top+bottom)//2
+    floor = style['min_size']
+    preferred = max(floor,round(style['max_size']*.85))
+    # English line lengths of roughly 12-25 characters are more usable than a
+    # single vertical Japanese column. Never derive or shorten the wording.
+    ideal = int(math.sqrt(max(1,len(text))*preferred*preferred*.85))
+    widths = sorted({max(64,min(width-4,v)) for v in
+        (right-left+16,ideal,round(ideal*1.3),160,224,320,448)})
+    integral=cv2.integral(blocked.astype(np.uint8))
+    candidates=[]
+    for w in widths:
+        h = min(height-4, max(96,min(512,round(len(text)*preferred*preferred*.8/max(1,w))+48)))
+        if w*h>262144 or min(w,h)<20:
+            continue
+        mask=Image.new('L',(w,h))
+        ImageDraw.Draw(mask).rectangle((6,6,w-7,h-7),fill=255)
+        try:
+            layer,proof,_=typography.layout_dialogue(text,font_data,coverage,mask,
+                {**style,'max_size':preferred,'outline':0})
+        except ValueError:
+            continue
+        ink=layer.getchannel('A').getbbox()
+        glyph=layer.crop(ink);tw,th=glyph.width+12,glyph.height+12
+        if tw*th>131072:
+            continue
+        if tw>width-4 or th>height-4:continue
+        # Exhaustive local rectangle occupancy avoids missing a fit between
+        # obstacles merely because it falls between the old 24-pixel probes.
+        occupied=integral[th:,tw:]-integral[:-th,tw:]-integral[th:,:-tw]+integral[:-th,:-tw]
+        occupied[:2]=1;occupied[-2:]=1;occupied[:,:2]=1;occupied[:,-2:]=1
+        ys,xs=np.where(occupied==0)
+        if not len(xs):continue
+        distances=(xs+tw/2-cx)**2+(ys+th/2-cy)**2
+        best=int(np.argmin(distances));distance=math.sqrt(float(distances[best]))
+        if distance>160:continue
+        x,y=int(xs[best]),int(ys[best])
+        # Location takes precedence over footprint savings: compactness alone
+        # formerly preferred tall captions displaced into a neighboring panel.
+        shape=max(0,th/max(tw,1)-1.35)*6000
+        rank=(round(distance/12),500*(preferred-proof['size'])+shape+tw*th*.1,distance,y,x)
+        candidates.append((rank,glyph,proof,(x,y),ink))
+    n.require(candidates,'no readable source-centered patch avoids accepted edits and other text')
+    _,glyph,proof,(x,y),ink=min(candidates,key=lambda c:c[0])
+    tile=Image.new('RGBA',(glyph.width+12,glyph.height+12))
+    tile.paste(glyph,(6,6))
+    proof={**proof,'page_tile_offset':[x,y],'glyph_page_origin':[x+6,y+6],
+        'original_layout_crop_bounds':list(ink),'placement_policy':POLICY}
+    return tile,(x,y),proof
+
+
+def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, style):
+    """Remove pending translated sources even when every placement attempt fails."""
+    started=time.monotonic();rows=deepcopy(rows)
+    original=np.asarray(rgb);plate=np.asarray(clean).copy();text=text.copy()
+    erase=erase.copy();layout=layout.copy()
+    protected=p.dilate(erase | (np.asarray(text.getchannel('A'))!=0),2)
+    initial=protected.copy();before_text=np.asarray(text).copy();before_plate=plate.copy()
+    geometry=aggressive.Geometry(raw,rgb.size)
+    members={aggressive_key(m) for row in rows if row['status']=='automatic_composed'
+        for m in row.get('binding',{}).get('member_ids',[])}
+    summary={'policy':POLICY,'attempted':0,'removed':0,'placed':0,'unresolved':0,'work_pixels':0,
+        'layout_work_pixels':0}
+    artifacts={}
+    for i,row in enumerate(rows):
+        if row['status']=='automatic_composed' or 'binding' not in row or row.get('reason_code') in aggressive.HARD_REASONS:
+            continue
+        entry={'policy':POLICY,'status':'pending','prior_reason':row.get('reason_code')}
+        row['removal_fallback']=entry
+        ids={aggressive_key(m) for m in row['binding']['member_ids']}
+        if ids & members:
+            entry.update(status='blocked',reason='duplicate_source_membership');continue
+        if summary['attempted']>=MAX_REGIONS:
+            entry.update(status='blocked',reason='region_budget');continue
+        summary['attempted']+=1
+        try:
+            # Font validation precedes placement, but cannot veto cleanup.
+            bounds,own,obstacle=geometry.local(row['binding']['member_ids'],protected,margin=32,maximum_side=2048,source_priority=True)
+            x,y,r,b=bounds;crop=original[y:b,x:r]
+            n.budget_check(summary['work_pixels']+own.size<=MAX_WORK,'removal fallback work budget')
+            summary['work_pixels']+=own.size
+            mask=extent(crop,own,obstacle)
+            n.require(mask.any(),'source fully overlaps protected output')
+            candidate,method=aggressive.cheap(crop,mask,obstacle)
+            if method=='classical_telea_unverified':
+                # Broad Telea masks produce conspicuous radial smears and copied
+                # glyphs. At this final fallback prefer a plain, local surface.
+                ring=p.dilate(mask,4)&~mask&~obstacle
+                samples=crop[ring] if ring.any() else crop[own]
+                color=np.median(samples,axis=0).astype(np.uint8)
+                candidate=crop.copy();candidate[mask]=color
+                method='local_surface_occlusion'
+            # Do not adopt discarded learned cleanplates merely because their
+            # bindings are valid. Visual trials showed copied/hallucinated type;
+            # candidate artifacts remain available without becoming an oracle.
+            plate[y:b,x:r][mask]=candidate[mask];erase[y:b,x:r]|=mask
+            members.update(ids)
+            entry.update(status='removed',method=method,bounds=bounds,commit_pixels=int(mask.sum()),
+                protected_source_pixels=int((own&obstacle).sum()),source_removal_verified=False,
+                artwork_loss_possible=True)
+            summary['removed']+=1
+            prefix=f'recovery-final-{i:03d}'
+            artifacts[prefix+'-original.png']=Image.fromarray(crop)
+            artifacts[prefix+'-commit-mask.png']=Image.fromarray(mask.astype(np.uint8)*255)
+            artifacts[prefix+'-cleanplate.png']=Image.fromarray(candidate)
+            # Blocking deliberately excludes this row's freshly cleaned pixels.
+            # Earlier cleanup and English remain immutable.
+            all_bounds,_,blocked=geometry.local(row['binding']['member_ids'],protected,margin=192,maximum_side=2048,source_priority=True)
+            ax,ay,ar,ab=all_bounds
+            n.budget_check(summary['layout_work_pixels']+blocked.size*7<=MAX_LAYOUT_WORK,'final layout work budget')
+            summary['layout_work_pixels']+=blocked.size*7
+            sx,sy,sw,sh=cv2.boundingRect(own.astype(np.uint8))
+            surface=0 if np.median(crop[own])<80 else 255
+            layer,xy,proof=patch_layout(row['binding']['text'],font_data,coverage,
+                (x+sx-ax,y+sy-ay,x+sx+sw-ax,y+sy+sh-ay),blocked,{**style,'fill':[255-surface]*3})
+            px,py=xy;px+=ax;py+=ay;h,w=layer.height,layer.width
+            # An opaque backing is a declared cleanup commit, separate from
+            # the glyph alpha. It removes source remnants under the new type.
+            plate[py:py+h,px:px+w]=surface;erase[py:py+h,px:px+w]=True
+            text.alpha_composite(layer,dest=(px,py));layout[py:py+h,px:px+w]=True
+            proof.update(page_tile_offset=[px,py],glyph_page_origin=[px+6,py+6])
+            row.update(status='automatic_composed',reason_code=None,reason=None,render_quality='best_effort',
+                cleanup_method='removal_with_opaque_backing',layout=proof)
+            entry.update(status='removed_and_placed',backing_bounds=[px,py,px+w,py+h])
+            artifacts[prefix+'-text.png']=layer
+            summary['placed']+=1
+        except (ValueError,OSError,cv2.error) as error:
+            entry['reason']=str(error)
+            if entry['status']=='removed':
+                row.update(status='source_removed',source_visibility='source_removed_unverified')
+            else:entry['status']='blocked'
+            summary['unresolved']+=1
+        # Include both removal and backing even if placement was unavailable.
+        protected=p.dilate(erase | (np.asarray(text.getchannel('A'))!=0),2)
+    clean=Image.fromarray(plate)
+    composite=Image.alpha_composite(clean.convert('RGBA'),text).convert('RGB')
+    n.require(np.array_equal(plate[initial],before_plate[initial]) and
+        np.array_equal(np.asarray(text)[initial],before_text[initial]),'fallback overwrote accepted edits')
+    alpha=np.asarray(text.getchannel('A'))!=0
+    n.verify_pixel_audit(n.pixel_audit(rgb,clean,composite,erase,alpha,~(erase|layout)))
+    summary['seconds']=time.monotonic()-started
+    return rows,clean,text,composite,erase,layout,artifacts,summary
+
+
+def aggressive_key(value):
+    return type(value).__name__,value

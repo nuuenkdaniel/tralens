@@ -19,7 +19,8 @@ class VisibleViewerTests(unittest.TestCase):
 
     def test_explicit_option_validation_and_no_asset_or_font_overrides(self):
         defaults=s.options({},render_enabled=True)
-        self.assertEqual(defaults['visibility_policy'],'replacement-only')
+        self.assertEqual(defaults['visibility_policy'],'always-show')
+        self.assertEqual(defaults['removal_policy'],'aggressive')
         for bad in ({'visibility_policy':True},{'visibility_policy':'unknown'},
                     {'mode':'ocr','visibility_policy':'always-show'},{'fallback_font':'/etc/passwd'}):
             with self.assertRaises(s.RequestError):s.options(bad,render_enabled=True)
@@ -44,7 +45,7 @@ class VisibleViewerTests(unittest.TestCase):
         with patch.object(main,'run_pipeline',side_effect=pipeline):
             status,_,body=self.http_fixture.request(http,'POST','/api/jobs',f.image.read_bytes(),
                 {'X-Tralens-Token':app.token,'X-Tralens-Options':json.dumps({'mode':'render',
-                    'visibility_policy':'always-show','replacement_policy':'confidence-gated'})})
+                    'visibility_policy':'always-show','removal_policy':'legacy','replacement_policy':'confidence-gated'})})
             self.assertEqual(status,202,body)
             identity=json.loads(body)['id'];self.assertTrue(app.job(identity)['done'].wait(15))
             view=app.snapshot(identity)

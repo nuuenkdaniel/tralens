@@ -51,7 +51,8 @@ function qualityNotice(data, rereadAvailable = false) {
     const counts = data.display_summary;
     return {copy: "Prioritizes visible translations; fallback patches may cover artwork. " +
       (counts ? `${counts.clean_replacements} clean replacements · ${counts.learned_reconstructions || 0} learned reconstructions · ${counts.aggressive_replacements || 0} aggressive removals · ${counts.patch_backed_translations} patch-backed translations · ${counts.nearby_captions} nearby captions · ${counts.intentionally_unchanged} intentionally unchanged · ${counts.available_not_displayed} available but not displayed · ${counts.missing_translations} missing translations. ` : "") +
-      "Captions retain Japanese source text. Patches and captions are not artwork reconstruction or human-verified translations.", action: null};
+      (counts?.caption_sources_retained ? `${counts.caption_sources_retained} captions retain their source text. ` : "") +
+      "Reconstruction and translation quality remain unverified.", action: null};
   }
   if (data.replacement_policy !== "confidence-gated") return {
     copy: "This run used broad replacement without artwork checks. It can smear drawings and repaint bad OCR. Retry with native cleanup / OCR checks; unsupported edits will stay original, with translations retained.",
@@ -505,7 +506,7 @@ if (typeof document !== "undefined") {
     $("reconstruction-policy").value = config.reconstruction_available ? "lama" : "classical";
     $("visibility-policy").value = "always-show";
     $("configuration").textContent = `${config.device} · ${config.model} · Ollama: ${config.endpoint || "configured local service"} · OCR: ${config.model_root}${config.fonts ? " · Fonts: " + config.fonts : " · No --fonts: rendering disabled"}`;
-    $("reread-availability").textContent = config.quality_reread_available ? `Optional crop presentations go to ${config.reread_model} on the configured private Ollama endpoint, with local Manga OCR corroboration. No downloads; agreement is not truth.` : "Not configured: start with --manga-reread-model and an existing snapshot. Artwork checks work without rereads.";
+    $("reread-availability").textContent = config.quality_reread_available ? `Local Manga OCR rereads isolated low-confidence text during rendering. This option also sends crop presentations to ${config.reread_model} for paired visual rereads.` : "Not configured: start with --manga-reread-model and an existing snapshot. Artwork checks work without rereads.";
     $("mode").querySelector('[value="render"]').disabled = !config.render_enabled; $("mode").value = config.render_enabled ? "render" : "ocr"; settingsSummary(); setBusy(false);
     const jobs = await request("/api/jobs");
     for (const job of jobs) { const choice = node("option", `Run ${job.id.slice(0, 8)} · ${friendly(job.status)}`); choice.value = job.id; $("jobs").append(choice); }

@@ -384,7 +384,7 @@ class ViewerTests(unittest.TestCase):
         self.assertFalse(app.jobs)
         runner.assert_not_called()
 
-    def test_configured_readers_do_not_enable_quality_inference_without_run_opt_in(self):
+    def test_configured_local_reader_is_forwarded_without_enabling_visual_calls(self):
         import main
         config = replace(self.config, fonts=self.root/'fonts.json', manga_reread_model=self.root/'snapshot')
         settings = s.options({}, render_enabled=True)
@@ -393,7 +393,7 @@ class ViewerTests(unittest.TestCase):
         with patch.object(main, 'run_pipeline') as pipeline:
             s.execute_job(config, dict(image=self.root/'image.png', directory=self.root/'job', options=settings))
         self.assertFalse(pipeline.call_args.kwargs['quality_reread'])
-        self.assertIsNone(pipeline.call_args.kwargs['manga_reread_model'])
+        self.assertEqual(pipeline.call_args.kwargs['manga_reread_model'], config.manga_reread_model)
         self.assertEqual(pipeline.call_args.kwargs['replacement_policy'], 'all')
 
     def test_mode_dispatch_reuses_coordinator_and_preview_workflow(self):
