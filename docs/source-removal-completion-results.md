@@ -317,3 +317,46 @@ This all-source adapter remains diagnostic. Broader native completion increases
 collateral loss without solving missing source ownership; passing integrity audits
 and 133 displayed replacements do not support production promotion. Production
 remains V4 thin-contact completion.
+
+## Coverage outside raw OCR geometry
+
+`native-coverage-screen-02/` screens saved page/native CTD evidence outside **all**
+raw OCR polygons, not merely selected ones. Weak-probability components (32 or
+higher) with at least 16 unowned strong-probability pixels (77 or higher) produce
+original/geometry/probability/clean/composite review crops. The initial run's font
+lookup failure remains in `native-coverage-screen-01.log`; the successful run uses
+the existing Noto CJK face.
+
+All 220 cards across 74 sheets were inspected and hash-bound in
+`native-coverage-screen-02/inspection.json`. These are review components, not
+unique passages or a recall/accuracy benchmark:
+
+| Observed candidate type | Components |
+| --- | ---: |
+| Missed lettering | 30 |
+| Clipped continuation / omitted column / punctuation | 36 |
+| Mostly owned geometry fringe or mixed component | 13 |
+| Artwork, structural detail or icon | 133 |
+| Uncertain at inspected scale | 8 |
+
+Real omissions include whole dependency/status UI rows, two title lines above a
+credit, repeated outlined sounds, small handwritten annotations, utterance endings
+and the white exclamation mark. A Linux annotation column lies outside most of its
+neighbor's raw box: cleanup removes much of it, but “tone-deaf” still omits the
+Linux-specific meaning. The report page also has a visible lower line clipped by
+the panel, and an outlined keyboard sound lacking its own raw footprint. Several
+components instead describe the already-English `VS` graphic. Detecting that
+graphic is not by itself a requirement to alter it.
+
+The largest false positives include faces, hair, clothing, hands and interface
+icons; components can connect actual lettering to those shapes. Conversely, one
+word or repeated sound can yield several components. Some lettering outside raw
+geometry has already been removed by saved extent evidence. Neither raw-box
+coverage nor a detector-component union can establish semantic ownership or
+authorize erasure.
+
+These observations motivate fresh OCR on original-pixel context windows around
+all candidates, with independent prediction geometry, retained alternatives and
+explicit crop-boundary evidence. Inspection labels and expected readings must not
+enter that request planner. Cross-window agreement can help locate stable lines,
+but inspection is still needed for complete readings and correct ownership.
