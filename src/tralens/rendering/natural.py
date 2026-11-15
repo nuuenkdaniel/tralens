@@ -653,6 +653,8 @@ def bind(preview, image_path, rgb, image_bytes, preview_bytes, selection, fonts_
     require(batch["page"]["image_sha256"] == source["sha256"] and batch["page"]["pixels_sha256"] == source["pixels_sha256"]
             and batch["page"]["image_path"] == source["path"], "foreign batch page")
     candidates = preview["ocr"].get("automatic_recognition_results", [])
+    from ..ocr import ink_groups
+    ink_groups.validate_saved(preview['ocr'],rgb)
     units = automatic_units(batch, candidates[0] if candidates else ())
     if candidates:
         from ..ocr.quality_reread import ENGINE as reread_engine, validate_pixels

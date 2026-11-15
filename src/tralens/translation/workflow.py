@@ -284,6 +284,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                         state['ocr']['dialogue_readings'] = _snapshot(getattr(engine,'dialogue_readings',{}))
                         if hasattr(engine,'crop_readings'):
                             state['ocr']['crop_readings'] = _snapshot(engine.crop_readings)
+                        if hasattr(engine,'ink_column_groups'):
+                            state['ocr']['ink_column_groups'] = _snapshot(engine.ink_column_groups)
                     if source_localization:
                         state['ocr']['source_localization'] = _snapshot(getattr(engine, 'source_localization', {}))
                     if len(batches) == 1 and batches[0] is not None and len(engine.raw_detections) == 1:
@@ -321,9 +323,11 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
             units = automatic_units(batch, candidates)
             from ..ocr import crop_readings
             saved_crop_readings=[c for c in _snapshot(candidates) if c.get('engine')==crop_readings.ENGINE]
-            if saved_crop_readings:
+            if saved_crop_readings or 'ink_column_groups' in state['ocr']:
                 with Image.open(BytesIO(_read_image(image))) as source:
                     rgb=source.convert('RGB')
+                    from ..ocr import ink_groups
+                    ink_groups.validate_saved(state['ocr'],rgb)
                     for candidate in saved_crop_readings:crop_readings.validate_pixels(candidate,rgb)
         records,fragment_requests = {},{}
         for unit in units:
