@@ -411,3 +411,46 @@ components. These counts still do not measure OCR recall or translation accuracy
 The next diagnostic reads original component/OCR envelopes with the independent
 local Hayai reader. Existing source selections and production V4 remain the
 baseline; these fresh detector hits alone do not justify automatic promotion.
+
+### Independent component-envelope reader
+
+`coverage-reader-01/` completed 405 deduplicated local Hayai calls over all 220
+components, including artwork and zero-Paddle-hit controls. Each component's
+bounds are united with its geometrically intersecting fresh OCR polygons, then
+read with 24/96 and 72/256 padding/minimum-side contexts. Oversized envelopes use
+overlapping native 512 crops. Planning uses geometry only; the reader receives
+original RGB pixels without masks, expected text or inspection labels.
+
+The pinned Hayai v2.7-supernova snapshot and CPU runtime are recorded. All calls
+finished in 59.5 seconds. The corrected audit binds 838 artifacts and replays every
+request, exact crop pixels, response and both-context coverage. All 220 cards
+across 37 sheets were inspected; `coverage-reader-01-review-02/inspection.json`
+binds explicit observations and 1,559 artifacts, including the earlier review's
+anger-symbol corrections. Initial review images remain available; corrected
+images wrap predictions by measured pixel width so long Japanese outputs remain
+visible. The first two inspected sheets are byte-identical between layouts.
+
+- Both contexts recover `世界遺産的な意味で`, including the heritage passage's
+  final `で`; IDs 37/39 recover `ああああ`, ID199 recovers `はっ`, and ID205
+  recovers `はやくっはやくっ`.
+- Local crops recover `いやーっ!`, `アップデート`, `おめでとー`, and the
+  previously omitted `リナックス音痴` annotation. Wider crops respectively add
+  another sound, merge UI content, lose `とー`, or borrow neighboring dialogue
+  and repeat Linux. ID201 changes from local `グッ` to wider `バッ`.
+- UI envelopes merge separate rows, corrupt their beginnings and sometimes
+  generate long repetitions. The crown-icon context and one APT/title context
+  also produce long repeated strings. Neither title reading is complete.
+- The quiet sound, outlined smiling repetitions, Latin VS, outlined keyboard
+  sound and panel-clipped report continuation remain incomplete or wrong.
+- Both contexts read the adjacent `ああああ` at ID59 even though its component
+  is a background rule. Artwork also produces stable `バ` (ID52), `ド` (ID105)
+  and `あ` (IDs113/146/154). Correct crop text and stable hallucinations both
+  defeat promotion based on reader agreement alone.
+
+Hayai supplies no glyph geometry. These useful recoveries remain unselected
+alternatives: they establish neither ownership by a probability component nor
+complete source support. The next trial reads each distinct fresh detector polygon
+with tight, axial and narrow contextual crops, testing whether individual lines
+reduce neighboring-row contamination while retaining all geometric false-positive
+controls. These reused pages remain development evidence, not held-out accuracy
+validation. Production V4 remains the baseline.
