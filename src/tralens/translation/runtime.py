@@ -2,6 +2,7 @@
 import time
 import hashlib
 import base64
+import math
 import re
 from dataclasses import asdict, dataclass, replace
 from typing import Protocol
@@ -140,9 +141,10 @@ class Generation:
 
 
 class GenerationError(ValueError):
-    def __init__(self, message, response_json):
+    def __init__(self, message, response_json, *, failure_kind="provider"):
         super().__init__(message)
         self.response_json = response_json
+        self.failure_kind = failure_kind
 
 
 def compact_unit(unit, page_order=()):
@@ -592,11 +594,18 @@ class OllamaRuntime:
             raise ValueError("unsupported runtime payload fields")
         defaults = GenerationOptions()
         controls = payload.get("options", defaults.transport_fields()["options"])
-        if (type(controls) is not dict or set(controls) != {"temperature", "num_ctx", "num_predict"}
-                or controls["temperature"] != 0):
+        if (type(controls) is not dict or not {"temperature", "num_ctx", "num_predict"} <= set(controls)
+                or set(controls) - {"temperature", "num_ctx", "num_predict", "seed"}
+                or type(controls["temperature"]) not in (int, float)
+                or not math.isfinite(controls["temperature"]) or not 0 <= controls["temperature"] <= 2
+                or ("seed" in controls and (type(controls["seed"]) is not int or not 0 <= controls["seed"] <= 2**31-1))):
             raise ValueError("unsupported generation options")
         bounded = GenerationOptions(controls["num_ctx"], controls["num_predict"], payload.get("keep_alive", defaults.keep_alive))
         fields = {**payload, **bounded.transport_fields()}
+        # Explicit visual experiments can use seeded sampling to avoid greedy
+        # repetition loops. Never silently alter caller controls or the default
+        # specialist settings; preserve the existing metadata/payload contracts.
+        fields["options"] = {**fields["options"], **controls}
         specialist = "translation" in payload
         if specialist:
             if self.specialist_template is None:
@@ -615,8 +624,15 @@ class OllamaRuntime:
         raw = canonical(response)
         if len(raw.encode("utf-8")) > 4 * 1024 * 1024:
             raise ValueError("Ollama response exceeds bound")
-        if type(response) is not dict or response.get("error") or response.get("done") is not True:
-            raise GenerationError("Ollama returned error or incomplete generation", raw)
+        if type(response) is not dict or response.get("error"):
+            raise GenerationError("Ollama returned a provider error or malformed response", raw)
+        if response.get("done") is not True:
+            message = response.get("message")
+            partial = response.get("response") if specialist else message.get("content") if type(message) is dict else None
+            repetitive = isinstance(partial, str) and re.search(r"([^\s])\1{29,}$", partial) is not None
+            kind = "incomplete_repetition" if repetitive else "incomplete"
+            detail = "; repeated-character tail (possible server repetition abort)" if repetitive else ""
+            raise GenerationError("Ollama generation incomplete: done is not true"+detail, raw, failure_kind=kind)
         if response.get("done_reason") == "length":
             raise GenerationError("Ollama output truncated", raw)
         try:
