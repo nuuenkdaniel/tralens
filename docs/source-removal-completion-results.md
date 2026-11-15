@@ -140,3 +140,77 @@ require work.
 The focused cleanup suite passes 42 tests and the full working-tree suite passes
 1,117. Those tests and the exact replay comparisons establish implementation and
 preservation behavior, not bilingual accuracy or universal source removal.
+
+## Native-resolution detector diagnostics
+
+`native-ctd-trial-01/` compares the saved whole-page CTD probabilities with fresh
+native crop and native context-tile predictions on 29 previously inspected
+remnant-screen cases. These are reused development cases, including locations
+where the residual screen marked artwork rather than text. The crop pixels are
+unchanged; context tiles are at most 1024 pixels per side. CTD receives only its
+required bottom/right padding, with no downscaling in these 58 forwards.
+
+The forwards take about 65.7 seconds in total. All 87 page/crop/tile support
+derivations succeed. The offline audit binds 432 artifacts and verifies original
+crop/tile pixels, native probability mappings, checkpoint identity, support replay
+and runtime idleness. All 29 comparison cards across ten sheets were inspected;
+`native-ctd-trial-01-review/inspection.json` binds the observations to their hashes.
+
+Native inference sharpens strokes and covers more of the difficult top sound
+effect. For `24-ubunchu01_07-00`, crop support adds 3,021 pixels but omits 462 from
+the page support; tile support adds 3,389 and omits 415. Other regions lose useful
+support too: the tile view retains part of the weekly-publication character, and
+the feature-heading tile retains a Latin fragment. Extra support can cut nearby
+book, panel, balloon and UI edges.
+
+All three resolutions still leave the white exclamation mark outside its selected
+columns, repeated sounds beyond the detected footprint, and unowned UI lines.
+The APT comparison is before the separately saved extent completion and is not a
+final-render regression. Sharper probability alone fixes neither source ownership
+nor wrong selected readings such as “Seriously.”, “Top—” and “Page 2.” The trial
+therefore motivates an additive support experiment rather than replacement of the
+page mask. None of its readings or translations is newly selected.
+
+### Additive saved-native replay
+
+`native-ctd-render-01/` unions independently derived crop/tile support with V4
+page support, recomputing each candidate against current protection. Reuse requires
+the exact original crop shape, RGB-pixel digest and source-mask digest. This is a
+29-case diagnostic adapter, not a general production policy. Twenty-seven cases
+reach that adapter; two white-text cases finish through earlier routes. The 91
+support requests replay exactly, including 27 native completions adding 17,883
+support pixels across calls, with no shrunken baseline mask or protected commits.
+
+The fresh render audit checks 1,811 artifacts and preserves exact target wording,
+font floors, unique membership, recomposition and zero outside-support changes.
+It still displays 133 replacements, with 15 identical targets, one existing
+missing translation and none available but undisplayed. One page is unchanged;
+five changed full cleanplates/composites and all 47 changed-context cards were
+inspected and hash-bound in `native-ctd-render-01-review-02/inspection.json`.
+
+| Page | Changed clean pixels | Changed composite pixels |
+| --- | ---: | ---: |
+| `ubunchu01_07` | 6,623 | 6,587 |
+| `ubunchu08_0011` | 33,169 | 32,057 |
+| `saved-example` | 72,253 | 73,572 |
+| `ubunchu07_0002` | 0 | 0 |
+| `ubunchu08_0007` | 71,327 | 66,316 |
+| `ubunchu03_0006` | 5,290 | 4,182 |
+
+Small remnants under the top sound-effect border disappear, but a dark rectangular
+reconstruction remains at the lower balloon contact. The feature heading clears
+a retained Latin edge while switching to a broader opaque-backed fallback that
+removes more book/panel artwork. Other changes clip icons and panel/UI rules.
+Most importantly, fresh LaMa output introduces distinct loop/letter-like marks
+along the lower APT title boundary. **An additive erasure mask does not guarantee
+monotonic visual removal after reconstruction.** This replay is retained as a
+diagnostic rather than integrated into production.
+
+Two initial audit failures are preserved with their scripts/logs. The old review
+envelope missed 1,029 changed pixels when a heading changed placement route;
+review now includes both old/new cleanup and backing bounds. A non-learned final
+cleanup had no saved backend-protection image; its exact protection is rebuilt
+from the accepted primary/recovery layers and ordered final commits, checked
+against saved protection wherever present, and required to reproduce the complete
+final erase/alpha masks. The corrected audits retain the original integrity
+checks and require every changed pixel to appear in a review card.
