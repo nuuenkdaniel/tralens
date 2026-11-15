@@ -121,3 +121,44 @@ pre-dispatch proof rejection and the actual coordinator/render handoff.
 The full working-tree suite passes 1,113 tests with `PYTHONPATH=src`. An initial
 invocation without that environment failed one subprocess import; both logs are
 retained.
+
+## Fresh coordinator run on the other two joins
+
+`fresh-boundary-pipeline-01/` runs the frozen `3cbc525` candidate from original
+pages through fresh Paddle page OCR, boundary grouping, Hayai readings, TG27,
+crop localization and rendering. The two paths are `ubunchu01_07` and
+`ubunchu08_0011`. Although the original acquisition split labels them evaluation,
+both had already been inspected during grouping development; this is explicitly
+reused development evidence, not untouched accuracy evaluation.
+
+The pages finish in 91.6 and 82.4 seconds. There are 41 bound translations from
+44 generation attempts, 38 displayed replacements, three identical targets, no
+missing translations and no available-but-undisplayed targets. Three fresh crop
+predictions are consumed. The per-page release records acknowledge unloads and
+empty runtimes. The audit checks 575 artifacts, exact request/result/target
+bindings, membership, font floors, native recomposition and zero outside-support
+changes. Four joined regions have zero dark pixels remaining at 23,195 supported
+original-ink pixels.
+
+Both original/clean/composite pages and all bilingual outputs were inspected.
+Execution completeness is substantially better than semantic completeness:
+
+- The world-heritage aside is joined and removed, but its selected source omits
+  the final `で`. “If we don't protect it, it will lose its significance as a World
+  Heritage site” invents a consequence instead of conveying the preservation joke.
+- `ちょっと具合が悪くなったら` becomes a person feeling unwell rather than the
+  computer acting up. The Windows-imitation criticism becomes “bad management
+  practices,” and system transparency becomes the system's “prospects.”
+- The joined pre-class `ひと反芻` becomes “review everything,” losing the cow's
+  literal rumination joke. APT-Man becomes “the guy from APT” elsewhere.
+- Fragmentary sources produce “Okay,” “Page 2,” and slash-separated alternatives.
+  Some sounds and handwritten text are undetected or treated as identical Latin
+  targets. The top-right screen retains untranslated lines behind new English;
+  large sound effects retain parts beyond their selected cleanup masks/crops.
+
+`all-source-ink-screen.json` is an exploratory location screen, not a removal
+certificate. Its 24 flagged cards on the earlier four pages and five on the fresh
+pages were all inspected. Dark reconstructed backgrounds and light-on-dark text
+make its raw dark-pixel count misleading; a white exclamation mark also survives
+outside the detected source. Source extents, skipped lettering and translation
+meaning still require work despite the successful grouping/pixel invariants.

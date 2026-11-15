@@ -132,5 +132,42 @@ releases. These are integrity checks, not an accuracy score. Strong-source and
 Latin-only selection protections remain in place; none of these diagnostic
 corrections has been selected or rendered.
 
+## Matched thinking controls and capacity follow-up
+
+`thinking-context-trial-01/` retains 102 Gemma4 requests: 27 transcription pairs
+(24 manga crops and three controls), and 24 exact-target page-visual translation
+pairs. Each pair has identical messages, images, schema and greedy options; only
+`think` differs. Both use 2,048 output tokens and 8,192 context. This is diagnostic
+transport with journaled requests, not a change to production schema generation.
+
+All 51 non-thinking answers parse. Thinking completes 14 readings and 18
+translations; 13 readings and six translations terminate at the output limit.
+Those 19 responses are retained as truncations, without extracting purported
+answers from their reasoning. All 24 comparison cards in
+`thinking-context-review-01/` were inspected. Some wording improves, but the dawn
+continuation still receives the wrong implied subject, and source/name changes
+still occur without a reported conflict.
+
+`thinking-context-trial-02/` retries exactly those 19 truncated thinking requests
+with 8,192 output tokens and 16,384 context. Original messages, images and schemas
+are identical, and every previous failure remains intact. Two readings and four
+translations now complete; **11 readings and two translations still truncate**.
+All 16 resulting source cards in `thinking-context-review-02/` were inspected.
+
+The completed dawn transcription is plausible. The update/form reading still
+loses a visible `X` at the start of the second line and reports no clipping. The
+sound-effect target selected as `上ー` becomes “Wired connection / Roaming mode
+is... / appearing!”, importing nearby UI text despite the exact-target constraint.
+The model reports a conflict there, but the answer itself violates the requested
+source boundary. Another response preserves the erroneous “Three.” Increasing
+capacity therefore recovers some answers but does not establish accurate reading
+or faithful, region-bound translation.
+
+`thinking-context-audit-02.json` verifies 350 artifacts, both capacity settings,
+exact pair/follow-up bodies, original image bytes/pixels, selected source records,
+response hashes, final-answer schemas and retained truncations. Both runs record
+acknowledged unloads and empty runtimes. No thinking output has been selected or
+rendered; these counts measure execution and integrity, not accuracy.
+
 This remains development evidence on reused pages, without independent bilingual
 approval or untouched end-to-end validation. Full fidelity is still unmet.
