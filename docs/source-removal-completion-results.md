@@ -543,3 +543,58 @@ justify replacing existing selections on strip agreement. All predictions remain
 unselected; the earlier production translations and V4 cleanup remain the
 baseline. Complete readings, semantic ownership, untranslated omissions and
 untouched end-to-end validation still require work.
+
+### Independent recognition over native and strip inputs
+
+`coverage-cross-reader-01/` runs the existing local `PP-OCRv6_medium_rec`
+recognizer on all 690 native/strip presentations. Each is read as presented; a
+lossless counterclockwise quarter-turn is also read when height is at least
+1.5 times width. Exact RGB-content deduplication preserves all 798 orientation
+associations in 669 calls, completed without execution failures in 30.6 seconds.
+The isolated Paddle runtime uses CPU/four threads, batch size one, disabled
+MKLDNN/HPI/TensorRT/CINN, blocked downloads and the shared inference lease.
+This is recognition only: no new detector, expected text or masks are supplied.
+
+The audit binds 3,345 artifacts and independently reconstructs every input,
+quarter-turn, deduplicated call and source association. All 115 comparison cards
+across 29 sheets were visually inspected. Explicit observations in
+`coverage-cross-reader-observations.tsv` and the completed
+`coverage-cross-reader-01-review/inspection.json` bind 3,582 artifacts, including
+the preceding inspections and attribution corrections. The 103 exact Hayai
+matches, 110 normalized matches and 103 empty orientation associations are
+operational comparisons, not accuracy measurements.
+
+- Line13's three strips corroborate `依存関係を解決`; lines73/74 corroborate
+  `ローミング・モードが`. Line12's contextual Paddle reading still substitutes
+  `法` for `決`. Strip row isolation is useful but not uniformly correct.
+- All six Paddle views of line84 recover `不撓の牛王`, rejecting Hayai's
+  persistent `不挽`/`不撹`. Line85 recovers `APT-Man`, and lines93/96/98 recover
+  `Masato` in all views. These independently weighted readings help distinguish
+  some name/title errors; adjacent polygons still truncate them or borrow text.
+- Different readers share omissions. Rotated narrow strips of line4 agree on
+  `な意味` while losing the indented `で`; lines82/83 agree on `おめで` without
+  `とー`. Line45 agrees on `アスキ` without visible `ー`, and line28 agrees on
+  only two or three of four repeated `あ`. Full detector-polygon coverage and
+  cross-model agreement establish neither full lettering extent nor full text.
+- Agreement can preserve wrong grouping too: line10's `路さ` spans title/credit
+  fragments, and both readers mix `Wget` with neighboring `あう` in line56.
+  The Linux seed still crosses two vertical columns horizontally, leaving its
+  meaning unrecovered by these line crops.
+- High confidence accompanies obvious failures: outlined `ブチッ` becomes `7`
+  at 0.974–0.987; line76 returns `installz` at 0.995; line100's strip context
+  gives `Masito` at 0.981. Crown icons repeatedly become `2`. Artwork, mixed
+  passages and clipped text remain in the record rather than being filtered by
+  score or inspection outcome.
+- Paddle often drops final `み`, `ら` or small `っ`, and corrupts the update
+  label even where Hayai reads it. Line91's axial strip recovers `SUPER!`, but
+  its tight strip agrees on incomplete `SUPER`. No reader/presentation dominates.
+- Bounding-box aspect misses compact tilted vertical writing. Magazine `週刊`
+  and left-hand `はやくっ` crops receive no rotated presentation under this
+  heuristic; their failures do not show that a correctly oriented crop is
+  unreadable. Writing direction needs evidence beyond a rectangular long axis.
+
+The independent recognizer supplies useful alternatives, but shares all source
+geometry with Hayai. Its agreement cannot certify selection, semantic ownership
+or erase support. All new readings remain unselected. Further recovery must
+address source extent, orientation and passage membership; these reused pages
+continue to be development evidence rather than untouched validation.
