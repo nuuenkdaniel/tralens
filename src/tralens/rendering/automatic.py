@@ -463,6 +463,8 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
                 'pixels_sha256': n.digest(f'RGB:{rgb.width}:{rgb.height}:'.encode()+rgb.tobytes()),
                 'size': list(rgb.size)}
     selected, _ = _font(n.document(font_manifest), font_id)
+    from .font_faces import ApprovedFaces
+    ApprovedFaces(n.document(font_manifest), selected)
     n.require(n.features.check_feature('raqm'), 'RAQM unavailable')
     checked = {'source': source, 'fonts_sha256': n.digest(font_manifest), 'font_id': selected, 'render_policy': render_policy}
     if removal_policy!='legacy':
@@ -515,6 +517,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         'preview_sha256': n.digest(contents[0]), 'fonts_sha256': n.digest(contents[2]), 'units': []}
     n.bind(preview_doc, paths[1], rgb, contents[1], contents[0], source_contract, contents[2], selection_kind='automatic_candidate_only')
     font_id, (font_data, coverage) = _font(fonts_doc, font_id)
+    from .font_faces import ApprovedFaces
+    faces = ApprovedFaces(fonts_doc, font_id)
     style = {'min_size': min_size, 'max_size': max_size, 'outline': 0}
     candidates = preview_doc['ocr'].get('automatic_recognition_results', [])
     units = n.automatic_units(preview_doc['ocr']['batches'][0], candidates[0] if candidates else ())
@@ -658,6 +662,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 row['replacement_confidence'] = assessment
                 if not assessment['allowed']:
                     raise AutomaticSkip(assessment['reason_code'], assessment['reason'])
+            font_data, coverage = faces.resolve(row)
             n.validate_text(binding['text'], coverage)
             if is_coverage:
                 # Delay not just geometry but also its slot/raster budget until
@@ -800,6 +805,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     if (occupied & reserved).any():
                         continue
                 try:
+                    font_data, coverage = faces.resolve(row)
                     if route == 'source_local':
                         if context_error is not None:
                             raise n.ResourceLimit(context_error)
@@ -943,6 +949,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                        'original_failure': row['reason_code']}
             row['enclosure_layout_attempt'] = attempt
             try:
+                font_data, coverage = faces.resolve(row)
                 if enclosure_context is None and enclosure_error is None:
                     try:
                         n.budget_check(work+3*pixels <= MAX_WORK, 'enclosure original geometry work budget')
@@ -1044,6 +1051,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 'original_failure': row['reason_code']}
             row['localized_cleanup_attempt'] = attempt
             try:
+                font_data, coverage = faces.resolve(row)
                 extra_work = pixels*(len(raw)+128)
                 n.budget_check(localized_retries < localized_strokes.MAX_RETRIES
                     and localized_work+extra_work <= localized_strokes.MAX_RETRY_WORK,
@@ -1141,8 +1149,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 report['text_mask_error']=text_mask_error
         try:
             report['units'],clean,text,composite,erase_union,layout_union,recovery_artifacts,report['reconstruction_summary'] = aggressive.recover(
-                rgb,source,raw,report['units'],clean,text,erase_union,layout_union,font_data,coverage,style,
-                backend=backend,
+                rgb,source,raw,report['units'],clean,text,erase_union,layout_union,*faces.primary,style,
+                backend=backend,font_resolver=faces.resolve,
                 probability=text_mask.raw if text_mask is not None else None,extents=extents)
         except reconstruction.BindingError:
             raise
@@ -1151,7 +1159,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 'error':type(error).__name__+': '+str(error)[:2000],'model_config':reconstruction_spec}
         from . import replacement
         report['units'],clean,text,composite,erase_union,layout_union,final_artifacts,report['removal_summary'] = replacement.finish(
-            rgb,raw,report['units'],clean,text,erase_union,layout_union,font_data,coverage,style,
+            rgb,raw,report['units'],clean,text,erase_union,layout_union,*faces.primary,style,font_resolver=faces.resolve,
             probability=text_mask.raw if text_mask is not None else None,source=source,backend=backend,
             budget=reconstruction.Budget(maximum_calls=4,maximum_seconds=40),extents=extents)
         recovery_artifacts.update(final_artifacts)
@@ -1164,7 +1172,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         native_composite, native_text = composite, text
         try:
             composite, text, patch_layer, fallback_text, display_mask, display_tiles, display_summary = visible_translations.display(
-                rgb, raw, units, report['units'], clean, native_text, native_composite, font_data, coverage, style,
+                rgb, raw, units, report['units'], clean, native_text, native_composite, *faces.primary, style,
+                font_resolver=faces.resolve,
                 max_displays=max(0,min(visible_translations.MAX_ATTEMPTS,(MAX_ARTIFACTS-24-14*len(plans))//3)),native_erase=erase_union)
             report['display_summary'] = display_summary
             report['pixel_audit_scope'] = 'native clean/text before separately audited opaque display overlays'

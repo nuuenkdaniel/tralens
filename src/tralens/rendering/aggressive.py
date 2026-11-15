@@ -163,7 +163,7 @@ def tall_layout(layer,proof):
     return b-y>1.35*(r-x)
 
 
-def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style,*,backend=None,budget=None,probability=None,extents=None):
+def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style,*,backend=None,budget=None,probability=None,extents=None,font_resolver=None):
     """Independent bounded pass; native successes are retained, then visibility runs.
 
     Every region gets one cheap attempt before any retry. Learned quota is separate
@@ -213,6 +213,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             allowed=p.dilate(own,24)&~placement_protected
             layer=proof=content=None;retry=False
             try:
+                if font_resolver is not None:font_data,coverage=font_resolver(row)
                 n.validate_text(row['binding']['text'],coverage)
                 dark=np.median(crop[own])<80
                 layer,proof,content=typography.layout_dialogue(row['binding']['text'],font_data,coverage,
@@ -232,6 +233,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                     n.require(evidence.get('policy')==source_support.POLICY or extent is not None,
                         'source-centered reconstruction retry needs source-bound stroke support')
                     from .replacement import patch_layout
+                    if font_resolver is not None:font_data,coverage=font_resolver(row)
                     n.validate_text(row['binding']['text'],coverage)
                     sx,sy,sw,sh=cv2.boundingRect(own.astype(np.uint8))
                     dark=np.median(crop[own])<80

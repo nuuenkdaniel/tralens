@@ -106,7 +106,7 @@ def patch_layout(text, font_data, coverage, bounds, blocked, style, *, outline=0
 
 
 def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, style, *, probability=None,
-           source=None, backend=None, budget=None, extents=None):
+           source=None, backend=None, budget=None, extents=None, font_resolver=None):
     """Remove pending translated sources even when every placement attempt fails."""
     started=time.monotonic();rows=deepcopy(rows)
     original=np.asarray(rgb);plate=np.asarray(clean).copy();text=text.copy()
@@ -216,6 +216,7 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
             summary['layout_work_pixels']+=blocked.size*7
             sx,sy,sw,sh=cv2.boundingRect(own.astype(np.uint8))
             surface=0 if np.median(crop[own])<80 else 255
+            if font_resolver is not None:font_data,coverage=font_resolver(row)
             layer,xy,proof=patch_layout(row['binding']['text'],font_data,coverage,
                 (x+sx-ax,y+sy-ay,x+sx+sw-ax,y+sy+sh-ay),blocked,{**style,'fill':[255-surface]*3})
             px,py=xy;px+=ax;py+=ay;h,w=layer.height,layer.width

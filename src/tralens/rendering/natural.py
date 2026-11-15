@@ -237,6 +237,8 @@ def load_fonts(manifest):
         require(digest(data) == f["sha256"] and digest(license_data) == f["license_sha256"], "font/license hash mismatch")
         require(type(f["license"]) is str and bool(f["license"].strip()) and bool(license_data), "font license required")
         try:
+            from .font_faces import standalone
+            data = standalone(data, f.get('face_index'))
             coverage = font_coverage(data, max_points=2*MAX_COVERAGE_POINTS-points)
             budget_check(points+len(coverage) <= 2*MAX_COVERAGE_POINTS, "aggregate font coverage budget")
             points += len(coverage)
@@ -355,8 +357,10 @@ def validate_text(text, coverage):
     require(type(text) is str and 0 < len(text) <= 1000 and text.strip(), "text budget/blank")
     require(all(c == "\n" or (32 <= ord(c) < 127) or
                 (unicodedata.category(c)[0] in ("L", "M") and
-                 ("LATIN" in unicodedata.name(c, "") or unicodedata.category(c)[0] == "M")) or
-                unicodedata.category(c)[0] == "P" for c in text), "baseline English horizontal text only")
+                 (unicodedata.name(c, "").startswith(('LATIN ', 'HIRAGANA ', 'KATAKANA ', 'KATAKANA-HIRAGANA ',
+                     'CJK UNIFIED IDEOGRAPH-', 'CJK COMPATIBILITY IDEOGRAPH-')) or
+                  unicodedata.category(c)[0] == "M")) or
+                unicodedata.category(c)[0] == "P" for c in text), "supported Latin/CJK horizontal text required")
     require(all(ord(c) in coverage for c in text if c != "\n"), "missing glyph coverage")
 
 

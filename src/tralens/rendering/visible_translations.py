@@ -156,7 +156,7 @@ def place(rgb, source_bounds, own, blocked, text, font_data, coverage, style):
     return 'caption',patch,lettering,xy,proof,attempts
 
 
-def display(rgb, raw, units, rows, native_clean, native_text, native_composite, font_data, coverage, style, *, max_displays=MAX_ATTEMPTS, native_erase=None):
+def display(rgb, raw, units, rows, native_clean, native_text, native_composite, font_data, coverage, style, *, max_displays=MAX_ATTEMPTS, native_erase=None, font_resolver=None):
     """Independent post-clean display pass. Failures never roll back native edits."""
     started = time.monotonic()
     shape = (rgb.height,rgb.width)
@@ -204,6 +204,7 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
         attempts += 1
         work += extra
         try:
+            if font_resolver is not None:font_data,coverage=font_resolver(row)
             n.validate_text(row['binding']['text'],coverage)
             own_count = np.zeros(shape,np.uint16)
             for source_id in row['binding']['member_ids']:
