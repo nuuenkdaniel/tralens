@@ -332,6 +332,9 @@ def automatic_units(batch, candidates=()):
         from ..ocr import manga_dialogue
         if c['engine']==manga_dialogue.ENGINE:
             manga_dialogue.validate_candidate(c,batch)
+        from ..ocr import crop_readings
+        if c['engine']==crop_readings.ENGINE:
+            crop_readings.validate_candidate(c,batch)
     result = []
     if len({row[0] for row in batch["regions"]}) != len(batch["regions"]):
         raise ValueError("duplicate/conflicting region ownership records")

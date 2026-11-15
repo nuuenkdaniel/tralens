@@ -282,6 +282,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                         state['ocr']['original_unit_proposals'] = _snapshot(getattr(engine, 'original_unit_proposals', ()))
                         state['ocr']['quality_rereads'] = _snapshot(getattr(engine, 'quality_rereads', {}))
                         state['ocr']['dialogue_readings'] = _snapshot(getattr(engine,'dialogue_readings',{}))
+                        if hasattr(engine,'crop_readings'):
+                            state['ocr']['crop_readings'] = _snapshot(engine.crop_readings)
                     if source_localization:
                         state['ocr']['source_localization'] = _snapshot(getattr(engine, 'source_localization', {}))
                     if len(batches) == 1 and batches[0] is not None and len(engine.raw_detections) == 1:
@@ -317,6 +319,12 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 raise ValueError("candidate state does not bind the single OCR page")
             candidates = tuple(c for r in recognition[0] for c in r.candidates) if recognition else ()
             units = automatic_units(batch, candidates)
+            from ..ocr import crop_readings
+            saved_crop_readings=[c for c in _snapshot(candidates) if c.get('engine')==crop_readings.ENGINE]
+            if saved_crop_readings:
+                with Image.open(BytesIO(_read_image(image))) as source:
+                    rgb=source.convert('RGB')
+                    for candidate in saved_crop_readings:crop_readings.validate_pixels(candidate,rgb)
         records,fragment_requests = {},{}
         for unit in units:
             request = TranslationRequest((unit,), (unit.unit_id,))
@@ -329,6 +337,9 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
             if review_ocr: record["visual_alternates"] = []
             from ..ocr.manga_dialogue import preferred_reading as dialogue_reading
             preferred_dialogue=dialogue_reading(unit) if ocr_refine is not None else None
+            if ocr_refine is not None and preferred_dialogue is None:
+                from ..ocr.crop_readings import preferred_reading as crop_reading
+                preferred_dialogue=crop_reading(unit)
             if unit.disposition == "preview" and preferred_dialogue is None:
                 state["strict_eligible_units"] += 1
             elif translation_policy == 'coverage-first' and (preferred_dialogue is not None or not coverage.rejection_reasons(unit)):

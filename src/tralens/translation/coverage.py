@@ -107,6 +107,9 @@ def provenance(unit, reading_revision=None):
         if candidate is None:
             from ..ocr.manga_dialogue import preferred_reading, POLICY as reread_policy
             candidate=preferred_reading(unit)
+        if candidate is None:
+            from ..ocr.crop_readings import preferred_reading, POLICY as reread_policy
+            candidate=preferred_reading(unit)
         if candidate is None or candidate.revision != reading_revision:
             raise ValueError('reread selection is not the exact corroborated source-bound candidate')
         result.update(reread_selected_revision=reading_revision, reread_policy=reread_policy,
