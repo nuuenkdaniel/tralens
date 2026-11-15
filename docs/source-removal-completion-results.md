@@ -360,3 +360,54 @@ all candidates, with independent prediction geometry, retained alternatives and
 explicit crop-boundary evidence. Inspection labels and expected readings must not
 enter that request planner. Cross-window agreement can help locate stable lines,
 but inspection is still needed for complete readings and correct ownership.
+
+### Fresh original-pixel OCR coverage trial
+
+`coverage-ocr-01/` makes 102 local Paddle v6-medium calls across all six pages,
+including every artwork and uncertain control. Its 512/768-side grids use
+three-quarter strides and anchored final tiles, selected only by intersection
+with coverage-component bounds. Crops contain unresampled original pixels;
+Paddle's own detector/line preprocessing remains enabled. Inspection labels and
+expected strings do not enter planning. All 1,026 detections remain alternatives.
+
+The 370-artifact audit replays the complete plan, original RGB/BGR input pixels,
+Paddle association, page-coordinate offsets and internal crop-edge flags. All
+102 calls finish, and before/after remote-runtime records are idle. The first audit
+failed because importing the nested script snapshot changed repository-relative
+imports; the byte-identical original script is used by the corrected audit.
+The failed script and log remain preserved.
+
+Fresh detector polygons intersect 68 of the 220 screened components; 66 have
+nonempty readings and 152 have no hit. These are component intersections, not
+recovered passages. All 68 hit cards across 23 sheets and all six full originals
+were inspected; `coverage-ocr-01-review-02/inspection.json` binds observations,
+zero-hit records and 466 artifacts. Useful findings and failures include:
+
+- Both grids recover the visible `依存関係を解決` dependency-row phrase and
+  `完了`. The larger grid also reads `状態情報を読み`; the smaller one drops
+  the visible `み`. Intersecting components can span adjacent UI rows.
+- The larger grid recovers the leading `い` in `いやーっ`, but both grids omit
+  its visible exclamation. Repeated outlined sounds become Latin letters or
+  unrelated kanji; the title above the credit remains unread.
+- Both grids agree on the wrong/incomplete `Pプデー` for the update label and
+  `いいのかし` without final `ら`. Missing characters can occur well inside a
+  tile, so crop-edge flags do not certify complete source geometry.
+- Edge-flagged 512 crops read `APT-Man`, while larger internal 768 crops truncate
+  it to `APT-Ma`/`APT-M`. Bigger context is not monotonically better.
+- A crown icon is repeatedly read as `2`; an eyebrow becomes `乐` with 0.959
+  confidence. Adjacent text boxes also touch fingers, icons and rules. Neither
+  confidence nor cross-grid agreement establishes textual ownership.
+- The Linux annotation, outlined keyboard sound and panel-clipped report row
+  remain substantially unread. The quiet sound and white exclamation have no
+  overlapping fresh detections.
+
+Full-page inspection also corrects four earlier component attributions: IDs 26,
+27, 29 and 30 are the four quarters of an **anger symbol**, not sound-effect
+characters. The original observations are retained, with explicit corrections in
+the new inspection record. Corrected screen counts are 27 missed-lettering,
+35 clipped-continuation, 13 geometry-fringe, 137 artwork/symbol and eight uncertain
+components. These counts still do not measure OCR recall or translation accuracy.
+
+The next diagnostic reads original component/OCR envelopes with the independent
+local Hayai reader. Existing source selections and production V4 remain the
+baseline; these fresh detector hits alone do not justify automatic promotion.
