@@ -323,7 +323,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
             units = automatic_units(batch, candidates)
             from ..ocr import crop_readings, ink_groups
             saved_crop_readings=[c for c in _snapshot(candidates) if c.get('engine')==crop_readings.ENGINE]
-            grouped=any(p.grouping_method==ink_groups.POLICY for p in batch.proposals)
+            grouped=any(p.grouping_method in ink_groups.POLICIES for p in batch.proposals)
             if saved_crop_readings or grouped or 'ink_column_groups' in state['ocr']:
                 with Image.open(BytesIO(_read_image(image))) as source:
                     rgb=source.convert('RGB')

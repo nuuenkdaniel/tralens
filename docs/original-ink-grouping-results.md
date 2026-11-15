@@ -66,3 +66,58 @@ Seven portable tests cover overlapping detector margins, stacked pieces,
 separators, empty ink, ambiguous/interleaved/duplicate membership, text-independent
 grouping, retained prior results, serialized conflicts, tampering and the actual
 coordinator/translation/renderer handoff with injected synthetic readers.
+
+## Opt-in boundary-alignment policy
+
+`--ink-boundary-groups` with `--crop-reader-model` enables the separately versioned
+`original_ink_boundary_continuations_v1` policy. It is mutually exclusive with
+`--ink-column-groups`. Both options default off, and the original all-column
+alignment policy remains the default for direct planner/refiner calls.
+
+The new policy compares the tops of the two columns at the joining seam. Internal
+indentation within either retained parent proposal no longer vetoes that seam.
+The existing enclosure, clear/narrow seam, intervening-source, ambiguity,
+membership, crop-conflict and original-pixel guards still apply. The selected
+policy is saved in `ocr.ink_column_groups`; translation and rendering replay that
+policy. Removing or downgrading its proof fails validation.
+
+`seam-alignment-trial-01/` freezes the diagnostic before implementation.
+`boundary-geometry-audit-01.json` confirms exact old-policy reproduction and new
+policy equivalence on 23 saved paths (**22 unique pixel sources**; `saved-example`
+duplicates `ubunchu01_06`). The boundary policy retains all eight prior joins and
+adds three inspected continuations: the monopolist sentence on `ubunchu07_0002`,
+the world-heritage aside on `ubunchu01_07`, and the pre-class rumination on
+`ubunchu08_0011`. This validates the observed geometric change, not complete OCR.
+
+`boundary-translation-01/` contains 66 fresh TG27 results on the three changed
+working pages. All 65 common target strings match `ink-translation-02/` exactly;
+the fourth page retains its 42 prior records. The additional joined source is:
+
+> そのすばらしさにはどんな独占主義者だって心を入れ替えるわ
+
+It now produces “Even the most ardent monopolist would change their ways after
+experiencing its magnificence.” This is a coherent rendition of the visible
+sentence, replacing the disconnected fragment outputs. It is somewhat more
+elaborate than the Japanese; it is not an independently certified translation.
+
+`boundary-render-01/` contains fresh localization and four native-resolution
+renders. The six joined regions were inspected as original/prior/clean/final
+cards, along with the changed full page. The new sentence is visibly lettered and
+its original Japanese is removed. The six groups have zero remaining dark pixels
+at 18,141 original supported-ink pixels, including 6,199 in the new join. This
+support-specific measurement does not certify every source mark on the pages.
+
+The audit checks 1,273 artifact hashes, exact selected targets and recomposition,
+font floors, membership and zero changes outside declared support. There are 95
+displayed replacements after six merges, zero available-but-undisplayed targets,
+12 intentionally identical targets and one pre-existing missing translation.
+Three composites are pixel-identical to `ink-render-01`; the changed page differs
+at 12,120 pixels. The new join is the only new lettering region. Intrusive text,
+local art loss and the earlier clapping/reassurance/pronoun errors remain visible.
+
+The portable regressions exercise staggered internal columns, misaligned seams,
+both policies' geometry guards, policy downgrade/removal, conflicting options,
+pre-dispatch proof rejection and the actual coordinator/render handoff.
+The full working-tree suite passes 1,113 tests with `PYTHONPATH=src`. An initial
+invocation without that environment failed one subprocess import; both logs are
+retained.

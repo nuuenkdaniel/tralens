@@ -99,5 +99,38 @@ with Gemma4 and remain rejected. This is a promising, small source-recovery pilo
 not evidence to remove strong-reading protection generally. No source was selected
 or translation regenerated from these corroboration results.
 
+## Expanded corroboration and framing controls
+
+`strong-crop-expansion-01/` applies the same routing rules to 19 additional saved
+page paths: 197 regions and 591 completed Hayai readings. Twenty-one changed,
+consistent candidates receive 63 blind Gemma4 requests. Sixty-one parse; two
+newline-repetition truncations remain failed attempts with their raw responses.
+
+`square-corroboration-trial-01/` then presents all 26 pilot/expansion cases using
+the same aspect-preserving 896-square framing, independently for each of the
+three retained views. All 78 requests parse. Six cases agree with Hayai in every
+view without uncertainty or clipping flags:
+
+- The posting greeting and gaze-caption dakuten corrections from the pilot.
+- `コニヒューターの再起重力` → `コンピューターの再起動` and
+  `残時間約20分` → `残り時間約20分` on `ubunchu06_0002`.
+- `Linu×` → `Linux` and `うぶんちゆ` → `うぶんちゅ` within longer sentences
+  on `ubunchu08_0003`.
+
+All 26 original/readings cards in `square-corroboration-review-01/` were inspected.
+Framing removes some clipping flags, but also changes plausible readings into
+invented text. The clipped form heading produces three different confident
+expansions. The cow title still disagrees with Hayai, and the magic sentence
+acquires extra characters. No framing policy establishes complete text ownership.
+
+The 23 development paths represent **22 unique source images**: `saved-example`
+and `ubunchu01_06` are pixel-identical. The 26 corroboration cases similarly
+contain 25 distinct three-view pixel sets. These repeats are not independent
+validation. `corroboration-audit-01.json` checks 1,040 artifacts, exact original
+views, request/image/result bindings, retained truncations and acknowledged model
+releases. These are integrity checks, not an accuracy score. Strong-source and
+Latin-only selection protections remain in place; none of these diagnostic
+corrections has been selected or rendered.
+
 This remains development evidence on reused pages, without independent bilingual
 approval or untouched end-to-end validation. Full fidelity is still unmet.

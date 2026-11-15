@@ -119,8 +119,11 @@ def dialogue_refiner(model_path):
     return refine
 
 
-def crop_reader_refiner(model_path, *, ink_column_groups=False):
+def crop_reader_refiner(model_path, *, ink_column_groups=False, ink_boundary_groups=False):
     """Optional pinned local reader; OCR owns candidates, never translation/rendering."""
+    if (type(ink_column_groups) is not bool or type(ink_boundary_groups) is not bool
+            or (ink_column_groups and ink_boundary_groups)):
+        raise ValueError('choose one explicit ink grouping policy')
     from tralens.ocr.hayai_adapter import verify_snapshot
     path=verify_snapshot(model_path)
     def refine(engine,*,output):
@@ -135,9 +138,10 @@ def crop_reader_refiner(model_path, *, ink_column_groups=False):
         try:
             with Image.open(BytesIO(original)) as source:
                 image=source.convert('RGB')
-                if ink_column_groups:
+                if ink_column_groups or ink_boundary_groups:
                     from tralens.ocr import ink_groups
-                    ink_groups.refine(engine,image,original)
+                    ink_groups.refine(engine,image,original,
+                        policy=ink_groups.BOUNDARY_POLICY if ink_boundary_groups else ink_groups.POLICY)
                 crop_readings.refine(engine,image,original,reader=reader,
                     model_identity=canonical(reader.identity),output=output)
         finally:reader.close()
@@ -150,7 +154,7 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                  replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', quality_reread=False,
                  reread_model='qwen3.8:latest', manga_reread_model=None, source_localization=False,
                  visibility_policy='always-show', removal_policy='aggressive', reconstruction_policy='classical',
-                 reconstruction_config=None, crop_reader_model=None, ink_column_groups=False, **preview_options):
+                  reconstruction_config=None, crop_reader_model=None, ink_column_groups=False, ink_boundary_groups=False, **preview_options):
     """Connect the existing OCR/translation preview to automatic rendering.
 
     Source/translation bindings stay strict; rendering quality follows the chosen
@@ -181,12 +185,15 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
             raise ValueError('nearby translation context and visual alternate review must be separate experiments')
     if type(quality_reread) is not bool:
         raise ValueError('quality reread requires explicit enablement and existing local model assets')
-    if type(ink_column_groups) is not bool or (ink_column_groups and crop_reader_model is None):
-        raise ValueError('ink column grouping requires the explicit local crop reader')
+    if (type(ink_column_groups) is not bool or type(ink_boundary_groups) is not bool
+            or ((ink_column_groups or ink_boundary_groups) and crop_reader_model is None)
+            or (ink_column_groups and ink_boundary_groups)):
+        raise ValueError('choose one ink grouping policy with the explicit local crop reader')
     if crop_reader_model is not None:
         if quality_reread or manga_reread_model is not None or 'ocr_refine' in preview_options or translation_policy!='coverage-first':
             raise ValueError('crop reader requires coverage-first and one explicit refinement callback')
-        preview_options['ocr_refine']=crop_reader_refiner(crop_reader_model,ink_column_groups=ink_column_groups)
+        preview_options['ocr_refine']=crop_reader_refiner(crop_reader_model,ink_column_groups=ink_column_groups,
+            ink_boundary_groups=ink_boundary_groups)
     if quality_reread:
         if manga_reread_model is None or translation_policy != 'coverage-first':
             raise ValueError('quality reread requires explicit local Manga OCR snapshot and coverage-first translation')
@@ -236,6 +243,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         report['crop_reader'] = {'enabled': True, 'source_accuracy_verified': False}
     if ink_column_groups:
         report['ink_column_groups'] = {'enabled': True, 'full_utterance_verified': False}
+    if ink_boundary_groups:
+        report['ink_boundary_groups'] = {'enabled': True, 'full_utterance_verified': False}
     if source_localization:
         report['source_localization'] = {'enabled': True, 'semantic_ownership_verified': False}
     if visibility_policy != 'replacement-only':
@@ -424,6 +433,7 @@ def main(argv=None):
     parser.add_argument('--manga-reread-model', type=Path, help='existing local Manga OCR snapshot; enables isolated low-score dialogue rereading, or paired visual rereads with --quality-reread')
     parser.add_argument('--crop-reader-model', type=Path, help='existing pinned local Hayai snapshot; opt-in three-view source hypotheses before translation')
     parser.add_argument('--ink-column-groups', action='store_true', help='with --crop-reader-model, join unambiguous original-ink column continuations')
+    parser.add_argument('--ink-boundary-groups', action='store_true', help='with --crop-reader-model, use join-boundary alignment for staggered column continuations; alternative to --ink-column-groups')
     args = parser.parse_args(argv)
     if not args.run_local_ocr:
         parser.error("image processing requires explicit --run-local-ocr; no engine was initialized")
@@ -431,7 +441,7 @@ def main(argv=None):
         parser.error("--review-ocr requires --run-local-model; OCR-only performs no image review")
     if args.render and (not args.run_local_model or args.fonts is None):
         parser.error('--render requires --run-local-model and --fonts; no engine was initialized')
-    if not args.render and (args.quality_reread or args.manga_reread_model is not None or args.crop_reader_model is not None or args.ink_column_groups):
+    if not args.render and (args.quality_reread or args.manga_reread_model is not None or args.crop_reader_model is not None or args.ink_column_groups or args.ink_boundary_groups):
         parser.error('quality reread options require --render')
     if not args.render and args.visibility_policy not in (None,'replacement-only'):
         parser.error('--visibility-policy requires --render')
@@ -461,7 +471,7 @@ def main(argv=None):
                 render_policy=args.render_policy or 'best-effort', replacement_policy=args.replacement_policy or 'all',
                 min_ocr_confidence=args.min_ocr_confidence, layout_policy=args.layout_policy or 'source-local', quality_reread=args.quality_reread,
                 reread_model=args.reread_model, manga_reread_model=args.manga_reread_model, crop_reader_model=args.crop_reader_model,
-                ink_column_groups=args.ink_column_groups,
+                ink_column_groups=args.ink_column_groups,ink_boundary_groups=args.ink_boundary_groups,
                 visibility_policy=args.visibility_policy or 'always-show',removal_policy=args.removal_policy or 'aggressive',
                 reconstruction_policy=args.reconstruction_policy,reconstruction_config=args.reconstruction_config, **preview_options)
             coverage = report['coverage'] or {}

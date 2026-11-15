@@ -19,6 +19,8 @@ from ..translation.contracts import automatic_units, canonical, revision, strict
 
 
 POLICY = 'original_ink_column_continuations_v1'
+BOUNDARY_POLICY = 'original_ink_boundary_continuations_v1'
+POLICIES = (POLICY, BOUNDARY_POLICY)
 REASON = 'automatic_vertical_continuation_hypothesis'
 
 
@@ -31,15 +33,16 @@ def snapshot(value):
     return strict_json(canonical(asdict(value) if is_dataclass(value) else value))
 
 
-def plan(batch, image):
+def plan(batch, image, *, policy=POLICY):
     """One disjoint pair per continuation; strings/scores never choose a join."""
+    require(policy in POLICIES, 'unknown ink grouping policy')
     batch = snapshot(batch)
     automatic_units(batch)  # Includes duplicate membership and raw evidence checks.
     require(image.mode == 'RGB' and image_fingerprint(image) == batch['page']['pixels_sha256'],
             'ink grouping original pixels changed')
     require(image.width*image.height <= 4_000_000 and len(batch['detections'])*image.width*image.height <= 512_000_000
             and len(batch['proposals']) <= 256, 'ink grouping geometry budget')
-    require(not any(p['grouping_method'] == POLICY for p in batch['proposals']),
+    require(not any(p['grouping_method'] in POLICIES for p in batch['proposals']),
             'ink grouping already attempted; use its original partition')
     raw = {d['source_id']: d for d in batch['detections']}
     detections = [SimpleNamespace(**d) for d in batch['detections']]
@@ -88,13 +91,17 @@ def plan(batch, image):
             if sum(a != b for a, b in zip(belongs, belongs[1:])) != 1:
                 continue
             scale = float(np.median([c['bounds'][2]-c['bounds'][0] for c in columns]))
-            if max(c['bounds'][1] for c in columns)-min(c['bounds'][1] for c in columns) > .9*scale:
+            if policy == POLICY and max(c['bounds'][1] for c in columns)-min(c['bounds'][1] for c in columns) > .9*scale:
                 continue
             seams = []
             for right, left, a, b in zip(columns, columns[1:], belongs, belongs[1:]):
                 if a == b:
                     continue
                 r, l = right['bounds'], left['bounds']
+                # Internal indentation belongs to the retained parent partition.
+                # The new policy measures alignment only where those parents join.
+                if policy == BOUNDARY_POLICY and abs(r[1]-l[1]) > .9*scale:
+                    break
                 gap = r[0]-l[2]; top = max(r[1], l[1]); bottom = min(r[3], l[3])
                 if not 2 <= gap <= .9*scale or bottom-top < .5*scale:
                     break
@@ -141,7 +148,7 @@ def plan(batch, image):
             identity['companion_policy'] = batch['companion_policy']
         proposal_id = 'proposal-'+hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
         merged = {**first, 'proposal_id': proposal_id, 'main_ids': ids, 'member_ids': ids,
-            'grouping_method': POLICY, 'crop_bounds': option['bounds'], 'crop_conflicts': option['crop_conflicts'],
+            'grouping_method': policy, 'crop_bounds': option['bounds'], 'crop_conflicts': option['crop_conflicts'],
             'crop_safe': not option['crop_conflicts'] and first['crop_safe'] and second['crop_safe'],
             'rejected_merge_evidence': first['rejected_merge_evidence']+second['rejected_merge_evidence'],
             'region_ids': sorted(set(first['region_ids']+second['region_ids']))}
@@ -149,14 +156,14 @@ def plan(batch, image):
             merged[key] = list(dict.fromkeys(first[key]+second[key]+([REASON] if key == 'structural_reasons' else [])))
         proposals[proposals.index(first)] = merged
         proposals.remove(second)
-        records.append({**option, 'proposal_id': proposal_id, 'policy': POLICY,
+        records.append({**option, 'proposal_id': proposal_id, 'policy': policy,
             'erase_permission': False, 'full_utterance_verified': False})
     updated = {**batch, 'proposals': proposals}
     automatic_units(updated)
     return snapshot(updated), snapshot({'records': records, 'ambiguous': ambiguous, 'line_failures': failures})
 
 
-def refine(engine, image, original):
+def refine(engine, image, original, *, policy=POLICY):
     """Keep the previous partition/results and expose only disjoint hypotheses."""
     require(not hasattr(engine, 'ink_column_groups'), 'ink grouping already attempted')
     require(len(engine.automatic_unit_proposals) == 1, 'one ink grouping page required')
@@ -169,7 +176,7 @@ def refine(engine, image, original):
     automatic_units(before, previous_results)
     require(not any(c.get('reviewed') is True for r in previous_results for c in r['candidates']),
             'ink grouping must preserve reviewed source selections')
-    updated, evidence = plan(before, image)
+    updated, evidence = plan(before, image, policy=policy)
     # Keep typed batches for the OCR facade and source-localization handoff.
     typed = {p.proposal_id: p for p in original_batch.proposals}
     merged = {r['proposal_id']: r for r in evidence['records']}
@@ -181,14 +188,14 @@ def refine(engine, image, original):
         first = typed[merged[p['proposal_id']]['previous_proposal_ids'][0]]
         fields = {key: tuple(p[key]) for key in ('main_ids', 'member_ids', 'crop_bounds', 'structural_reasons',
             'word_reasons', 'crop_reasons', 'region_ids', 'rejected_merge_evidence')}
-        proposals.append(replace(first, **fields, proposal_id=p['proposal_id'], grouping_method=POLICY,
+        proposals.append(replace(first, **fields, proposal_id=p['proposal_id'], grouping_method=policy,
             crop_safe=p['crop_safe'], crop_conflicts=crop_conflicts(p['crop_bounds'], p['member_ids'], detections)))
     batch = replace(original_batch, proposals=tuple(proposals))
     require(snapshot(batch) == updated, 'ink grouping typed partition drift')
     from .automatic_recognition import AutomaticRecognitionResult
     by_id = {r.proposal_id: r for r in prior[0]} if prior else {}
     results = tuple(by_id.get(p.proposal_id, AutomaticRecognitionResult(p.proposal_id)) for p in batch.proposals)
-    engine.ink_column_groups = {'policy': POLICY, 'previous_batch': before, 'previous_results': previous_results,
+    engine.ink_column_groups = {'policy': policy, 'previous_batch': before, 'previous_results': previous_results,
         'previous_batch_revision': revision(before), 'previous_results_revision': revision(previous_results),
         'result_batch_revision': revision(updated), 'source_pixels_sha256': image_fingerprint(image), **evidence}
     engine.automatic_unit_proposals = (batch,)
@@ -199,17 +206,17 @@ def validate_saved(ocr, image):
     """Recompute geometry from original pixels before translation or rendering."""
     batch = snapshot(ocr['batches'][0])
     stage = ocr.get('ink_column_groups')
-    marked = any(p['grouping_method'] == POLICY for p in batch['proposals'])
+    marked = any(p['grouping_method'] in POLICIES for p in batch['proposals'])
     require(not marked or stage is not None, 'missing saved ink grouping evidence')
     if stage is None:
         return
     before = stage['previous_batch']
-    require(stage['policy'] == POLICY and stage['previous_batch_revision'] == revision(before)
+    require(stage['policy'] in POLICIES and stage['previous_batch_revision'] == revision(before)
         and stage['previous_results_revision'] == revision(stage['previous_results'])
         and stage['result_batch_revision'] == revision(batch)
         and stage['source_pixels_sha256'] == batch['page']['pixels_sha256'] == image_fingerprint(image),
         'saved ink grouping revision drift')
     automatic_units(before, stage['previous_results'])
-    expected, evidence = plan(before, image)
+    expected, evidence = plan(before, image, policy=stage['policy'])
     require(expected == batch and all(snapshot(stage[key]) == snapshot(value) for key, value in evidence.items()),
             'saved ink grouping geometry/pixels drift')

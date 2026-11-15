@@ -21,11 +21,14 @@ from tralens.translation.contracts import automatic_units, canonical, revision
 
 
 class InkGroupTests(unittest.TestCase):
-    def fixture(self, *, third=False, divider=False, empty=False, path='synthetic.png'):
+    def fixture(self, *, third=False, divider=False, empty=False, stagger=False, boundary_shift=0, path='synthetic.png'):
         image = Image.new('RGB', (320, 240), 'white');draw = ImageDraw.Draw(image)
         draw.rectangle((20, 20, 300, 220), outline='black', width=3)
         boxes = []
         locations = [(180, 50, 150), (150, 50, 150), (120, 50, 102), (120, 104, 150)]
+        if stagger:locations[0]=(180,30,150)
+        if boundary_shift:
+            locations[2:]=[(x,y+boundary_shift,bottom+boundary_shift) for x,y,bottom in locations[2:]]
         if third:locations.append((210, 50, 150))
         for identity, (x, y, bottom) in enumerate(locations):
             boxes.append(Text_Box(identity, .6, [[x-4,y],[x+30,y],[x+30,bottom],[x-4,bottom]], 'あいう'))
@@ -70,12 +73,46 @@ class InkGroupTests(unittest.TestCase):
     def test_blank_ink_separator_unknown_orientation_and_ambiguity_do_not_join(self):
         for options in ({'empty':True}, {'divider':True}, {'third':True}):
             image, _, batch, _ = self.fixture(**options)
-            updated, evidence = g.plan(batch, image)
-            self.assertEqual(updated, g.snapshot(batch), options)
-            self.assertFalse(evidence['records'])
+            for policy in g.POLICIES:
+                updated, evidence = g.plan(batch, image,policy=policy)
+                self.assertEqual(updated, g.snapshot(batch), (options,policy))
+                self.assertFalse(evidence['records'])
         image, _, batch, _ = self.fixture()
         unknown = replace(batch, proposals=(batch.proposals[0], replace(batch.proposals[1], direction='unknown')))
         self.assertEqual(g.plan(unknown, image)[0], g.snapshot(unknown))
+
+    def test_boundary_policy_preserves_internal_stagger_but_requires_aligned_join(self):
+        image,original,batch,_=self.fixture(stagger=True)
+        old,old_evidence=g.plan(batch,image)
+        self.assertEqual(old,g.snapshot(batch));self.assertFalse(old_evidence['records'])
+        self.assertEqual((old,old_evidence),g.plan(batch,image,policy=g.POLICY))
+        updated,evidence=g.plan(batch,image,policy=g.BOUNDARY_POLICY)
+        self.assertEqual(len(updated['proposals']),1)
+        self.assertEqual(updated['proposals'][0]['grouping_method'],g.BOUNDARY_POLICY)
+        self.assertEqual(updated['proposals'][0]['main_ids'],[0,1,2,3])
+        self.assertEqual(evidence['records'][0]['policy'],g.BOUNDARY_POLICY)
+        shifted,_,other,_=self.fixture(stagger=True,boundary_shift=32)
+        self.assertFalse(g.plan(other,shifted,policy=g.BOUNDARY_POLICY)[1]['records'])
+        with self.assertRaisesRegex(ValueError,'policy'):g.plan(batch,image,policy='unsupported')
+
+    def test_boundary_proof_cannot_be_downgraded_or_removed(self):
+        image,original,batch,_=self.fixture(stagger=True)
+        engine=SimpleNamespace(automatic_unit_proposals=(batch,))
+        g.refine(engine,image,original,policy=g.BOUNDARY_POLICY)
+        ocr={'batches':[g.snapshot(engine.automatic_unit_proposals[0])],'ink_column_groups':engine.ink_column_groups}
+        g.validate_saved(json.loads(canonical(ocr)),image)
+        changed=deepcopy(ocr);changed['ink_column_groups']['policy']=g.POLICY
+        with self.assertRaisesRegex(ValueError,'geometry/pixels drift'):g.validate_saved(changed,image)
+        with self.assertRaisesRegex(ValueError,'missing saved'):g.validate_saved({'batches':ocr['batches']},image)
+        with self.assertRaisesRegex(ValueError,'already attempted'):g.plan(ocr['batches'][0],image,policy=g.POLICY)
+
+    def test_conflicting_grouping_options_fail_before_loading_readers(self):
+        import main
+        with patch('tralens.ocr.hayai_adapter.verify_snapshot') as verify:
+            for options in ({'ink_column_groups':True,'ink_boundary_groups':True},{'ink_boundary_groups':'yes'}):
+                with self.subTest(options=options),self.assertRaisesRegex(ValueError,'one explicit ink grouping'):
+                    main.crop_reader_refiner('unused',**options)
+            verify.assert_not_called()
 
     def test_interleaved_membership_and_duplicate_source_are_not_continuations(self):
         image, _, batch, _ = self.fixture()
@@ -91,8 +128,9 @@ class InkGroupTests(unittest.TestCase):
         image, _, batch, _ = self.fixture()
         raw = tuple(replace(d, text='arbitrary', confidence=.99) for d in batch.detections)
         changed = replace(batch, detections=raw, evidence_sha256=detection_evidence_sha256(raw))
-        old = g.plan(batch, image)[1]['records'];new = g.plan(changed, image)[1]['records']
-        self.assertEqual(old, new)
+        for policy in g.POLICIES:
+            old = g.plan(batch, image,policy=policy)[1]['records'];new = g.plan(changed, image,policy=policy)[1]['records']
+            self.assertEqual(old, new)
 
     def test_existing_corner_conflict_survives_json_roundtrip(self):
         from tralens.ocr.automatic_units import detection_evidence_sha256
@@ -131,12 +169,18 @@ class InkGroupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'drift'):g.validate_saved(ocr, changed)
 
     def test_actual_coordinator_translates_group_once_and_renderer_rechecks_saved_seam(self):
+        self.coordinator_handoff()
+
+    def test_boundary_coordinator_translates_group_once_and_renderer_rechecks_saved_seam(self):
+        self.coordinator_handoff(boundary=True)
+
+    def coordinator_handoff(self,*,boundary=False):
         import main
         from tests.test_pipeline import PipelineTests
         from tralens.rendering.automatic import run_automatic
         fixture = PipelineTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
         path = fixture.root/'ink-source.png'
-        image, original, batch, boxes = self.fixture(path=path);path.write_bytes(original)
+        image, original, batch, boxes = self.fixture(path=path,stagger=boundary);path.write_bytes(original)
         engine = SimpleNamespace(automatic_unit_proposals=(batch,), raw_detections=[boxes], image_path=str(path),
             process_images=Mock(), ocr=SimpleNamespace(close=Mock()))
         reader = Mock(return_value='あいうあいうあいうあいう');reader.identity={'synthetic':True}
@@ -145,11 +189,12 @@ class InkGroupTests(unittest.TestCase):
             result = main.run_pipeline(path, fixture.root/'grouped', fonts=fixture.fonts, device='cpu',
                 model_root=fixture.fixture.weights, run_local_ocr=True, run_local_model=True,
                 ocr_factory=Mock(return_value=engine), runtime=SimpleNamespace(generate=fixture.provider),
-                crop_reader_model=fixture.root, ink_column_groups=True, render_policy='best-effort')
+                crop_reader_model=fixture.root, ink_column_groups=not boundary,ink_boundary_groups=boundary, render_policy='best-effort')
         self.assertEqual(result['coverage']['rendered'], 1, result)
         self.assertEqual(fixture.provider.call_count, 1);reader.close.assert_called_once()
         preview = fixture.root/'grouped/preview/preview.json';saved = json.loads(preview.read_bytes())
         self.assertEqual(len(saved['ocr']['ink_column_groups']['previous_batch']['proposals']), 2)
+        self.assertEqual(saved['ocr']['ink_column_groups']['policy'],g.BOUNDARY_POLICY if boundary else g.POLICY)
         self.assertEqual(saved['units'][0]['unit']['order'], [0,1,2,3])
         saved['ocr']['ink_column_groups']['records'][0]['seams'][0]['original_rgb_sha256'] = '0'*64
         bad = fixture.root/'bad.json';bad.write_text(json.dumps(saved))
@@ -157,15 +202,21 @@ class InkGroupTests(unittest.TestCase):
             run_automatic(preview=bad, image=path, fonts=fixture.fonts, output=fixture.root/'bad-render')
 
     def test_missing_grouping_proof_stops_before_translation_dispatch(self):
+        self.missing_grouping_proof()
+
+    def test_missing_boundary_grouping_proof_stops_before_translation_dispatch(self):
+        self.missing_grouping_proof(boundary=True)
+
+    def missing_grouping_proof(self,*,boundary=False):
         import main
         from tests.test_pipeline import PipelineTests
         fixture=PipelineTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
         path=fixture.root/'missing-proof.png'
-        image,original,batch,boxes=self.fixture(path=path);path.write_bytes(original)
+        image,original,batch,boxes=self.fixture(path=path,stagger=boundary);path.write_bytes(original)
         engine=SimpleNamespace(automatic_unit_proposals=(batch,),raw_detections=[boxes],image_path=str(path),
             process_images=Mock(),ocr=SimpleNamespace(close=Mock()))
         def incomplete_refiner(engine,*,output):
-            g.refine(engine,image,original)
+            g.refine(engine,image,original,policy=g.BOUNDARY_POLICY if boundary else g.POLICY)
             del engine.ink_column_groups
         report=main.run_pipeline(path,fixture.root/'missing-proof',fonts=fixture.fonts,device='cpu',
             model_root=fixture.fixture.weights,run_local_ocr=True,run_local_model=True,
