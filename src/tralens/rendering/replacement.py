@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw
 from . import natural as n, preparation as p, aggressive, typography, source_support, reconstruction as rec
 
 
-POLICY = 'remove_then_source_centered_patch_v5_inference_context'
+POLICY = 'remove_then_source_centered_patch_v6_exact_edit_protection'
 MAX_REGIONS = 128
 MAX_WORK = 32_000_000
 MAX_LAYOUT_WORK = 256_000_000
@@ -114,12 +114,15 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
         rec.require(type(probability) is np.ndarray and probability.dtype==np.uint8
             and probability.shape==original.shape[:2],'native page text probability shape/type mismatch')
     erase=erase.copy();layout=layout.copy()
-    protected=p.dilate(erase | (np.asarray(text.getchannel('A'))!=0),2)
+    # Spacing around accepted output is a placement constraint, not an immutable
+    # strip of original pixels that can retain the next source's glyph edges.
+    protected=erase | (np.asarray(text.getchannel('A'))!=0)
+    clearance=p.dilate(protected,2)
     initial=protected.copy();before_text=np.asarray(text).copy();before_plate=plate.copy()
     geometry=aggressive.Geometry(raw,rgb.size)
     members={aggressive_key(m) for row in rows if row['status']=='automatic_composed'
         for m in row.get('binding',{}).get('member_ids',[])}
-    summary={'policy':POLICY,'attempted':0,'removed':0,'placed':0,'unresolved':0,'work_pixels':0,
+    summary={'policy':POLICY,'protection_policy':aggressive.PROTECTION_POLICY,'attempted':0,'removed':0,'placed':0,'unresolved':0,'work_pixels':0,
         'layout_work_pixels':0}
     artifacts={};budget=budget or rec.Budget();backend_error=None
     summary.update(learned_calls=0,learned_failures=0,learned_seconds=0.,selected_learned=0,
@@ -199,7 +202,7 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
             artifacts[prefix+'-cleanplate.png']=Image.fromarray(candidate)
             # Blocking deliberately excludes this row's freshly cleaned pixels.
             # Earlier cleanup and English remain immutable.
-            all_bounds,_,blocked=geometry.local(row['binding']['member_ids'],protected,margin=192,maximum_side=2048,source_priority=True)
+            all_bounds,_,blocked=geometry.local(row['binding']['member_ids'],clearance,margin=192,maximum_side=2048,source_priority=True)
             ax,ay,ar,ab=all_bounds
             n.budget_check(summary['layout_work_pixels']+blocked.size*7<=MAX_LAYOUT_WORK,'final layout work budget')
             summary['layout_work_pixels']+=blocked.size*7
@@ -226,7 +229,8 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
             else:entry['status']='blocked'
             summary['unresolved']+=1
         # Include both removal and backing even if placement was unavailable.
-        protected=p.dilate(erase | (np.asarray(text.getchannel('A'))!=0),2)
+        protected=erase | (np.asarray(text.getchannel('A'))!=0)
+        clearance=p.dilate(protected,2)
     clean=Image.fromarray(plate)
     composite=Image.alpha_composite(clean.convert('RGBA'),text).convert('RGB')
     n.require(np.array_equal(plate[initial],before_plate[initial]) and

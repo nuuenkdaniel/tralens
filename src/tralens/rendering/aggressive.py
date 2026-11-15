@@ -14,7 +14,8 @@ from . import natural as n, preparation as p, typography
 from . import reconstruction as rec, source_support
 
 
-POLICY='crop_local_aggressive_v8_compact_supported_layout'
+POLICY='crop_local_aggressive_v9_exact_edit_protection'
+PROTECTION_POLICY='exact_commits_with_separate_layout_clearance_v1'
 MAX_REGIONS=64
 MAX_LOCAL_WORK=16_777_216
 HARD_REASONS={'runtime_locality','alpha_containment','erasure_obstacle','typography_containment',
@@ -166,9 +167,11 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             and probability.shape==original.shape[:2],'native page text probability shape/type mismatch')
     erase=erase.copy();layout=layout.copy();rows=deepcopy(rows)
     alpha=np.asarray(text.getchannel('A'))!=0
-    reserved=p.dilate(erase|alpha,2)
+    # An unedited clearance pixel can still contain the next source's lettering.
+    # Cleanup protects exact commits; English placement keeps its wider spacing.
+    reserved=erase|alpha;clearance=p.dilate(reserved,2)
     initial_reserved=reserved.copy();native_plate=plate.copy();native_text=np.asarray(text).copy()
-    summary={'policy':POLICY,'attempted':0,'learned_calls':0,'learned_failures':0,'retries':0,'local_work_pixels':0,
+    summary={'policy':POLICY,'protection_policy':PROTECTION_POLICY,'attempted':0,'learned_calls':0,'learned_failures':0,'retries':0,'local_work_pixels':0,
         'budget_exclusions':0,'selected_learned':0,'selected_classical':0,'selected_fill':0,
         'model_config':getattr(backend,'config',None),'limits':{'regions':MAX_REGIONS,'learned_calls':budget.maximum_calls,
         'learned_seconds':budget.maximum_seconds,'local_work_pixels':MAX_LOCAL_WORK},'artwork_recovered':False}
@@ -186,12 +189,13 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
         try:
             bounds,own,protected=geometry.local(row['binding']['member_ids'],reserved,source_priority=True)
             x,y,r,b=bounds;crop=original[y:b,x:r].copy()
+            placement_protected=protected|clearance[y:b,x:r]
             rec.require(crop.size and own.any(),'empty recovery source')
             predicted,ladder,evidence=masks(crop,own,protected,
                 probability=probability[y:b,x:r] if probability is not None else None)
             # Presentation space is independent of the larger inference context.
             # A failed layout still reaches the final removal-only transaction.
-            allowed=p.dilate(own,24)&~protected
+            allowed=p.dilate(own,24)&~placement_protected
             layer=proof=content=None;retry=False
             try:
                 n.validate_text(row['binding']['text'],coverage)
@@ -217,7 +221,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                     sx,sy,sw,sh=cv2.boundingRect(own.astype(np.uint8))
                     dark=np.median(crop[own])<80
                     tile,xy,alternative=patch_layout(row['binding']['text'],font_data,coverage,
-                        (sx,sy,sx+sw,sy+sh),protected,{**style,'fill':[255 if dark else 0]*3,
+                        (sx,sy,sx+sw,sy+sh),placement_protected,{**style,'fill':[255 if dark else 0]*3,
                             'outline_fill':[0 if dark else 255]*3},outline=1)
                     trial=Image.new('RGBA',(crop.shape[1],crop.shape[0]));trial.alpha_composite(tile,dest=xy)
                     if layer is not None:
@@ -312,7 +316,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
         # neither old English nor earlier cleanup can be overwritten by a later job.
         if membership & members:
             entry.update(status='collision_retained_primary',reason='membership_already_displayed');continue
-        if layer is None or ((mask|local_alpha)&reserved[y:b,x:r]).any():
+        if layer is None or (mask&reserved[y:b,x:r]).any() or (local_alpha&clearance[y:b,x:r]).any():
             # Retain candidate evidence. Automatic reuse in final cleanup was
             # rejected after visual trials showed copied/hallucinated lettering.
             entry.update(status='cleanup_candidate_only',reason=entry.get('placement_failure','earlier_output_reserved'),
@@ -321,7 +325,8 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
         plate[y:b,x:r][mask]=candidate[mask];erase[y:b,x:r]|=mask;layout[y:b,x:r]|=local_alpha
         new_text.alpha_composite(layer,dest=(x,y));alpha[y:b,x:r]|=local_alpha
         occupied=mask|local_alpha
-        reserved[y:b,x:r]|=p.dilate(occupied,2)
+        reserved[y:b,x:r]|=occupied
+        clearance[y:b,x:r]|=p.dilate(occupied,2)
         members.update(membership)
         entry.update(status='composed_unverified',selected_attempt=chosen,method=method,assessment=signals,
             source_removal_verified=False,artwork_loss_possible=True)
