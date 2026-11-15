@@ -214,3 +214,41 @@ from the accepted primary/recovery layers and ordered final commits, checked
 against saved protection wherever present, and required to reproduce the complete
 final erase/alpha masks. The corrected audits retain the original integrity
 checks and require every changed pixel to appear in a review card.
+
+### Native inference-only context replay
+
+`native-ctd-render-02/` adds the same native probability fields to reconstruction's
+inference-only mask, retaining the preceding additive support derivation. The
+support/inference replay and 1,811-artifact render audit pass. All 82 saved
+inference requests keep byte-identical commit masks; 25 gain inference-only
+pixels. Twenty-six native-context calls add 60,751 pixels in total (one adds zero).
+Final erase, alpha, text and fallback masks, target wording, layout and placement
+routes are identical to replay 01 on all six pages. Changes are reconstruction
+pixels, not extra erasure permission or different lettering.
+
+All 39 changed-context cards and ten changed full-page cleanplates/composites were
+inspected; `native-ctd-render-02-review/inspection.json` binds those observations,
+13 compact sheets and the mask comparisons. Relative to replay 01:
+
+| Page | Changed clean pixels | Changed composite pixels |
+| --- | ---: | ---: |
+| `ubunchu01_07` | 3,436 | 3,436 |
+| `ubunchu08_0011` | 40,032 | 38,494 |
+| `saved-example` | 39,110 | 35,018 |
+| `ubunchu07_0002` | 0 | 0 |
+| `ubunchu08_0007` | 72,278 | 66,646 |
+| `ubunchu03_0006` | 5,548 | 4,446 |
+
+The APT loop/letter-like marks are greatly reduced, and the copy/paste caption
+loses most of its thin reconstructed curves. Small dark islands and rough tonal
+boundaries remain. The top dark block persists while more balloon arc disappears;
+book interior detail is lost; a new thin vertical reconstruction appears near the
+repeated sound; longer horizontal marks appear behind Update and Codec. Unowned
+UI lines, the white exclamation mark and repeated sounds remain unresolved.
+
+This is useful evidence that reconstruction context matters independently of
+commit support, but neither saved-case replay is a general production policy.
+Native evidence must next be tested across all applicable source-support calls,
+with inspected controls for collateral loss and reconstructed lettering. The
+unchanged 133 displayed replacements still do not establish accurate wording or
+complete source removal.
