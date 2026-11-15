@@ -14,7 +14,7 @@ from . import natural as n, preparation as p, typography
 from . import reconstruction as rec, source_support
 
 
-POLICY='crop_local_aggressive_v6_source_supported_layout'
+POLICY='crop_local_aggressive_v8_compact_supported_layout'
 MAX_REGIONS=64
 MAX_LOCAL_WORK=16_777_216
 HARD_REASONS={'runtime_locality','alpha_containment','erasure_obstacle','typography_containment',
@@ -146,6 +146,13 @@ def cheap(crop,mask,protected):
     return candidate,'classical_telea_unverified'
 
 
+def tall_layout(layer,proof):
+    """Only retry automatic wrapping, never an explicitly supplied line layout."""
+    if '\n' in proof['original_text'] or len(proof['draw_text'].splitlines())<4:return False
+    x,y,r,b=layer.getchannel('A').getbbox()
+    return b-y>1.35*(r-x)
+
+
 def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style,*,backend=None,budget=None,probability=None):
     """Independent bounded pass; native successes are retained, then visibility runs.
 
@@ -185,7 +192,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             # Presentation space is independent of the larger inference context.
             # A failed layout still reaches the final removal-only transaction.
             allowed=p.dilate(own,24)&~protected
-            layer=proof=content=None
+            layer=proof=content=None;retry=False
             try:
                 n.validate_text(row['binding']['text'],coverage)
                 dark=np.median(crop[own])<80
@@ -194,9 +201,11 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                         'outline':1,'outline_fill':[0 if dark else 255]*3})
                 rec.require(proof['original_text']==row['binding']['text'] and proof['size']>=style['min_size'],
                     'reconstruction layout dropped wording or reduced requested floor')
+                retry=tall_layout(layer,proof)
             except rec.BindingError:raise
             except ValueError as error:
-                entry['placement_failure']=str(error)
+                entry['placement_failure']=str(error);retry=True
+            if retry:
                 try:
                     # A narrow Japanese column can require a wider English block.
                     # Find that readable local placement before deciding whether
@@ -207,12 +216,24 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                     n.validate_text(row['binding']['text'],coverage)
                     sx,sy,sw,sh=cv2.boundingRect(own.astype(np.uint8))
                     dark=np.median(crop[own])<80
-                    tile,xy,proof=patch_layout(row['binding']['text'],font_data,coverage,
+                    tile,xy,alternative=patch_layout(row['binding']['text'],font_data,coverage,
                         (sx,sy,sx+sw,sy+sh),protected,{**style,'fill':[255 if dark else 0]*3,
                             'outline_fill':[0 if dark else 255]*3},outline=1)
-                    layer=Image.new('RGBA',(crop.shape[1],crop.shape[0]))
-                    layer.alpha_composite(tile,dest=xy)
-                    entry['placement_retry']='source_centered_local_rectangle'
+                    trial=Image.new('RGBA',(crop.shape[1],crop.shape[0]));trial.alpha_composite(tile,dest=xy)
+                    if layer is not None:
+                        before=layer.getchannel('A').getbbox();after=trial.getchannel('A').getbbox()
+                        cx,cy=sx+sw/2,sy+sh/2
+                        distance=lambda box:np.hypot((box[0]+box[2])/2-cx,(box[1]+box[3])/2-cy)
+                        n.require(after[3]-after[1]<before[3]-before[1] and alternative['size']>=proof['size']
+                            and len(alternative['draw_text'].splitlines())<len(proof['draw_text'].splitlines())
+                            and distance(after)<=max(distance(before),style['max_size']),
+                            'compact retry did not improve wrapping at the source')
+                        entry['prior_placement']=proof
+                    rec.require(alternative['original_text']==row['binding']['text'] and alternative['size']>=style['min_size'],
+                        'reconstruction retry dropped wording or reduced requested floor')
+                    entry['placement_retry']='compact_source_centered_rectangle' if layer is not None else 'source_centered_local_rectangle'
+                    layer=trial;proof=alternative;content=None
+                except rec.BindingError:raise
                 except ValueError as failure:
                     entry['placement_retry_failure']=str(failure)
             entry.update(bounds=bounds,layout=proof,mask_evidence=evidence)
@@ -220,7 +241,8 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             artifacts[f'recovery-{i:03d}-lettering-evidence.png']=Image.fromarray(predicted.astype(np.uint8)*255)
             if content is not None:artifacts[f'recovery-{i:03d}-layout.png']=content
             jobs.append({'i':i,'bounds':bounds,'crop':crop,'protected':protected,'predicted':predicted,
-                'ladder':ladder,'layer':layer,'proof':proof,'best':None,'retry':False})
+                'ladder':ladder,'layer':layer,'proof':proof,'best':None,'retry':False,
+                'probability':probability[y:b,x:r] if evidence.get('policy')==source_support.POLICY else None})
         except rec.BindingError:raise
         except (ValueError,OSError,cv2.error) as error:entry.update(reason=str(error),status='layout_or_crop_unavailable')
     for round_index in range(2):
@@ -234,15 +256,19 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             else:summary['attempted']+=1
             name,mask=job['ladder'][round_index]
             if not mask.any():entry['reason']='protected_source_overlap';continue
-            req=rec.request(source,row['binding'],job['bounds'],crop,mask,mask,protected,attempt=round_index,
+            inference=mask;context=None
+            if job['probability'] is not None:
+                inference,context=source_support.inference_context(mask,job['probability'])
+            req=rec.request(source,row['binding'],job['bounds'],crop,inference,mask,protected,attempt=round_index,
                 model=rec.model_identity(backend.config) if backend else None)
             prefix=f'recovery-{i:03d}-{round_index}'
             artifacts[prefix+'-request.json']=rec.canonical(req).encode()
-            artifacts[prefix+'-inference-mask.png']=Image.fromarray(mask.astype(np.uint8)*255)
+            artifacts[prefix+'-inference-mask.png']=Image.fromarray(inference.astype(np.uint8)*255)
             artifacts[prefix+'-commit-mask.png']=Image.fromarray(mask.astype(np.uint8)*255)
             artifacts[prefix+'-protected-mask.png']=Image.fromarray(protected.astype(np.uint8)*255)
             candidate,method=cheap(crop,mask,protected)
             attempt={'mask':name,'request_revision':req['revision'],'method':method,'status':'candidate'}
+            if context is not None:attempt['inference_context']=context
             cheap_signals=assess(crop,candidate,mask,job['predicted'],protected)
             defer_learned=round_index==0 and cheap_signals['outer_residual_pixels']>0
             if method not in ('measured_uniform_fill','dominant_surface_fill') and backend is not None:
@@ -253,9 +279,9 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                 else:
                     budget.calls+=1;clock=time.monotonic()
                     try:
-                        result=backend.reconstruct(req,crop,mask,mask,protected,
+                        result=backend.reconstruct(req,crop,inference,mask,protected,
                             timeout=min(30,max(.1,budget.maximum_seconds-budget.seconds)))
-                        candidate=rec.compose(req,crop,mask,mask,protected,result)
+                        candidate=rec.compose(req,crop,inference,mask,protected,result)
                         artifacts[prefix+'-backend.png']=Image.fromarray(result['pixels'])
                         method='learned_lama';attempt['method']=method
                         attempt['backend_result']={k:v for k,v in result.items() if k!='pixels'}
@@ -265,7 +291,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                         attempt['learned_failure']=backend_error;summary['learned_failures']+=1
                     finally:budget.seconds+=time.monotonic()-clock
             # Even classical/native output is explicitly composited through commit.
-            candidate=rec.compose(req,crop,mask,mask,protected,{'request_revision':req['revision'],'pixels':candidate})
+            candidate=rec.compose(req,crop,inference,mask,protected,{'request_revision':req['revision'],'pixels':candidate})
             signals=assess(crop,candidate,mask,job['predicted'],protected)
             attempt['assessment']=signals;entry['attempts'].append(attempt)
             artifacts[prefix+'-cleanplate.png']=Image.fromarray(candidate)

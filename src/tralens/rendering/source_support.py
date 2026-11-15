@@ -10,7 +10,8 @@ import numpy as np
 from . import natural as n, preparation as p
 
 
-POLICY='source_bound_semantic_strokes_v1'
+POLICY='source_bound_semantic_strokes_v2_native_lines'
+CONTEXT_POLICY='inference_only_neighbor_lettering_v1'
 
 
 def derive(crop,own,protected,probability):
@@ -18,7 +19,8 @@ def derive(crop,own,protected,probability):
         'source support needs native uint8 probability')
     n.require(crop.shape==(*own.shape,3) and crop.dtype==np.uint8,
         'source support needs native RGB pixels')
-    limit=p.dilate(own,12)&~protected
+    physical=p.dilate(own,12)
+    limit=physical&~protected
     seed=(probability>=77)&own&~protected
     n.require(int(seed.sum())>=16,'insufficient source-bound learned support')
     # Hysteresis retains weak glyph edges connected to stronger evidence without
@@ -36,24 +38,54 @@ def derive(crop,own,protected,probability):
     ink=gray<210 if light else gray>60
     count,labels,stats,_=cv2.connectedComponentsWithStats(ink.astype(np.uint8),8)
     n.budget_check(count<=16384,'source support native component budget')
-    chosen=0
-    for label in np.unique(labels[nearby&ink]):
+    contours,_=cv2.findContours(own.astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    # Measure slanted source columns in their own orientation. This changes only
+    # a geometry measurement; masks and model inputs keep native page pixels.
+    thickness=min(cv2.minAreaRect(np.concatenate(contours))[1])+1
+    narrow=thickness<=96
+    line_limit=max(12,thickness*2)
+    chosen=0;completed=0
+    for label in np.unique(labels[(nearby | (own if narrow else False))&ink]):
         if label==0:continue
         x,y,w,h,area=map(int,stats[label])
         if max(w,h)>256 or area>32768:continue
         component=labels[y:y+h,x:x+w]==label
-        if (component&~limit[y:y+h,x:x+w]).any():continue
-        if np.count_nonzero(component&nearby[y:y+h,x:x+w])<area*.35:continue
+        # Test physical containment before subtracting accepted output. An old
+        # edit touching one end of a glyph must not veto removal of its other end.
+        if (component&~physical[y:y+h,x:x+w]).any():continue
+        associated=np.count_nonzero(component&nearby[y:y+h,x:x+w])>=area*.35
+        # A narrow source line can contain entire trailing characters missed by
+        # CTD. Require native bounded components mostly owned by that line; do
+        # not generalize this completion to oversized detector rectangles.
+        in_line=(narrow and max(w,h)<=line_limit and
+            np.count_nonzero(component&own[y:y+h,x:x+w])>=area*.8)
+        if not associated and not in_line:continue
         # Whole native outlines, including their interiors, remove hollow glyphs
         # without erasing the empty rectangular space between adjacent characters.
         contours,_=cv2.findContours(component.astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
         filled=np.zeros_like(component,dtype=np.uint8)
         cv2.drawContours(filled,contours,-1,1,cv2.FILLED)
         support[y:y+h,x:x+w]|=filled!=0;chosen+=1
+        completed+=not associated
     support=p.dilate(support,1)&limit
     evidence={'policy':POLICY,'semantic_seed_pixels':int(seed.sum()),
         'semantic_support_pixels':int(semantic.sum()),'native_components':chosen,
+        'line_completed_components':completed,'narrow_source_line':narrow,'source_line_thickness':float(thickness),
         'source_polygon_pixels':int(own.sum()),'support_pixels':int(support.sum()),
         'source_extent_discarded':False,'source_removal_verified':False,
         'possible_collateral_art_loss':True,'polarity':'dark_ink' if light else 'light_ink'}
     return support,evidence
+
+
+def inference_context(commit,probability):
+    """Hide nearby lettering from reconstruction without authorizing its erasure.
+
+    Protected pixels may be hidden from the model. Composition still uses only
+    the independently bound commit mask, so their output pixels remain exact.
+    Inputs are already cropped in native coordinates; no resize or layout input.
+    """
+    n.require(commit.ndim==2 and commit.dtype==bool and probability.shape==commit.shape
+        and probability.dtype==np.uint8,'inference context needs native masks')
+    inference=commit | p.dilate(probability>=32,4)
+    return inference,{'policy':CONTEXT_POLICY,'inference_only_pixels':int((inference&~commit).sum()),
+        'commit_support_expanded':False,'source_removal_verified':False}

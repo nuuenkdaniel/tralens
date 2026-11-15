@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw
 from . import natural as n, preparation as p, aggressive, typography, source_support, reconstruction as rec
 
 
-POLICY = 'remove_then_source_centered_patch_v4_semantic_cleanup'
+POLICY = 'remove_then_source_centered_patch_v5_inference_context'
 MAX_REGIONS = 128
 MAX_WORK = 32_000_000
 MAX_LAYOUT_WORK = 256_000_000
@@ -155,16 +155,17 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
                     and max(crop.shape[:2])<=512 and budget.available()):
                 # Fresh inference on the CURRENT support, after earlier edits have
                 # been protected. Do not recycle rejected broad-mask candidates.
-                request=rec.request(source,row['binding'],bounds,crop,mask,mask,obstacle,
+                inference,entry['inference_context']=source_support.inference_context(mask,probability[y:b,x:r])
+                request=rec.request(source,row['binding'],bounds,crop,inference,mask,obstacle,
                     attempt=0,model=rec.model_identity(backend.config))
                 artifacts[prefix+'-request.json']=rec.canonical(request).encode()
-                artifacts[prefix+'-inference-mask.png']=Image.fromarray(mask.astype(np.uint8)*255)
+                artifacts[prefix+'-inference-mask.png']=Image.fromarray(inference.astype(np.uint8)*255)
                 artifacts[prefix+'-protected-mask.png']=Image.fromarray(obstacle.astype(np.uint8)*255)
                 budget.calls+=1;summary['learned_calls']+=1;clock=time.monotonic()
                 try:
-                    result=backend.reconstruct(request,crop,mask,mask,obstacle,
+                    result=backend.reconstruct(request,crop,inference,mask,obstacle,
                         timeout=min(30,max(.1,budget.maximum_seconds-budget.seconds)))
-                    candidate=rec.compose(request,crop,mask,mask,obstacle,result)
+                    candidate=rec.compose(request,crop,inference,mask,obstacle,result)
                     artifacts[prefix+'-backend.png']=Image.fromarray(result['pixels'])
                     entry['backend_result']={k:v for k,v in result.items() if k!='pixels'}
                     entry['request_revision']=request['revision']

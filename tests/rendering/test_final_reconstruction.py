@@ -68,6 +68,53 @@ class FinalReconstruction(unittest.TestCase):
         self.assertEqual(result[-1]['removed'],1)
         self.assertEqual(result[-1]['learned_calls'],0)
 
+    def test_neighbor_text_is_hidden_at_native_origin_but_never_committed(self):
+        self.raw.append({'source_id':2,'polygon':[[122,65],[138,65],[138,114],[122,114]]})
+        self.probability[70:110,126:134]=220
+        ImageDraw.Draw(self.image).rectangle((126,70,133,109),fill='black')
+        calls=[]
+        def reconstruct(request,crop,inference,commit,protected,**kwargs):
+            rec.validate(request,crop,inference,commit,protected)
+            x,y,r,b=request['bounds'];self.assertGreater(min(x,y),0)
+            neighbor=(slice(70-y,110-y),slice(126-x,134-x))
+            self.assertTrue(inference[neighbor].all())
+            self.assertTrue(protected[neighbor].all())
+            self.assertFalse(commit[neighbor].any())
+            self.assertTrue(np.array_equal(crop,np.asarray(self.image)[y:b,x:r]))
+            calls.append(inference.copy())
+            return {'request_revision':request['revision'],'pixels':np.full_like(crop,150)}
+        backend=SimpleNamespace(config={},reconstruct=Mock(side_effect=reconstruct))
+        _,clean,_,_,erase,_,artifacts,_=self.finish(backend)
+        self.assertEqual(len(calls),1)
+        self.assertTrue(np.array_equal(np.asarray(clean)[~erase],np.asarray(self.image)[~erase]))
+        self.assertTrue(np.array_equal(np.asarray(clean)[70:110,126:134],np.asarray(self.image)[70:110,126:134]))
+        self.assertTrue(np.array_equal(np.asarray(artifacts['recovery-final-000-inference-mask.png'])!=0,calls[0]))
+
+    def test_recovery_pass_keeps_inference_only_predictions_out_of_output(self):
+        self.rows[0]['binding']['text']='Hi.'
+        self.raw.append({'source_id':2,'polygon':[[142,65],[155,65],[155,114],[142,114]]})
+        self.probability[70:110,145:151]=220
+        ImageDraw.Draw(self.image).rectangle((145,70,150,109),fill='black')
+        blank=np.zeros((180,240),bool);calls=[]
+        def reconstruct(request,crop,inference,commit,protected,**kwargs):
+            rec.validate(request,crop,inference,commit,protected)
+            x,y,r,b=request['bounds']
+            neighbor=(slice(70-y,110-y),slice(145-x,151-x))
+            self.assertTrue(inference[neighbor].all())
+            self.assertFalse(commit[neighbor].any())
+            self.assertTrue(np.array_equal(crop,np.asarray(self.image)[y:b,x:r]))
+            calls.append(inference.copy())
+            return {'request_revision':request['revision'],'pixels':np.full_like(crop,150)}
+        backend=SimpleNamespace(config={},reconstruct=Mock(side_effect=reconstruct))
+        with patch.object(aggressive,'cheap',side_effect=lambda crop,*_:(crop.copy(),'classical_telea_unverified')):
+            rows,clean,_,_,erase,_,artifacts,summary=aggressive.recover(self.image,self.source,self.raw,
+                self.rows,self.image.copy(),Image.new('RGBA',self.image.size),blank,blank,self.font,
+                self.coverage,self.style,probability=self.probability,backend=backend)
+        self.assertEqual(len(calls),1);self.assertEqual(summary['selected_learned'],1)
+        self.assertEqual(rows[0]['status'],'automatic_composed')
+        self.assertTrue(np.array_equal(np.asarray(clean)[~erase],np.asarray(self.image)[~erase]))
+        self.assertTrue(np.array_equal(np.asarray(artifacts['recovery-000-0-inference-mask.png'])!=0,calls[0]))
+
     def test_foreign_result_is_a_hard_error(self):
         backend=SimpleNamespace(config={},reconstruct=Mock(return_value={'request_revision':'foreign','pixels':None}))
         with self.assertRaises(rec.BindingError):self.finish(backend)
