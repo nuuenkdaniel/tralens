@@ -12,10 +12,10 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
-from . import natural as n, preparation as p, aggressive, typography, source_support, reconstruction as rec
+from . import natural as n, preparation as p, aggressive, typography, source_support, source_extents, reconstruction as rec
 
 
-POLICY = 'remove_then_source_centered_patch_v6_exact_edit_protection'
+POLICY = 'remove_then_source_centered_patch_v7_corroborated_extents'
 MAX_REGIONS = 128
 MAX_WORK = 32_000_000
 MAX_LAYOUT_WORK = 256_000_000
@@ -106,7 +106,7 @@ def patch_layout(text, font_data, coverage, bounds, blocked, style, *, outline=0
 
 
 def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, style, *, probability=None,
-           source=None, backend=None, budget=None):
+           source=None, backend=None, budget=None, extents=None):
     """Remove pending translated sources even when every placement attempt fails."""
     started=time.monotonic();rows=deepcopy(rows)
     original=np.asarray(rgb);plate=np.asarray(clean).copy();text=text.copy()
@@ -124,7 +124,7 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
         for m in row.get('binding',{}).get('member_ids',[])}
     summary={'policy':POLICY,'protection_policy':aggressive.PROTECTION_POLICY,'attempted':0,'removed':0,'placed':0,'unresolved':0,'work_pixels':0,
         'layout_work_pixels':0}
-    artifacts={};budget=budget or rec.Budget();backend_error=None
+    artifacts={};budget=budget or rec.Budget();backend_error=None;extents=extents or {}
     summary.update(learned_calls=0,learned_failures=0,learned_seconds=0.,selected_learned=0,
         limits={'learned_calls':budget.maximum_calls,'learned_seconds':budget.maximum_seconds})
     for i,row in enumerate(rows):
@@ -140,7 +140,10 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
         summary['attempted']+=1
         try:
             # Font validation precedes placement, but cannot veto cleanup.
-            bounds,own,obstacle=geometry.local(row['binding']['member_ids'],protected,margin=32,maximum_side=2048,source_priority=True)
+            refinement=extents.get(row['unit_id'])
+            bounds,own,obstacle=geometry.local(row['binding']['member_ids'],protected,margin=32,
+                maximum_side=512 if refinement else 2048,source_priority=True,
+                cleanup_polygon=refinement['polygon'] if refinement else None)
             x,y,r,b=bounds;crop=original[y:b,x:r]
             n.budget_check(summary['work_pixels']+own.size<=MAX_WORK,'removal fallback work budget')
             summary['work_pixels']+=own.size
@@ -151,14 +154,19 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
                     mask,entry['support_evidence']=source_support.derive(crop,own,obstacle,probability[y:b,x:r])
                 except ValueError as error:
                     entry['support_failure']=str(error)
+            if refinement:
+                mask=source_extents.apply(mask,refinement,bounds,obstacle)
+                entry['cleanup_extent']=refinement
             n.require(mask.any(),'source fully overlaps protected output')
             candidate,method=aggressive.cheap(crop,mask,obstacle)
-            if (method=='classical_telea_unverified' and 'support_evidence' in entry
+            if (method=='classical_telea_unverified' and ('support_evidence' in entry or refinement is not None)
                     and source is not None and backend is not None and backend_error is None
                     and max(crop.shape[:2])<=512 and budget.available()):
                 # Fresh inference on the CURRENT support, after earlier edits have
                 # been protected. Do not recycle rejected broad-mask candidates.
-                inference,entry['inference_context']=source_support.inference_context(mask,probability[y:b,x:r])
+                inference=mask
+                if probability is not None:
+                    inference,entry['inference_context']=source_support.inference_context(mask,probability[y:b,x:r])
                 request=rec.request(source,row['binding'],bounds,crop,inference,mask,obstacle,
                     attempt=0,model=rec.model_identity(backend.config))
                 artifacts[prefix+'-request.json']=rec.canonical(request).encode()

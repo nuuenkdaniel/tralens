@@ -6,10 +6,11 @@ existing localization prerequisites and retry order/limits remain authoritative.
 import time
 
 from . import natural as n, localized_strokes as strokes
-from ..ocr.source_localization import crop_bounds, geometry_revision, MAX_CROP_PIXELS
+from ..ocr.source_localization import (crop_bounds, extent_crop_bounds, geometry_revision,
+    MAX_CROP_PIXELS, MAX_EXTENT_CROP_PIXELS, REQUEST_POLICY, LEGACY_REQUEST_POLICY)
 
 
-POLICY = 'unresolved_cleanup_crop_demand_v1'
+POLICY = REQUEST_POLICY
 MAX_PREREQUISITE_WORK = 1_024_000_000
 
 
@@ -18,8 +19,9 @@ def preview_revision(preview):
                                         if k != 'source_localization'}})
 
 
-def plan(preview, rgb, raw, units, report):
+def plan(preview, rgb, raw, units, report, *, policy=POLICY):
     started = time.monotonic()
+    n.require(policy in (POLICY,LEGACY_REQUEST_POLICY),'unknown localization request policy')
     proposals = {p['proposal_id']: p for p in preview['ocr']['batches'][0]['proposals']}
     sources = {(type(d['source_id']), d['source_id']): d for d in raw}
     pairs = list(zip(units, report['units']))
@@ -48,9 +50,11 @@ def plan(preview, rgb, raw, units, report):
             item['reason'] = 'source_not_eligible_for_localization'
             continue
         bounds = crop_bounds(raw, unit.member_ids, rgb.size)
-        area = (bounds[2]-bounds[0])*(bounds[3]-bounds[1])
-        if area > MAX_CROP_PIXELS or max(bounds[2]-bounds[0], bounds[3]-bounds[1]) > 1024:
-            item['reason'] = 'localization_crop_budget'
+        if policy==LEGACY_REQUEST_POLICY and (
+                (bounds[2]-bounds[0])*(bounds[3]-bounds[1])>MAX_CROP_PIXELS or
+                max(bounds[2]-bounds[0],bounds[3]-bounds[1])>1024):
+            # Historical plans excluded large crops before charging prerequisites.
+            item['reason']='localization_crop_budget'
             continue
         extra_check = pixels*(len(unit.member_ids)+8)
         if check_work+extra_check > MAX_PREREQUISITE_WORK:
@@ -61,6 +65,16 @@ def plan(preview, rgb, raw, units, report):
             strokes.prerequisites(rgb, raw, list(unit.member_ids))
         except (ValueError, KeyError, TypeError) as error:
             item.update(reason=getattr(error, 'code', 'validation'), detail=str(error))
+            if policy==LEGACY_REQUEST_POLICY:continue
+            try:
+                bounds=extent_crop_bounds(raw,unit.member_ids,rgb.size)
+            except ValueError:
+                continue
+            item['crop_kind']='extent'
+        area = (bounds[2]-bounds[0])*(bounds[3]-bounds[1])
+        limit=MAX_EXTENT_CROP_PIXELS if item.get('crop_kind')=='extent' else MAX_CROP_PIXELS
+        if area > limit or max(bounds[2]-bounds[0], bounds[3]-bounds[1]) > 1024:
+            item['reason'] = 'localization_crop_budget'
             continue
         extra = pixels*(len(raw)+128)
         if (len(requests) >= strokes.MAX_RETRIES or work+extra > strokes.MAX_RETRY_WORK
@@ -72,7 +86,7 @@ def plan(preview, rgb, raw, units, report):
         item.update(status='requested', reason='unresolved_cleanup', bounds=bounds,
             crop_pixels_sha256=n.digest(rgb.crop(bounds).tobytes()), retry_work=extra)
         requests.append(unit.unit_id)
-    result = {'policy': POLICY, 'source': report['source'], 'fonts_sha256': report['fonts_sha256'],
+    result = {'policy': policy, 'source': report['source'], 'fonts_sha256': report['fonts_sha256'],
         'font_id': report['font_id'], 'style': report['style'], 'preview_revision': preview_revision(preview),
         'geometry_revision': geometry_revision(raw), 'render_policy': report['render_policy'],
         'background_method': report['background_method'], 'evaluation_cap': report['evaluation_cap'],

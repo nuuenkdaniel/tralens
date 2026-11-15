@@ -1,7 +1,7 @@
 """Explicit bounded crop predictions using the already-open local OCR engine.
 
 No raw boxes, readings, proposal IDs, translations or source pixels are rewritten.
-Prediction rectangles are evidence only; rendering independently derives strokes.
+Prediction rectangles are evidence only; rendering independently evaluates support.
 """
 from dataclasses import asdict
 import copy
@@ -19,8 +19,11 @@ from ..translation.contracts import automatic_units, canonical, revision
 
 
 POLICY = 'original_crop_localization_evidence_v1'
+REQUEST_POLICY = 'unresolved_cleanup_crop_demand_v2_extent'
+LEGACY_REQUEST_POLICY = 'unresolved_cleanup_crop_demand_v1'
 MAX_CALLS = 12
 MAX_CROP_PIXELS = 262144
+MAX_EXTENT_CROP_PIXELS = 524288
 FIELDS = ('dt_polys','rec_texts','rec_scores','rec_polys','text_word_region')
 
 
@@ -37,7 +40,7 @@ def execute_requests(preview, plan, *, image, output, model_identity, reader=Non
     units = automatic_units(preview['ocr']['batches'][0],
         (preview['ocr'].get('automatic_recognition_results') or [()])[0])
     bound_preview = revision({**preview, 'ocr': {k:v for k,v in preview['ocr'].items() if k != 'source_localization'}})
-    if (plan.get('policy') != 'unresolved_cleanup_crop_demand_v1'
+    if (plan.get('policy') not in (REQUEST_POLICY, LEGACY_REQUEST_POLICY)
             or plan['source'] != preview['input'] or plan['preview_revision'] != bound_preview
             or plan['geometry_revision'] != geometry_revision(raw)
             or model_identity.get('profile') != 'v6_medium' or model_identity.get('local_weights') is not True):
@@ -70,12 +73,16 @@ def execute_requests(preview, plan, *, image, output, model_identity, reader=Non
     crop_pixels = retry_work = 0
     for uid in requests:
         row = row_map[uid]
-        bounds = crop_bounds(raw, row['member_ids'], rgb.size)
+        kind = row.get('crop_kind', 'strokes')
+        if kind == 'extent' and plan['policy'] != REQUEST_POLICY:
+            raise ValueError('extent crop requires current request policy')
+        bounds = request_bounds(raw, row['member_ids'], rgb.size, kind)
         crop = rgb.crop(bounds)
         crop_pixels += crop.width*crop.height
         retry_work += rgb.width*rgb.height*(len(raw)+128)
         if (bounds != row['bounds'] or hashlib.sha256(crop.tobytes()).hexdigest() != row['crop_pixels_sha256']
-                or crop.width*crop.height > MAX_CROP_PIXELS or max(crop.size) > 1024):
+                or crop.width*crop.height > (MAX_EXTENT_CROP_PIXELS if kind == 'extent' else MAX_CROP_PIXELS)
+                or max(crop.size) > 1024):
             raise ValueError('localization request crop drift/budget')
     if crop_pixels > 4_000_000 or retry_work > 1_024_000_000:
         raise ValueError('localization request aggregate budget')
@@ -101,6 +108,8 @@ def execute_requests(preview, plan, *, image, output, model_identity, reader=Non
         row = row_map[unit.unit_id]
         stage['records'].append({'unit_id':unit.unit_id,'unit_revision':unit.revision,
             'member_ids':list(unit.member_ids),'status':'not_attempted','reason':row['reason']})
+        if row.get('crop_kind') == 'extent':
+            stage['records'][-1]['crop_kind'] = 'extent'
     records = {r['unit_id']:r for r in stage['records']}
     def retain(name, data):
         if stage['artifact_bytes']+len(data) > 32*1024*1024:
@@ -122,8 +131,10 @@ def execute_requests(preview, plan, *, image, output, model_identity, reader=Non
                     item.update(reason='saved_prediction_unavailable')
                     continue
                 if any(canonical(old.get(k)) != canonical(item[k]) for k in
-                       ('unit_revision','member_ids','bounds','crop_pixels_sha256')):
+                        ('unit_revision','member_ids','bounds','crop_pixels_sha256')):
                     raise ValueError('saved crop source drift')
+                if old.get('crop_kind', 'strokes') != item.get('crop_kind', 'strokes'):
+                    raise ValueError('saved crop purpose drift')
                 prediction = old['prediction']
                 if old['prediction_revision'] != revision(prediction):
                     raise ValueError('saved crop prediction drift')
@@ -173,6 +184,39 @@ def crop_bounds(detections, member_ids, size):
     xs,ys=zip(*points)
     return [max(0,math.floor(min(xs))-24),max(0,math.floor(min(ys))-24),
         min(size[0],math.ceil(max(xs))+25),min(size[1],math.ceil(max(ys))+25)]
+
+
+def extent_crop_bounds(detections, member_ids, size):
+    """Context for one large source line; prediction never changes raw geometry.
+
+    Small dialogue uses the existing closed-stroke route. Large display lettering
+    can be clipped by the first detector, so retain up to one glyph's surrounding
+    context for an independent crop prediction. No recognition text is consulted.
+    """
+    selected={(type(i).__name__,i) for i in member_ids}
+    members=[d for d in detections if (type(d['source_id']).__name__,d['source_id']) in selected]
+    if len(member_ids)!=1 or len(members)!=1:
+        raise ValueError('extent crop requires one original source line')
+    points=np.asarray(members[0]['polygon'],dtype=np.float32)
+    if points.ndim!=2 or points.shape[1]!=2 or len(points)<3 or not np.isfinite(points).all():
+        raise ValueError('invalid extent source polygon')
+    short,long=sorted(v+1 for v in cv2.minAreaRect(points)[1])
+    if not (96<short<=256 and 1.25<=long/short<=8):
+        raise ValueError('source is not a large display line')
+    x,y=np.floor(points.min(axis=0)).astype(int);r,b=np.ceil(points.max(axis=0)).astype(int)+1
+    if not (0<=x<r<=size[0]+1 and 0<=y<b<=size[1]+1 and max(r-x,b-y)<=512):
+        raise ValueError('extent source exceeds native local scope')
+    margin=min(192,math.ceil(short+12))
+    bounds=[max(0,int(x)-margin),max(0,int(y)-margin),min(size[0],int(r)+margin),min(size[1],int(b)+margin)]
+    if (bounds[2]-bounds[0])*(bounds[3]-bounds[1])>MAX_EXTENT_CROP_PIXELS:
+        raise ValueError('extent crop pixel budget')
+    return bounds
+
+
+def request_bounds(detections, member_ids, size, kind='strokes'):
+    if kind=='strokes':return crop_bounds(detections,member_ids,size)
+    if kind=='extent':return extent_crop_bounds(detections,member_ids,size)
+    raise ValueError('unknown crop-localization purpose')
 
 
 def refine(engine, *, output, max_calls=MAX_CALLS):

@@ -37,6 +37,13 @@ def saved_records(preview, rgb, detections, units):
         unit = by_id.get(row['unit_id'])
         n.require(unit is not None and row.get('unit_revision') == unit.revision
             and n.canonical(row.get('member_ids')) == n.canonical(unit.member_ids), 'localized source unit drift')
+        n.require(row.get('crop_kind','strokes') in ('strokes','extent'),'unknown localized crop purpose')
+        if row.get('crop_kind')=='extent':
+            from ..ocr.source_localization import REQUEST_POLICY
+            demand=stage.get('request_plan',{})
+            requested={r['unit_id']:r for r in demand.get('records',[])}
+            n.require(demand.get('policy')==REQUEST_POLICY and
+                requested.get(row['unit_id'],{}).get('crop_kind')=='extent','unbound extent crop purpose')
         if row['status'] == 'predicted':
             n.require(row.get('prediction_revision') == n.revision(row['prediction']), 'localized prediction revision drift')
             result[unit.unit_id] = row

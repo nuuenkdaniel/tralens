@@ -338,7 +338,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'source_support.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
+                       for name in ('automatic.py', 'natural.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'source_support.py', 'source_extents.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
 
 
 def _report_html(report):
@@ -520,10 +520,12 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     units = n.automatic_units(preview_doc['ocr']['batches'][0], candidates[0] if candidates else ())
     from ..translation.context import saved_requests
     contextual = saved_requests(preview_doc, units)
-    localized = {}
+    localized = {};extent_records={};extents={}
     if cleanup_policy != 'native':
         from . import localized_strokes
         localized = localized_strokes.saved_records(preview_doc, rgb, raw, units)
+        extent_records={uid:row for uid,row in localized.items() if row.get('crop_kind')=='extent'}
+        localized={uid:row for uid,row in localized.items() if row.get('crop_kind','strokes')=='strokes'}
     report = {'schema_version': 1, 'purpose': 'automatic_candidate_output',
         'policy': POLICY if background_method == 'flat' else 'automatic_flat_then_classical_v1',
         'background_method': background_method,
@@ -1005,12 +1007,27 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     demand = preview_doc['ocr'].get('source_localization', {}).get('request_plan')
     if plan_localization or demand is not None:
         from . import localization_requests
-        requested, planning_seconds = localization_requests.plan(preview_doc, rgb, raw, units, report)
+        requested, planning_seconds = localization_requests.plan(preview_doc, rgb, raw, units, report,
+            policy=demand['policy'] if demand is not None else localization_requests.POLICY)
         if demand is not None:
             localization_requests.validate(demand, requested)
         report['localization_request_plan'] = requested
         report['localization_planning_seconds'] = planning_seconds
     if cleanup_policy == 'localized':
+        from . import source_extents
+        extent_checks=[]
+        for unit,row in zip(units,report['units']):
+            if unit.unit_id not in extent_records:continue
+            check_row={'unit_id':unit.unit_id,'status':'not_used'};extent_checks.append(check_row)
+            if removal_policy!='aggressive' or row['status']!='skipped' or row.get('reason_code') in aggressive.HARD_REASONS:
+                check_row['reason']='requires_pending_aggressive_cleanup';continue
+            try:
+                extent=source_extents.derive(rgb,raw,unit,extent_records[unit.unit_id])
+                extents[unit.unit_id]=extent;check_row.update(status='accepted',evidence=extent)
+            except (ValueError,KeyError,TypeError,cv2.error) as error:
+                check_row.update(status='rejected',reason=str(error))
+        report['source_extent_summary']={'policy':source_extents.POLICY,'records':extent_checks,
+            'accepted':len(extents),'raw_geometry_unchanged':True,'translations_reselected':0}
         localized_work, localized_retries = 0, 0
         retry_indices = [i for i, _ in pairs if report['units'][i]['status'] == 'skipped'
             and report['units'][i]['reason_code'] == 'replacement_cleanup_confidence'
@@ -1061,7 +1078,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             except (ValueError, OSError, KeyError, TypeError) as error:
                 attempt.update(reason_code=getattr(error, 'code', 'validation'), reason=str(error),
                     rejection_evidence=getattr(error, 'evidence', {}))
-        report['localized_cleanup_summary'] = {'retries': localized_retries, 'raster_work': localized_work,
+        report['localized_cleanup_summary'] = {'retries': localized_retries+len(extent_checks),
+            'native_stroke_retries':localized_retries,'extent_checks':len(extent_checks),'raster_work': localized_work,
             'maximum_retries': localized_strokes.MAX_RETRIES, 'maximum_raster_work': localized_strokes.MAX_RETRY_WORK,
             'semantic_mask_inference': False, 'semantic_ownership_verified': False}
     erase_union = np.zeros((rgb.height, rgb.width), bool)
@@ -1125,7 +1143,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             report['units'],clean,text,composite,erase_union,layout_union,recovery_artifacts,report['reconstruction_summary'] = aggressive.recover(
                 rgb,source,raw,report['units'],clean,text,erase_union,layout_union,font_data,coverage,style,
                 backend=backend,
-                probability=text_mask.raw if text_mask is not None else None)
+                probability=text_mask.raw if text_mask is not None else None,extents=extents)
         except reconstruction.BindingError:
             raise
         except (ValueError,OSError,MemoryError,cv2.error) as error:
@@ -1135,7 +1153,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         report['units'],clean,text,composite,erase_union,layout_union,final_artifacts,report['removal_summary'] = replacement.finish(
             rgb,raw,report['units'],clean,text,erase_union,layout_union,font_data,coverage,style,
             probability=text_mask.raw if text_mask is not None else None,source=source,backend=backend,
-            budget=reconstruction.Budget(maximum_calls=4,maximum_seconds=40))
+            budget=reconstruction.Budget(maximum_calls=4,maximum_seconds=40),extents=extents)
         recovery_artifacts.update(final_artifacts)
         alpha_union = np.asarray(text.getchannel('A')) != 0
         protected = ~(erase_union | layout_union)

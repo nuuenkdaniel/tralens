@@ -11,10 +11,10 @@ import numpy as np
 from PIL import Image,ImageDraw
 
 from . import natural as n, preparation as p, typography
-from . import reconstruction as rec, source_support
+from . import reconstruction as rec, source_support, source_extents
 
 
-POLICY='crop_local_aggressive_v9_exact_edit_protection'
+POLICY='crop_local_aggressive_v10_corroborated_extents'
 PROTECTION_POLICY='exact_commits_with_separate_layout_clearance_v1'
 MAX_REGIONS=64
 MAX_LOCAL_WORK=16_777_216
@@ -45,10 +45,19 @@ class Geometry:
             for tx in range(x//128,(r-1)//128+1):
                 for ty in range(y//128,(b-1)//128+1):self.grid.setdefault((tx,ty),set()).add(key)
 
-    def local(self,member_ids,reserved,margin=48,maximum_side=512,source_priority=False):
+    def local(self,member_ids,reserved,margin=48,maximum_side=512,source_priority=False,cleanup_polygon=None):
         keys={(type(i).__name__,i) for i in member_ids}
         rec.require(keys and keys<=self.raw.keys() and len(keys)==len(member_ids),'foreign/duplicate recovery membership')
         boxes=[self.boxes[k] for k in keys]
+        if cleanup_polygon is not None:
+            # Extra context follows a separately bound detector hypothesis. Raw
+            # ownership and all placement geometry below remain the originals.
+            points=np.asarray(cleanup_polygon)
+            rec.require(points.ndim==2 and points.shape[1]==2 and 3<=len(points)<=128 and
+                np.isfinite(points).all() and (points>=0).all() and
+                (points<=np.asarray(self.size)).all(),'invalid cleanup extent polygon')
+            left,top=map(int,np.floor(points.min(axis=0)));right,bottom=map(int,np.ceil(points.max(axis=0))+1)
+            boxes.append((left,top,min(self.size[0],right),min(self.size[1],bottom)))
         x=max(0,min(b[0] for b in boxes)-margin);y=max(0,min(b[1] for b in boxes)-margin)
         r=min(self.size[0],max(b[2] for b in boxes)+margin);b=min(self.size[1],max(b[3] for b in boxes)+margin)
         if r-x>maximum_side:
@@ -154,7 +163,7 @@ def tall_layout(layer,proof):
     return b-y>1.35*(r-x)
 
 
-def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style,*,backend=None,budget=None,probability=None):
+def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style,*,backend=None,budget=None,probability=None,extents=None):
     """Independent bounded pass; native successes are retained, then visibility runs.
 
     Every region gets one cheap attempt before any retry. Learned quota is separate
@@ -175,7 +184,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
         'budget_exclusions':0,'selected_learned':0,'selected_classical':0,'selected_fill':0,
         'model_config':getattr(backend,'config',None),'limits':{'regions':MAX_REGIONS,'learned_calls':budget.maximum_calls,
         'learned_seconds':budget.maximum_seconds,'local_work_pixels':MAX_LOCAL_WORK},'artwork_recovered':False}
-    artifacts={};jobs=[];backend_error=None
+    artifacts={};jobs=[];backend_error=None;extents=extents or {}
     members={(type(m).__name__,m) for row in rows if row['status']=='automatic_composed'
         for m in row.get('binding',{}).get('member_ids',[])}
     for i,row in enumerate(rows):
@@ -187,12 +196,18 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
         if len(jobs)>=MAX_REGIONS:
             entry['reason']='region_budget';summary['budget_exclusions']+=1;continue
         try:
-            bounds,own,protected=geometry.local(row['binding']['member_ids'],reserved,source_priority=True)
+            extent=extents.get(row['unit_id'])
+            bounds,own,protected=geometry.local(row['binding']['member_ids'],reserved,source_priority=True,
+                cleanup_polygon=extent['polygon'] if extent else None)
             x,y,r,b=bounds;crop=original[y:b,x:r].copy()
             placement_protected=protected|clearance[y:b,x:r]
             rec.require(crop.size and own.any(),'empty recovery source')
             predicted,ladder,evidence=masks(crop,own,protected,
                 probability=probability[y:b,x:r] if probability is not None else None)
+            if extent:
+                ladder=[(name+'+'+source_extents.POLICY,source_extents.apply(mask,extent,bounds,protected))
+                    for name,mask in ladder]
+                evidence={**evidence,'cleanup_extent':extent}
             # Presentation space is independent of the larger inference context.
             # A failed layout still reaches the final removal-only transaction.
             allowed=p.dilate(own,24)&~placement_protected
@@ -214,7 +229,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                     # A narrow Japanese column can require a wider English block.
                     # Find that readable local placement before deciding whether
                     # reconstruction would be wasted on an undisplayable target.
-                    n.require(evidence.get('policy')==source_support.POLICY,
+                    n.require(evidence.get('policy')==source_support.POLICY or extent is not None,
                         'source-centered reconstruction retry needs source-bound stroke support')
                     from .replacement import patch_layout
                     n.validate_text(row['binding']['text'],coverage)
@@ -246,7 +261,8 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             if content is not None:artifacts[f'recovery-{i:03d}-layout.png']=content
             jobs.append({'i':i,'bounds':bounds,'crop':crop,'protected':protected,'predicted':predicted,
                 'ladder':ladder,'layer':layer,'proof':proof,'best':None,'retry':False,
-                'probability':probability[y:b,x:r] if evidence.get('policy')==source_support.POLICY else None})
+                'probability':probability[y:b,x:r] if probability is not None and
+                    (evidence.get('policy')==source_support.POLICY or extent is not None) else None})
         except rec.BindingError:raise
         except (ValueError,OSError,cv2.error) as error:entry.update(reason=str(error),status='layout_or_crop_unavailable')
     for round_index in range(2):
@@ -316,6 +332,13 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
         # neither old English nor earlier cleanup can be overwritten by a later job.
         if membership & members:
             entry.update(status='collision_retained_primary',reason='membership_already_displayed');continue
+        if method=='classical_telea_unverified' and entry['attempts'][chosen].get('learned_skipped')=='separate_learned_budget':
+            # Exhausting this pass must not freeze a broad classical smear before
+            # the removal-first pass can use its separate reconstruction budget.
+            # That pass binds a fresh crop to the then-current protected support.
+            entry.update(status='cleanup_candidate_only',reason='deferred_to_final_reconstruction_budget',
+                selected_attempt=chosen,method=method,assessment=signals)
+            continue
         if layer is None or (mask&reserved[y:b,x:r]).any() or (local_alpha&clearance[y:b,x:r]).any():
             # Retain candidate evidence. Automatic reuse in final cleanup was
             # rejected after visual trials showed copied/hallucinated lettering.
