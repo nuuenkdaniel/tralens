@@ -198,7 +198,9 @@ inspected and hash-bound in `native-ctd-render-01-review-02/inspection.json`.
 | `ubunchu03_0006` | 5,290 | 4,182 |
 
 Small remnants under the top sound-effect border disappear, but a dark rectangular
-reconstruction remains at the lower balloon contact. The feature heading clears
+block remains at the lower balloon contact. Subsequent native-pixel attribution
+shows mixed retained original ink and reconstruction, not wholly synthesized ink.
+The feature heading clears
 a retained Latin edge while switching to a broader opaque-backed fallback that
 removes more book/panel artwork. Other changes clip icons and panel/UI rules.
 Most importantly, fresh LaMa output introduces distinct loop/letter-like marks
@@ -252,3 +254,66 @@ Native evidence must next be tested across all applicable source-support calls,
 with inspected controls for collateral loss and reconstructed lettering. The
 unchanged 133 displayed replacements still do not establish accurate wording or
 complete source removal.
+
+### Boundary attribution
+
+Two inspected cards in `native-context-boundary-review/inspection.json` bind the
+original pixels, source geometry, final erase mask and cleanplate. The top source
+polygon ends within the original stroke: part of the dark root lies outside final
+erase support, while reconstructed dark pixels also occur inside support. The APT
+boundary similarly combines retained exterior artwork and reconstructed islands.
+The diagnostic rectangles include artwork; their dark-pixel counts measure
+neither residual lettering nor removal accuracy.
+
+## All-source native crop/tile replay
+
+`general-native-render-01/` removes the saved-case allowlist. Every successful V4
+support request receives additive independently derived native crop and tiled-page
+support, and the same fields enlarge inference-only context. Original source
+pixels are preserved: 1024-side native tiles use at most 768-pixel stride and
+overlapping probability maxima; unique crops up to 1024-side receive their own
+forward. Base failures retain their original fallback behavior.
+
+The six reused development pages dispatch 114 forwards (24 tiles, 90 crops).
+Ninety support calls succeed; 69 add support, totaling 39,807 pixels across calls.
+Eighty-one context calls add 124,330 inference-only pixels. There are no base
+support failures. The 1,232-artifact native audit verifies exact original inputs,
+tile mapping, additive support, inference replay and ordered primary/recovery/final
+protection. The 1,803-artifact render audit verifies exact targets, font floors,
+unique membership, recomposition and zero changes outside declared support.
+
+All 69 changed-context cards across 23 compact sheets and all twelve full
+cleanplates/composites were inspected. Hash-bound observations and exact routing
+comparisons are in `general-native-render-01-review/inspection.json`, with a
+subsequent card-attribution correction in `inspection-addendum.json`. Compared
+with production V4:
+
+| Page | Changed clean pixels | Changed composite pixels |
+| --- | ---: | ---: |
+| `ubunchu01_07` | 21,452 | 19,980 |
+| `ubunchu08_0011` | 41,183 | 39,588 |
+| `saved-example` | 96,922 | 99,746 |
+| `ubunchu07_0002` | 7,306 | 6,275 |
+| `ubunchu08_0007` | 74,798 | 68,847 |
+| `ubunchu03_0006` | 8,014 | 6,737 |
+
+The top root shrinks but remains while the panel border is cut. Further cuts affect
+a hand near “Huh?”, a hair arc, book detail, the Synaptic balloon edge, chibi art,
+clothing, a mouth/balloon contact and report rules. Update gains faint marks, the
+bull caption gains a dark stroke, and APT/tagline reconstruction stays rough.
+Unowned UI lines, repeated sounds and the white exclamation mark remain.
+
+Routing changes explain some of the wider effects. The top sound switches from
+LaMa to dominant-surface fill. On `saved-example`, the feature heading and “Eerin,
+Eerin.” move to final opaque backing; the latter also wraps onto two lines.
+“Established” shifts six pixels right. “Wisdom.” moves from final backing to
+recovery placement and grows from 22px to 25px; “Success.” switches the same way
+but shrinks from 22px to 18px, exposing crossing UI detail. Another sound switches
+from Telea to LaMa, and chibi-adjacent cleanup switches from local occlusion to
+source-supported LaMa. Exact selected strings and font floors are preserved;
+their reading/translation defects are not repaired.
+
+This all-source adapter remains diagnostic. Broader native completion increases
+collateral loss without solving missing source ownership; passing integrity audits
+and 133 displayed replacements do not support production promotion. Production
+remains V4 thin-contact completion.
