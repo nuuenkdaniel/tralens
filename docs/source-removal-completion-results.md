@@ -56,9 +56,87 @@ and a weak neighboring component outside source ownership.
 
 ## Remaining failures
 
-This is not complete source removal or semantic accuracy. The top sound effect
+The V3 checkpoint is not complete source removal or semantic accuracy. The top sound effect
 still has large portions connected to panel/art strokes; whole-component bounds
 reject those. Repeated sounds outside detected crops, missed UI lines behind new
 English and a white exclamation mark outside detected columns also remain.
 The selected “Seriously.” and “Page 2.” strings and all earlier reading/translation
 defects are unchanged. Mask completion cannot establish a faithful translation.
+
+## Thick source pieces joined to thin artwork
+
+The follow-up `source_bound_semantic_strokes_v4_thin_contacts` keeps V3 completion
+and adds a source-bound contact split. A rejected whole native component can
+supply thick pieces only when its ink inside the original source polygon has at
+least 16 strong CTD pixels and at least 35% weak CTD coverage. A three-pixel native
+erosion separates thin contacts; dilation restores each surviving piece against
+the original ink. Each completed piece must remain inside the physical expansion,
+have at least 80% source containment, and satisfy the same 256-side/32,768-area
+bounds. A one-pixel contour collar is included. Accepted output is subtracted last.
+
+The parent evidence permits a thick, unpredicted portion of a glyph to be cleaned
+when it is connected to text-supported ink through a panel line. This is not
+semantic ownership: attached artwork can still qualify. Thin branches do not
+provide eroded cores that can pull the cleanup along an entire panel line. Native
+pixels are never resized or altered for inference, and layout remains separate.
+Completion records include crop-local piece/parent bounds and supporting counts.
+
+### Compared controls
+
+- `art-contact-masks-01/` is retained as an interrupted diagnostic: comparison of
+  support metadata encountered the separately appended `cleanup_extent` record.
+  It dispatched no inference. The corrected comparison retains that record and
+  verifies the native-support fields independently.
+- `art-contact-masks-02/` compares four masks at 82 saved support-call inputs.
+  These include repeated recovery/final-pass regions, not 82 independent sources.
+  All 31 changed-source cards were inspected. Cutting every native component at
+  the physical boundary clears the main sound effect but removes substantial
+  panel, balloon and book edges. Plain openings of radii two, three and four
+  generally retain the thick top fragments because those pieces have no direct
+  detector support.
+- `art-contact-masks-03/` compares the parent-supported rule at the same three
+  radii. All 11 cards were inspected. Radius three clears the large unsupported
+  pieces and avoids a visible balloon-line loss introduced by radius two on the
+  saved-example page. Radius four also helps but recovers less of the native edge.
+- The bounded, crop-local implementation reproduces all 82 radius-three masks
+  exactly (`contact-candidate-audit-02.json`), adding 2,162 mask pixels across those
+  diagnostic calls. Those are geometric comparisons, not source-removal scores.
+
+### Fresh rendering and remaining traces
+
+`art-contact-render-01/` runs six fresh renders with the diagnostic adapter, using
+the unchanged selected source, translation and localization records from V3.
+The four other pages remain pixel-identical. On `ubunchu01_07`, the cleanplate
+changes at 3,663 pixels and the composite at 3,625. On `saved-example`, those counts
+are 1,766 and 1,646. The audit checks 1,808 artifacts and preserves exact wording,
+font floors, unique membership, recomposition and zero outside-support changes.
+Seven changed-source cards, both changed full cleanplates/composites, and nine
+native-component measurement cards were inspected.
+
+`art-contact-render-02/` repeats all six renders through the production
+implementation. All **1,677 PNG artifacts are byte-identical** to the inspected
+diagnostic run, including original/clean/composite images and native masks. Its
+separate audit again checks 1,808 artifacts; both runs record idle runtimes before
+and after local rendering. The 133 displayed replacements, 15 identical targets,
+one existing missing translation and zero available-but-undisplayed targets are
+unchanged.
+
+The large top fragments are substantially reduced. Three opened pieces add
+cleanup support at 1,549 previously uncovered original-ink positions. The two
+unpredicted thick heads have areas 614 and 686; both include their panel contact.
+Reconstruction restores a horizontal border, while small source-like tips and
+marks remain below it. Consequently dark pixels and exact original-pixel matches
+remain at some measured positions; neither mask coverage nor those counts can
+certify complete removal. The saved-example additions mainly change tiny contact
+edges and neighboring reconstructed texture, with no large semantic improvement.
+
+The synthetic regressions exercise both polarities, a wholly unpredicted thick
+piece sharing a supported parent, partial protection, immutable inputs, a long
+thin art branch, a foreign thick piece, disconnected artwork, and sparse-parent
+rejection. Source strings, translations and the earlier semantic defects remain
+unchanged. Small contact remnants and crop-external/undetected lettering still
+require work.
+
+The focused cleanup suite passes 42 tests and the full working-tree suite passes
+1,117. Those tests and the exact replay comparisons establish implementation and
+preservation behavior, not bilingual accuracy or universal source removal.

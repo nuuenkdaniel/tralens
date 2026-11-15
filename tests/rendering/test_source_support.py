@@ -119,6 +119,44 @@ class SourceSupport(unittest.TestCase):
         self.assertFalse(mask[:,240:].any())
         self.assertFalse(mask[100:103,210:].any())
 
+    def contact_fixture(self):
+        image=np.full((240,320,3),245,np.uint8)
+        image[45:48,:]=0  # A thin panel line joins both thick glyph pieces.
+        image[45:145,110:150]=0;image[45:72,180:204]=0
+        image[90:93,145:315]=0  # A long thin art branch from the first piece.
+        image[110:130,210:225]=0  # Unconnected, unpredicted artwork.
+        image[45:80,260:290]=0  # Another thick piece outside source ownership.
+        own=np.zeros(image.shape[:2],bool);own[30:165,80:240]=True
+        probability=np.zeros(own.shape,np.uint8);probability[80:145,110:150]=220
+        protected=np.zeros_like(own);protected[55:60,175:210]=True
+        return image,own,protected,probability
+
+    def test_art_connected_thick_source_parts_are_removed_in_both_polarities(self):
+        image,own,protected,probability=self.contact_fixture()
+        for pixels in (image,255-image):
+            with self.subTest(light_ink=pixels is not image):
+                inputs=[v.copy() for v in (pixels,own,protected,probability)]
+                mask,details=source_support.derive(pixels,own,protected,probability)
+                # The second head has NO learned prediction of its own, but its
+                # parent contains substantial source-local lettering evidence.
+                self.assertTrue(mask[48:72,180:204][~protected[48:72,180:204]].all())
+                self.assertTrue(mask[48:145,110:150].all())
+                self.assertFalse((mask&protected).any())
+                self.assertFalse(mask[:,250:].any())
+                self.assertFalse(mask[90:93,210:].any())
+                self.assertFalse(mask[110:130,210:225].any())
+                self.assertGreater(details['contact_added_pixels'],0)
+                for before,after in zip(inputs,(pixels,own,protected,probability)):
+                    self.assertTrue(np.array_equal(before,after))
+
+    def test_sparse_parent_evidence_cannot_promote_unpredicted_attached_piece(self):
+        image,own,protected,probability=self.contact_fixture()
+        probability[:]=0;probability[120:130,110:150]=220
+        mask,details=source_support.derive(image,own,protected,probability)
+        self.assertFalse(mask[48:72,180:204].any())
+        self.assertEqual(details['contact_completed_components'],[])
+        self.assertEqual(details['contact_added_pixels'],0)
+
     def test_unsupported_source_must_use_removal_fallback(self):
         image,own,probability=self.fixture()
         probability[:]=0

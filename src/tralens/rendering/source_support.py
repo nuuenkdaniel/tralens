@@ -10,8 +10,60 @@ import numpy as np
 from . import natural as n, preparation as p
 
 
-POLICY='source_bound_semantic_strokes_v3_weak_components'
+POLICY='source_bound_semantic_strokes_v4_thin_contacts'
 CONTEXT_POLICY='inference_only_neighbor_lettering_v1'
+
+
+def complete_contacts(ink,own,protected,probability,support,physical,labels,stats):
+    """Separate thick native pieces from thin art contacts without following art.
+
+    Only rejected whole components with substantial source-local text evidence
+    can supply a parent. Opening supplies bounded native pieces, not new source
+    geometry or a text classifier. Unpredicted art attached to the same parent
+    can still be removed; committed pixels remain protected.
+    """
+    count=len(stats)
+    owned_counts=np.bincount(labels[own&ink],minlength=count)
+    weak_counts=np.bincount(labels[own&ink&(probability>=32)],minlength=count)
+    strong_counts=np.bincount(labels[own&ink&(probability>=77)],minlength=count)
+    rejected=np.zeros(count,bool);rejected[np.unique(labels[ink&~physical])]=True
+    rejected|=(stats[:,2:4].max(axis=1)>256)|(stats[:,4]>32768)
+    eligible=rejected&(strong_counts>=16)&(weak_counts>=owned_counts*.35)
+    eligible[0]=False
+    if not eligible.any():return support,[]
+    radius=3
+    count,cores,core_stats,_=cv2.connectedComponentsWithStats(p.erode(ink,radius).astype(np.uint8),8)
+    n.budget_check(count<=16384,'source support contact component budget')
+    support=support.copy();completed=[]
+    for label in np.unique(cores[own]):
+        if label==0:continue
+        x,y,w,h,area=map(int,core_stats[label])
+        if max(w,h)>256 or area>32768:continue
+        core=cores[y:y+h,x:x+w]==label
+        parent=int(labels[y:y+h,x:x+w][core][0])
+        if not eligible[parent]:continue
+        left,top=max(0,x-radius),max(0,y-radius)
+        right,bottom=min(own.shape[1],x+w+radius),min(own.shape[0],y+h+radius)
+        local=(slice(top,bottom),slice(left,right))
+        component=p.dilate(cores[local]==label,radius)&ink[local]
+        bx,by,bw,bh=cv2.boundingRect(component.astype(np.uint8));area=int(component.sum())
+        if max(bw,bh)>256 or area>32768:continue
+        if (component&~physical[local]).any() or np.count_nonzero(component&own[local])<area*.8:continue
+        # Keep the one-pixel contour collar beyond the component's calculation
+        # rectangle. The crop, physical limit and accepted edits still constrain it.
+        lx,ty=max(0,left-1),max(0,top-1);rx,bt=min(own.shape[1],right+1),min(own.shape[0],bottom+1)
+        block=np.zeros((bt-ty,rx-lx),bool);block[top-ty:bottom-ty,left-lx:right-lx]=component
+        candidate=p.dilate(p.filled_outer(block),1)
+        local=(slice(ty,bt),slice(lx,rx));candidate &= physical[local]&~protected[local]
+        extra=candidate&~support[local]
+        if not extra.any():continue
+        support[local]|=candidate
+        px,py,pw,ph,_=map(int,stats[parent])
+        completed.append({'bounds':[left+bx,top+by,left+bx+bw,top+by+bh],'area':area,
+            'parent_bounds':[px,py,px+pw,py+ph],'parent_source_pixels':int(owned_counts[parent]),
+            'parent_weak_probability_pixels':int(weak_counts[parent]),
+            'parent_strong_probability_pixels':int(strong_counts[parent]),'added_pixels':int(extra.sum())})
+    return support,completed
 
 
 def derive(crop,own,protected,probability):
@@ -76,9 +128,12 @@ def derive(crop,own,protected,probability):
         if weak_component and not associated and not in_line:
             weak_completed.append({'bounds':[x,y,x+w,y+h],'area':area,'weak_probability_pixels':weak_pixels})
     support=p.dilate(support,1)&limit
+    support,contacts=complete_contacts(ink,own,protected,probability,support,physical,labels,stats)
     evidence={'policy':POLICY,'semantic_seed_pixels':int(seed.sum()),
         'semantic_support_pixels':int(semantic.sum()),'native_components':chosen,
         'line_completed_components':completed,'weak_completed_components':weak_completed,
+        'contact_completed_components':contacts,'contact_opening_radius':3,
+        'contact_added_pixels':sum(v['added_pixels'] for v in contacts),
         'narrow_source_line':narrow,'source_line_thickness':float(thickness),
         'source_polygon_pixels':int(own.sum()),'support_pixels':int(support.sum()),
         'source_extent_discarded':False,'source_removal_verified':False,
