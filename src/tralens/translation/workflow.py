@@ -321,12 +321,12 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 raise ValueError("candidate state does not bind the single OCR page")
             candidates = tuple(c for r in recognition[0] for c in r.candidates) if recognition else ()
             units = automatic_units(batch, candidates)
-            from ..ocr import crop_readings
+            from ..ocr import crop_readings, ink_groups
             saved_crop_readings=[c for c in _snapshot(candidates) if c.get('engine')==crop_readings.ENGINE]
-            if saved_crop_readings or 'ink_column_groups' in state['ocr']:
+            grouped=any(p.grouping_method==ink_groups.POLICY for p in batch.proposals)
+            if saved_crop_readings or grouped or 'ink_column_groups' in state['ocr']:
                 with Image.open(BytesIO(_read_image(image))) as source:
                     rgb=source.convert('RGB')
-                    from ..ocr import ink_groups
                     ink_groups.validate_saved(state['ocr'],rgb)
                     for candidate in saved_crop_readings:crop_readings.validate_pixels(candidate,rgb)
         records,fragment_requests = {},{}

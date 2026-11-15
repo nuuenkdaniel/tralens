@@ -156,5 +156,24 @@ class InkGroupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'grouping geometry/pixels drift'):
             run_automatic(preview=bad, image=path, fonts=fixture.fonts, output=fixture.root/'bad-render')
 
+    def test_missing_grouping_proof_stops_before_translation_dispatch(self):
+        import main
+        from tests.test_pipeline import PipelineTests
+        fixture=PipelineTests();fixture.setUp();self.addCleanup(fixture.doCleanups)
+        path=fixture.root/'missing-proof.png'
+        image,original,batch,boxes=self.fixture(path=path);path.write_bytes(original)
+        engine=SimpleNamespace(automatic_unit_proposals=(batch,),raw_detections=[boxes],image_path=str(path),
+            process_images=Mock(),ocr=SimpleNamespace(close=Mock()))
+        def incomplete_refiner(engine,*,output):
+            g.refine(engine,image,original)
+            del engine.ink_column_groups
+        report=main.run_pipeline(path,fixture.root/'missing-proof',fonts=fixture.fonts,device='cpu',
+            model_root=fixture.fixture.weights,run_local_ocr=True,run_local_model=True,
+            ocr_factory=Mock(return_value=engine),runtime=SimpleNamespace(generate=fixture.provider),ocr_refine=incomplete_refiner)
+        self.assertEqual(report['status'],'failed',report)
+        saved=json.loads((fixture.root/'missing-proof/preview/preview.json').read_bytes())
+        self.assertIn('missing saved ink grouping evidence',saved['error']['message'])
+        fixture.provider.assert_not_called()
+
 
 if __name__ == '__main__':unittest.main()
