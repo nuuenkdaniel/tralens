@@ -72,6 +72,34 @@ class SourceSupport(unittest.TestCase):
         self.assertFalse(details['narrow_source_line'])
         self.assertFalse(mask[175:185,70:80].any())
 
+    def test_wide_source_completes_disconnected_weak_stroke_in_both_polarities(self):
+        image,own,probability=self.fixture()
+        # A separate hollow character has only weak prediction; an unrelated
+        # original shape and a disconnected probability-only island are retained.
+        cv2.rectangle(image,(75,165),(102,190),(0,0,0),2)
+        probability[164:168,74:103]=45
+        image[175:185,145:155]=0;probability[30:40,70:80]=45
+        protected=np.zeros_like(own);protected[174:179,72:105]=True
+        for pixels in (image,255-image):
+            with self.subTest(light_ink=pixels is not image):
+                mask,details=source_support.derive(pixels,own,protected,probability)
+                letter=np.zeros_like(own);letter[163:193,73:105]=image[163:193,73:105,0]<20
+                self.assertTrue(mask[letter&~protected].all())
+                self.assertTrue(mask[181:187,81:96].all())
+                self.assertFalse((mask&protected).any())
+                self.assertFalse(mask[175:185,145:155].any())
+                self.assertFalse(mask[30:40,70:80].any())
+                self.assertFalse(mask[205:210].any())
+                self.assertEqual(len(details['weak_completed_components']),1)
+
+    def test_weak_component_outside_source_cannot_pull_in_neighbor(self):
+        image,own,probability=self.fixture()
+        cv2.rectangle(image,(210,165),(245,190),(0,0,0),2)
+        probability[164:168,209:246]=45
+        mask,details=source_support.derive(image,own,np.zeros_like(own),probability)
+        self.assertFalse(mask[163:193,209:247].any())
+        self.assertEqual(details['weak_completed_components'],[])
+
     def test_slanted_narrow_line_uses_physical_thickness_not_axis_aligned_width(self):
         image=np.full((240,240,3),245,np.uint8)
         image[36:47,57:68]=0;image[171:182,151:162]=0

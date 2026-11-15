@@ -10,7 +10,7 @@ import numpy as np
 from . import natural as n, preparation as p
 
 
-POLICY='source_bound_semantic_strokes_v2_native_lines'
+POLICY='source_bound_semantic_strokes_v3_weak_components'
 CONTEXT_POLICY='inference_only_neighbor_lettering_v1'
 
 
@@ -44,8 +44,8 @@ def derive(crop,own,protected,probability):
     thickness=min(cv2.minAreaRect(np.concatenate(contours))[1])+1
     narrow=thickness<=96
     line_limit=max(12,thickness*2)
-    chosen=0;completed=0
-    for label in np.unique(labels[(nearby | (own if narrow else False))&ink]):
+    chosen=0;completed=0;weak_completed=[]
+    for label in np.unique(labels[(nearby | own)&ink]):
         if label==0:continue
         x,y,w,h,area=map(int,stats[label])
         if max(w,h)>256 or area>32768:continue
@@ -57,20 +57,29 @@ def derive(crop,own,protected,probability):
         # A narrow source line can contain entire trailing characters missed by
         # CTD. Require native bounded components mostly owned by that line; do
         # not generalize this completion to oversized detector rectangles.
-        in_line=(narrow and max(w,h)<=line_limit and
-            np.count_nonzero(component&own[y:y+h,x:x+w])>=area*.8)
-        if not associated and not in_line:continue
+        owned=np.count_nonzero(component&own[y:y+h,x:x+w])>=area*.8
+        in_line=narrow and max(w,h)<=line_limit and owned
+        # A disconnected part of a large glyph can have weak CTD evidence but
+        # no strong seed. Complete its ORIGINAL bounded component, not the whole
+        # low-probability field or an oversized detector rectangle. Measure before
+        # subtracting protection so old edits cannot strand the rest of a stroke.
+        weak_pixels=int(np.count_nonzero(component&(probability[y:y+h,x:x+w]>=32)))
+        weak_component=owned and weak_pixels>=16
+        if not associated and not in_line and not weak_component:continue
         # Whole native outlines, including their interiors, remove hollow glyphs
         # without erasing the empty rectangular space between adjacent characters.
         contours,_=cv2.findContours(component.astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
         filled=np.zeros_like(component,dtype=np.uint8)
         cv2.drawContours(filled,contours,-1,1,cv2.FILLED)
         support[y:y+h,x:x+w]|=filled!=0;chosen+=1
-        completed+=not associated
+        completed+=not associated and in_line
+        if weak_component and not associated and not in_line:
+            weak_completed.append({'bounds':[x,y,x+w,y+h],'area':area,'weak_probability_pixels':weak_pixels})
     support=p.dilate(support,1)&limit
     evidence={'policy':POLICY,'semantic_seed_pixels':int(seed.sum()),
         'semantic_support_pixels':int(semantic.sum()),'native_components':chosen,
-        'line_completed_components':completed,'narrow_source_line':narrow,'source_line_thickness':float(thickness),
+        'line_completed_components':completed,'weak_completed_components':weak_completed,
+        'narrow_source_line':narrow,'source_line_thickness':float(thickness),
         'source_polygon_pixels':int(own.sum()),'support_pixels':int(support.sum()),
         'source_extent_discarded':False,'source_removal_verified':False,
         'possible_collateral_art_loss':True,'polarity':'dark_ink' if light else 'light_ink'}
