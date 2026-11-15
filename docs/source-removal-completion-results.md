@@ -394,9 +394,10 @@ zero-hit records and 466 artifacts. Useful findings and failures include:
   tile, so crop-edge flags do not certify complete source geometry.
 - Edge-flagged 512 crops read `APT-Man`, while larger internal 768 crops truncate
   it to `APT-Ma`/`APT-M`. Bigger context is not monotonically better.
-- A crown icon is repeatedly read as `2`; an eyebrow becomes `乐` with 0.959
-  confidence. Adjacent text boxes also touch fingers, icons and rules. Neither
-  confidence nor cross-grid agreement establishes textual ownership.
+- A crown icon is repeatedly read as `2`. The initial review attributed the
+  0.959-confidence `乐` to an eyebrow; the native-line reinspection below corrects
+  that attribution. Adjacent text boxes also touch fingers, icons and rules.
+  Neither confidence nor cross-grid agreement establishes textual ownership.
 - The Linux annotation, outlined keyboard sound and panel-clipped report row
   remain substantially unread. The quiet sound and white exclamation have no
   overlapping fresh detections.
@@ -454,3 +455,91 @@ with tight, axial and narrow contextual crops, testing whether individual lines
 reduce neighboring-row contamination while retaining all geometric false-positive
 controls. These reused pages remain development evidence, not held-out accuracy
 validation. Production V4 remains the baseline.
+
+### Individual native-line readings
+
+`coverage-line-reader-01/` reads all 115 exact-distinct fresh polygons associated
+with the 68 hit components. Tight, axial and contextual views give 345 local Hayai
+calls, all completed in 48.0 seconds. Planning uses only saved geometry; artwork,
+empty-recognition and clipped polygons remain included. The 152 zero-hit components
+retain their earlier component-reader evidence rather than receiving invented
+line geometry. The pinned model, settings and source images are unchanged.
+
+The native audit binds 725 artifacts, replays the complete geometry plan, and
+verifies exact original crop pixels and all three response bindings. All 115 cards
+across 29 sheets were inspected. Explicit observations in
+`coverage-line-reader-observations.tsv` and the completed review in
+`coverage-line-reader-01-review/inspection.json` bind 880 artifacts.
+
+- Individual crops recover useful `アップデート`, `インストール`, `いやーっ!`,
+  copy/paste headings and some `Masato` alternatives, reducing broad-envelope
+  repetitions. They still omit visible `ー` in `アスキー`, misread `不撓` as
+  `不挽`, truncate names/titles and merge `Wgetであうあう`.
+- A detector polygon is not necessarily one passage. The Linux seed crosses two
+  vertical columns horizontally; other seeds span title/credit fragments or UI
+  plus sound effects. Their long axis does not establish writing direction.
+- Even appropriate tilted-line polygons have axis-aligned rectangles containing
+  adjacent rows. Dependency/status and roaming labels repeatedly acquire those
+  neighboring readings. Conversely, tighter crops omit indented endings and
+  repeated sounds; consistent partial predictions are not complete-source reads.
+- Anger and crown symbols still produce stable kana. Geometric intersection does
+  not confer text ownership on an adjacent finger, checkbox or background rule.
+
+**Attribution correction:** coverage component ID10 remains eyebrow artwork, but
+the fresh 0.959-confidence `乐` polygon spans the neighboring large stylized sound.
+Native line ID3 and the rechecked component-reader ID10 card establish that the
+earlier “eyebrow read as `乐`” wording overstated attribution. Broad Hayai
+`ガチ`/`ガチン` also read the adjacent sound, not an eyebrow-only crop. The original
+observations remain preserved and are explicitly superseded in the native
+inspection record. Rechecked eye-detail controls ID52 (`バ`) and ID105 (`ド`)
+remain valid artwork hallucinations. The corrected component-category counts do
+not change.
+
+### Native-pixel scanline presentations
+
+`coverage-strip-reader-01/` tests the same 115 polygons and three views with
+geometry-only integer scanline translations. X-major strips shift columns and
+y-major strips shift rows around a fitted centerline; ambiguous shapes keep
+rectangular views. Native RGB values are neither interpolated nor recolored.
+Every view saves its page-coordinate sampling map. These maps describe reader
+presentations, **not source ownership, layout or erasure geometry**.
+
+All 345 local calls finish in 48.3 seconds. The independent 1,871-artifact audit
+reconstructs every scanline, checks exact one-to-one original RGB sampling and
+finds zero omitted raster pixels from the seed polygons. There are 219 changed
+inputs and 91 changed readings relative to the native trial. All 1,628 clamped
+scanlines occur in the three `SUPER!` presentations; clamping retains polygon
+coverage but those readings still lose or misread the exclamation. These are
+operational counts, not accuracy measures.
+
+All 115 comparison cards across 29 sheets were inspected. The explicit
+`coverage-strip-reader-observations.tsv` and
+`coverage-strip-reader-01-review/inspection.json` bind 2,076 artifacts, including
+the native inspection and its attribution correction. Findings are mixed:
+
+- Lines12/13 isolate `依存関係を解決` in every view; lines14/21 retain
+  `状態情報を読み` without the native context's tree-row additions. Line19
+  isolates `依存関係ツリーを`, while line22's wider context still adds unrelated
+  text. Lines72–74 isolate `ローミング・モードが` across all views.
+- Line101 isolates `いいのかしら`, but line102's wider view still borrows and
+  corrupts the preceding column. Lines80/81 isolate one `えーりん` rather than
+  assigning both repeated rows to one seed.
+- Full seed-polygon coverage does not mean full lettering coverage. Line4's
+  narrow strips lose heritage-ending `で`; line83 regresses from `おめでとー`
+  to `おめで`. Both endings lie partly outside the tilted seed's useful extent.
+  Some complete predicted endings also come from visibly clipped input glyphs.
+- Latin transcription regresses too: line46 changes `Ubuntu` to `Ubumtu`,
+  lines76/78 corrupt `install`, line88 loses the `APT-Man` hyphen, and line93's
+  context changes `Masato` to `Mosto`. Other name/heading views improve, so neither
+  strip presentation nor wider context dominates the original rectangles.
+- Wider lines110/113 change the second `はやくっ` to `まやくっ` while sampling
+  a clipped neighboring column. Stable artwork hallucinations, wrong `不撓`,
+  missing magazine punctuation, mixed `Wget` text and the unread Linux annotation
+  remain. Integer shifting cannot repair incorrect seed membership.
+
+These experiments support retaining mapped views alongside original rectangles,
+with exact source maps and explicit disagreement/extent evidence. They do not
+justify replacing existing selections on strip agreement. All predictions remain
+unselected; the earlier production translations and V4 cleanup remain the
+baseline. Complete readings, semantic ownership, untranslated omissions and
+untouched end-to-end validation still require work.
