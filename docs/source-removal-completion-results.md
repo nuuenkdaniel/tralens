@@ -598,3 +598,96 @@ geometry with Hayai. Its agreement cannot certify selection, semantic ownership
 or erase support. All new readings remain unselected. Further recovery must
 address source extent, orientation and passage membership; these reused pages
 continue to be development evidence rather than untouched validation.
+
+### Unconditional quarter-turn coverage
+
+`coverage-orientation-01/` completes counterclockwise quarter-turn reads for all
+690 native/scanline presentations, irrespective of rectangular aspect. Exact
+pixel/model/settings reuse accounts for 108 associations; 459 fresh calls add
+582 previously unrotated presentations in 21.2 seconds, without execution
+failures. The prior as-presented predictions remain bound. The audit reconstructs
+every lossless rotation, deduplicated call and association, binding 4,514
+artifacts. All 115 cards across 29 sheets were inspected; the completed
+`coverage-orientation-01-review/inspection.json` binds 4,661 artifacts and explicit
+per-case observations, including inherited attribution corrections.
+
+Fixing the aspect-ratio coverage gap alone was insufficient. Compact magazine
+`週刊` became `遇利`/`圆刊`/`星刊`, and left-hand `はやくっ` became only
+`は`/`はや`/`はわ` or empty. All rotated Linux-annotation slices were empty.
+Already-covered heritage and congratulation omissions persisted. Horizontal UI
+rows often became numbers or unrelated characters; crown/anger artwork continued
+to generate invented text. The 397 nonempty new associations and zero new exact
+Hayai matches are operational counts, not accuracy measurements. This experiment
+adds one orientation, rather than exhaustive rotations or correction of actual
+tilt; every prediction remains unselected.
+
+### Source-bound projective reader presentations
+
+`src/tralens/ocr/reader_geometry.py` now provides reusable `plan`, `pixels`,
+`source_coordinates`, `present` and `replay` operations. A convex native-page
+quadrilateral defines a separate reader view. Opposite-edge lengths determine
+dimensions; tight, axial and contextual padding sample surrounding page pixels.
+Saved forward/inverse homographies, source/view pixel fingerprints and OpenCV
+version bind replay. Quarter-turns follow interpolation and are lossless.
+Degenerate, crossed, oversized or projective-horizon-crossing views are rejected.
+Seven targeted tests cover exact rectangular samples, vertex order, all four
+quarter-turns, affine and perspective coordinate ramps, borders and tampering.
+
+These views use **linear interpolation**, not one-to-one native pixel samples.
+Off-page sampling has a declared constant-white reader border. Original pixels,
+detector membership, cleanup support and layout geometry remain separate; inverse
+coordinates confer no erase permission. This checkpoint adds the reusable module;
+coordinator/workflow integration is still pending.
+
+`coverage-rectified-01/` applies it to all 115 distinct fresh polygons, including
+artwork and clipped/mixed passages. Three contexts produce 345 Hayai calls in
+47.6 seconds; as-presented and quarter-turned views produce 690 Paddle calls in
+31.2 seconds. Both readers completed without execution failures using the same
+pinned local weights/settings as before. No expected strings, inspection labels,
+new detector or semantic masks enter planning.
+
+The audit binds 5,802 artifacts. It independently solves each homography using
+eight equations, checks inverse transforms, reconstructs every interpolated
+input and lossless quarter-turn, and preserves every association. The 151,838
+off-page sample centers are counted across orientation associations and use the
+declared border; they are not additional source pixels. All 115 comparison cards
+across 29 sheets were visually inspected. The completed
+`coverage-rectified-01-review/inspection.json` binds 7,248 artifacts, including the
+prior orientation inspection and its attribution corrections.
+
+Observed recoveries and remaining failures:
+
+- Lines111/112/114's axial views now give cross-reader **`はやくっ`** for the
+  left-hand repetition. Lines111/112 also recover it contextually. Tight views
+  still agree on incomplete `はや`; line114 contextual Paddle drops `や`.
+  The right-hand repetition often still loses small `っ` in Paddle. Wider Hayai
+  crops sometimes read both repetitions, requiring explicit membership to avoid
+  duplicate translations.
+- Wider line18 Hayai reads outlined `ブチッ`; Paddle still reads `7`.
+  Wider lines24–27 Hayai recover all four `あ`, while line28 still has shared
+  two-/three-character omissions. Corrected tilt and changed sampled extent
+  occur together, so these gains cannot be attributed to tilt alone.
+- All views of lines12/13 agree on `依存関係を解決`; lines72–74 agree on
+  `ローミング・モードが`, with less neighboring-row contamination. Narrow line14
+  and axial line21 Paddle recover final `み`; contextual variants still drop it.
+  Dependency-tree, install and update labels retain independent-reader errors.
+- Heritage `な意味` still loses indented `で`; `おめで` loses `とー`.
+  Tight magazine `アスキ` still loses `ー`; wider Hayai can recover it while
+  borrowing `週刊`. Both readers still mix `Wgetで` with neighboring `あう`.
+  The Linux annotation remains a horizontal slice through two vertical columns,
+  leaving its meaning unrecovered.
+- Rectification can create **new shared mistakes**: line101 tight/axial Hayai
+  now joins Paddle in `いいのかし`, omitting `ら`, whereas earlier scanline
+  Hayai was complete. Line91 axial readers now agree on `SUPERI`, where prior
+  strip Paddle read `SUPER!`. Tight agreement remains incomplete `SUPER`.
+- Contextual Paddle newly drops `牛` from line84 at 0.957 and changes line96
+  `Masato` to `Masito` at 0.952; line98 becomes `Masats`. Clipped APT-Man/name
+  seeds still produce partial names. `installで` becomes `install` at
+  0.996–0.997 or `installz`. Confidence does not certify complete meaning.
+- Crown/anger artwork still generates characters. Panel-clipped report rows,
+  outlined keyboard fragments and partial repeated sounds remain unresolved.
+
+The new geometry is useful reader infrastructure, with real recoveries and
+documented regressions. All experiment readings remain alternatives. Complete
+source extent, passage membership, correct selected translations and untouched
+end-to-end validation remain open; production V4 remains the rendering baseline.
