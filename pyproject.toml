@@ -9,7 +9,7 @@ requires-python = "==3.10.*"
 dependencies = [
     "ollama>=0.6.1",
     "paddleocr[doc-parser]>=3.4.0",
-    "paddlepaddle-gpu==3.3.0",
+    "paddlepaddle-gpu==3.4.0.post20260612+99af93f9466",
     "scikit-learn>=1.7.2",
 ]
 
