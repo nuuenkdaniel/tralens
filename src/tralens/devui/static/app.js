@@ -45,23 +45,41 @@ function missingOutputMessage(data, view) {
   if (data.error || data.status === "failed" || data.status === "interrupted") return {title: "This stage didn't produce an output", copy: "The run stopped before this output was published. Earlier stage results and the original remain available. See the error above for details."};
   return {title: data.status === "running" ? "Waiting for this stage…" : "No output for this stage", copy: data.status === "running" ? "The real output will appear here when the pipeline publishes it. You can inspect earlier stages while you wait." : "This run did not publish this output. Inspect Translation and the run details to see why."};
 }
-function qualityNotice(data, rereadAvailable = false) {
+// The two replacement presets offered in the viewer. "replace-all" is the
+// pipeline's own default: every available translation is drawn, using
+// aggressive removal and opaque patches / captions where cleanup is unsure.
+const STYLES = {
+  "replace-all": {replacement_policy: "all", visibility_policy: "always-show", removal_policy: "aggressive"},
+  "protect": {replacement_policy: "confidence-gated", visibility_policy: "replacement-only", removal_policy: "preserve"},
+};
+function styleOf(options) {
+  return options?.visibility_policy === "always-show" || options?.replacement_policy !== "confidence-gated" ? "replace-all" : "protect";
+}
+function runOptions({mode, style, budget, reread = false, lama = false}) {
+  const render = mode === "render", preset = STYLES[render ? style : "replace-all"];
+  return {mode, max_attempts: budget, allow_fragments: false, render_policy: "best-effort", translation_policy: "coverage-first",
+    replacement_policy: render ? preset.replacement_policy : "all",
+    quality_reread: render && reread,
+    layout_policy: "source-local", source_localization: false,
+    visibility_policy: render ? preset.visibility_policy : "replacement-only",
+    removal_policy: render ? preset.removal_policy : "legacy",
+    reconstruction_policy: render && lama && preset.removal_policy === "aggressive" ? "lama" : "classical"};
+}
+function qualityNotice(data) {
   if (!data || !outputReady(data, "final")) return null;
   if (data.visibility_policy === "always-show" || data.options?.visibility_policy === "always-show") {
     const counts = data.display_summary;
-    return {copy: "Prioritizes visible translations; fallback patches may cover artwork. " +
+    return {copy: "Replace all text: every available translation is drawn, so fallback patches may cover artwork. " +
       (counts ? `${counts.clean_replacements} clean replacements · ${counts.learned_reconstructions || 0} learned reconstructions · ${counts.aggressive_replacements || 0} aggressive removals · ${counts.patch_backed_translations} patch-backed translations · ${counts.nearby_captions} nearby captions · ${counts.intentionally_unchanged} intentionally unchanged · ${counts.available_not_displayed} available but not displayed · ${counts.missing_translations} missing translations. ` : "") +
       (counts?.caption_sources_retained ? `${counts.caption_sources_retained} captions retain their source text. ` : "") +
-      "Reconstruction and translation quality remain unverified.", action: null};
+      "Translation quality is unreviewed.", action: null};
   }
-  if (data.replacement_policy !== "confidence-gated") return {
-    copy: "This run used broad replacement without artwork checks. It can smear drawings and repaint bad OCR. Retry with native cleanup / OCR checks; unsupported edits will stay original, with translations retained.",
-    action: rereadAvailable ? "Retry with quality checks" : "Retry with artwork protection"
-  };
   const counts = data.replacement_confidence;
-  return {copy: `Experimental native-cleanup / OCR checks used${data.quality_reread?.enabled ? " with paired rereads" : " without paired rereads"}. ` +
-    (counts ? `${counts.actual_replacements} image replacements; ${counts.bound_translations_without_replacement} translations kept without repainting. ` : "") +
-    "Untranslated text and wrong readings may remain. This is an unverified candidate—not a finished translated page.", action: null};
+  const lead = data.replacement_policy === "confidence-gated"
+    ? `Artwork was protected${data.quality_reread?.enabled ? " (with paired rereads)" : ""}, so some translations were left off the page. ` +
+      (counts ? `${counts.actual_replacements} image replacements; ${counts.bound_translations_without_replacement} translations kept without repainting. ` : "")
+    : "This run used broad replacement without the visible-translation fallback, so some translations may be missing from the page. ";
+  return {copy: lead + "Retry with Replace all text to draw every available translation.", action: "Retry and replace all text"};
 }
 function localizationNotice(data) {
   const crop = data?.source_localization;
@@ -71,7 +89,7 @@ function localizationNotice(data) {
     (crop.error ? ` Crop pass failed: ${crop.error}` : "") +
     (crop.failed ? ` ${crop.failed} crop predictions failed.` : "");
 }
-if (typeof module !== "undefined" && module.exports) module.exports = {previewStates, progressView, outputReady, missingOutputMessage, qualityNotice, localizationNotice};
+if (typeof module !== "undefined" && module.exports) module.exports = {previewStates, progressView, outputReady, missingOutputMessage, qualityNotice, localizationNotice, runOptions, styleOf, STYLES};
 
 if (typeof document !== "undefined") {
   const $ = id => document.getElementById(id);
@@ -101,31 +119,37 @@ if (typeof document !== "undefined") {
     if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
     return result;
   }
+  const radios = name => [...document.querySelectorAll(`input[name="${name}"]`)];
+  const choice = name => radios(name).find(input => input.checked)?.value;
+  const setChoice = (name, value) => radios(name).forEach(input => { input.checked = input.value === value; });
+  const currentSettings = () => runOptions({mode: choice("mode"), style: choice("style"), budget: Number($("budget").value),
+    reread: Boolean(config?.quality_reread_available) && $("quality-reread").checked,
+    lama: Boolean(config?.reconstruction_available) && $("reconstruction-policy").value === "lama"});
   function setBusy(value) {
     busy = value;
     const retry = Boolean(current && snapshot && snapshot.status !== "running");
+    const render = choice("mode") === "render", replaceAll = choice("style") === "replace-all";
     $("run").disabled = value || !config || (!pendingFile && !retry);
     $("run").textContent = value ? "Running…" : retry ? "Retry pipeline ↻" : "Run pipeline →";
     $("run").title = retry ? "Rerun this saved upload with the current settings. Previous results are kept." : "Start a new run with the selected image.";
     $("jobs").disabled = value;
-    for (const id of ["file", "mode", "budget", "policy", "translation-policy", "fragments"]) $(id).disabled = value;
-    $("replacement-policy").disabled = value || $("mode").value !== "render";
-    $("quality-reread").disabled = value || !config?.quality_reread_available || $("mode").value !== "render" || $("translation-policy").value !== "coverage-first";
-    $("layout-policy").disabled = value || $("mode").value !== "render";
-    $("source-localization").disabled = value || $("mode").value !== "render";
-    $("visibility-policy").disabled = value || $("mode").value !== "render";
-    $("removal-policy").disabled = value || $("mode").value !== "render";
-    $("reconstruction-policy").disabled = value || $("mode").value !== "render";
-    $("reconstruction-policy").querySelector('[value="lama"]').disabled = !config?.reconstruction_available;
+    for (const id of ["file", "budget"]) $(id).disabled = value;
+    for (const input of radios("mode")) input.disabled = value || (input.value === "render" && !config?.render_enabled);
+    for (const input of radios("style")) input.disabled = value || !render;
+    $("style-group").dataset.disabled = String(!render);
+    $("quality-reread").disabled = value || !config?.quality_reread_available || !render;
+    $("reconstruction-policy").disabled = value || !render || !replaceAll || !config?.reconstruction_available;
     $("quality-retry").disabled = value || !config?.render_enabled;
   }
   function settingsSummary() {
-    const mode = {ocr: "OCR only", translate: "Through translation", render: "Through final rendering"}[$("mode").value];
-    $("settings-summary").textContent = mode + ($("mode").value === "ocr" ? " · no model calls" : ` · ${$("translation-policy").value === "coverage-first" ? "coverage first" : "conservative translation"} · up to ${$("budget").value} translation calls`);
-    if ($("mode").value === "render") $("settings-summary").textContent += $("replacement-policy").value === "confidence-gated" ? " · artwork checks" : " · broad replacement";
-    if ($("mode").value === "render" && $("layout-policy").value === "enclosed-retry") $("settings-summary").textContent += " · enclosure retry";
-    if ($("mode").value === "render" && $("source-localization").checked) $("settings-summary").textContent += " · requested crop OCR";
-    if ($("mode").value === "render" && $("visibility-policy").value === "always-show") $("settings-summary").textContent += " · visible translations / artwork may be covered";
+    const mode = choice("mode"), style = choice("style");
+    $("style-help").textContent = mode !== "render" ? (mode === "ocr" ? "Finds and groups text. No translation model calls." : "Translates the text without changing the image.")
+      : style === "replace-all" ? "Every available translation is drawn on the page. Artwork behind text may be smeared or covered by a white patch."
+      : "Only regions that clean up safely are replaced. Other translations are listed alongside but not drawn.";
+    const parts = [mode === "ocr" ? "no model calls" : `up to ${$("budget").value} calls`];
+    if (mode === "render") parts.push(config?.reconstruction_available && style === "replace-all" ? ($("reconstruction-policy").value === "lama" ? "LaMa backgrounds" : "classical backgrounds") : "classical backgrounds");
+    if (mode === "render" && config?.quality_reread_available && $("quality-reread").checked) parts.push("paired rereads");
+    $("settings-summary").textContent = parts.join(" · ");
     setBusy(busy);
   }
   function ownership() {
@@ -359,16 +383,10 @@ if (typeof document !== "undefined") {
     $("cancel").hidden = data.status !== "running" || !config?.cancellation_available;
     snapshot = data;
     if (settingsJob !== data.id) {
-      $("mode").value = data.options.mode; $("budget").value = data.options.max_attempts;
-      $("policy").value = data.options.render_policy; $("fragments").checked = data.options.allow_fragments;
-      $("translation-policy").value = data.options.translation_policy || "conservative";
-      $("replacement-policy").value = data.options.replacement_policy || "all";
+      if (data.options.mode !== "render" || config?.render_enabled) setChoice("mode", data.options.mode);
+      setChoice("style", styleOf(data.options));
+      $("budget").value = data.options.max_attempts;
       $("quality-reread").checked = Boolean(data.options.quality_reread);
-      $("layout-policy").value = data.options.layout_policy || "source-local";
-      $("source-localization").checked = Boolean(data.options.source_localization);
-      $("visibility-policy").value = data.options.visibility_policy || "replacement-only";
-      $("removal-policy").value = data.options.removal_policy || "legacy";
-      $("reconstruction-policy").value = data.options.reconstruction_policy || "classical";
       settingsJob = data.id; settingsSummary();
     }
     if (!pendingFile) $("filename").textContent = `Saved run · ${data.id.slice(0, 8)}`;
@@ -379,7 +397,7 @@ if (typeof document !== "undefined") {
       : `${data.status === "partial" || data.status === "complete_with_failures" ? "Finished with partial results" : data.status === "complete" ? "Ready to inspect" : "Run stopped"} · ${data.restored ? "saved run" : data.elapsed_seconds + "s"}`;
     $("status-dot").dataset.state = data.status;
     $("summary").textContent = `${data.detections.length} regions · ${translations} translations${data.display_summary ? ` · ${data.display_summary.displayed_translations} displayed (${data.display_summary.clean_replacements} clean)` : data.rendering_coverage ? ` · ${data.rendering_coverage.rendered} replacements` : ""}`;
-    const notice = qualityNotice(data, config?.quality_reread_available);
+    const notice = qualityNotice(data);
     $("quality-notice").hidden = !notice;
     $("quality-copy").textContent = notice?.copy || "";
     $("quality-retry").hidden = !notice?.action;
@@ -436,15 +454,9 @@ if (typeof document !== "undefined") {
     const retry = current && snapshot && snapshot.status !== "running";
     if ((!pendingFile && !retry) || busy) return;
     const file = pendingFile, parent = current;
-    const rendering = $("mode").value === "render";
-    const settings = {mode: $("mode").value, max_attempts: Number($("budget").value), allow_fragments: $("fragments").checked, render_policy: $("policy").value, translation_policy: $("translation-policy").value,
-      replacement_policy: rendering ? $("replacement-policy").value : "all",
-      quality_reread: rendering && $("translation-policy").value === "coverage-first" && !$("quality-reread").disabled && $("quality-reread").checked,
-      layout_policy: rendering ? $("layout-policy").value : "source-local",
-      source_localization: rendering && $("source-localization").checked};
-    settings.visibility_policy = rendering ? $("visibility-policy").value : "replacement-only";
-    settings.removal_policy = rendering ? $("removal-policy").value : "legacy";
-    settings.reconstruction_policy = rendering ? $("reconstruction-policy").value : "classical";
+    // Always send every option: a retry otherwise inherits stale experimental
+    // settings (enclosure retry, crop localization) from the saved run.
+    const settings = currentSettings();
     setBusy(true); showError(""); $("status").textContent = retry ? "Starting a fresh run with the saved image…" : "Uploading original image…";
     try {
       const result = retry
@@ -462,8 +474,7 @@ if (typeof document !== "undefined") {
   });
   $("quality-retry").addEventListener("click", () => {
     if (busy || !snapshot || !config.render_enabled) return;
-    $("mode").value = "render"; $("policy").value = "best-effort"; $("translation-policy").value = "coverage-first";
-    $("replacement-policy").value = "confidence-gated"; $("quality-reread").checked = Boolean(config.quality_reread_available);
+    setChoice("mode", "render"); setChoice("style", "replace-all");
     $("budget").value = "64"; settingsSummary(); $("run-form").requestSubmit();
   });
   $("file").addEventListener("change", () => chooseFile($("file").files[0]));
@@ -491,7 +502,8 @@ if (typeof document !== "undefined") {
       if (context.isPointInPath(path, x, y)) { const owner = owners.get(JSON.stringify(detection.source_id)); if (owner) chooseUnit(owner.unit.id, true); break; }
     }
   });
-  for (const id of ["mode", "budget", "translation-policy", "replacement-policy", "quality-reread", "layout-policy", "source-localization", "visibility-policy", "removal-policy", "reconstruction-policy"]) $(id).addEventListener("input", settingsSummary);
+  for (const id of ["budget", "quality-reread", "reconstruction-policy"]) $(id).addEventListener("input", settingsSummary);
+  for (const input of [...radios("mode"), ...radios("style")]) input.addEventListener("change", settingsSummary);
   for (const eventName of ["dragenter", "dragover"]) document.addEventListener(eventName, event => {
     if (event.dataTransfer?.types.includes("Files")) { event.preventDefault(); if (!busy) document.body.classList.add("dragging"); }
   });
@@ -504,10 +516,11 @@ if (typeof document !== "undefined") {
   request("/api/config").then(async value => {
     config = value;
     $("reconstruction-policy").value = config.reconstruction_available ? "lama" : "classical";
-    $("visibility-policy").value = "always-show";
+    $("reconstruction-policy").querySelector('[value="lama"]').disabled = !config.reconstruction_available;
+    $("reconstruction-availability").textContent = config.reconstruction_available ? "LaMa fills removed text in Replace all text mode." : "LaMa not configured (start with --reconstruction-config). Classical fill is used.";
     $("configuration").textContent = `${config.device} · ${config.model} · Ollama: ${config.endpoint || "configured local service"} · OCR: ${config.model_root}${config.fonts ? " · Fonts: " + config.fonts : " · No --fonts: rendering disabled"}`;
-    $("reread-availability").textContent = config.quality_reread_available ? `Local Manga OCR rereads isolated low-confidence text during rendering. This option also sends crop presentations to ${config.reread_model} for paired visual rereads.` : "Not configured: start with --manga-reread-model and an existing snapshot. Artwork checks work without rereads.";
-    $("mode").querySelector('[value="render"]').disabled = !config.render_enabled; $("mode").value = config.render_enabled ? "render" : "ocr"; settingsSummary(); setBusy(false);
+    $("reread-availability").textContent = config.quality_reread_available ? `Rereads low-confidence text with local Manga OCR and ${config.reread_model}.` : "Not configured (start with --manga-reread-model).";
+    setChoice("mode", config.render_enabled ? "render" : "translate"); settingsSummary(); setBusy(false);
     const jobs = await request("/api/jobs");
     for (const job of jobs) { const choice = node("option", `Run ${job.id.slice(0, 8)} · ${friendly(job.status)}`); choice.value = job.id; $("jobs").append(choice); }
     if (jobs.length && !pendingFile) { const requested = new URL(window.location.href).searchParams.get("job"); const last = jobs.find(job => job.id === requested) || jobs[jobs.length - 1]; $("jobs").value = last.id; selectJob(last.id); }

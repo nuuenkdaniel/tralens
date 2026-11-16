@@ -22,20 +22,28 @@ stage pauses automatic following so it stays selected while processing continues
 Translation is a text-only phase: the source page highlights available previews,
 with the English text alongside it; only Final shows actual replaced lettering.
 Stages without output explain why instead of showing a fake or unchanged final.
-Run settings, masks and raw artifacts are tucked into expandable sections.
+Advanced settings, masks and raw artifacts are tucked into expandable sections.
 
-New uploads default to **Coverage first** translation and a **64-call** budget.
-Readable OCR regions are attempted despite uncertain ownership/crop/orientation;
-their translations and replacements are explicitly marked uncertain/best-effort.
-Older saved runs retain their previous settings: select Coverage first and raise
-the budget before retrying. See [translation coverage](docs/translation-coverage.md)
-for retained integrity checks and the separate conservative options.
+The run card has just two choices:
 
-**Quality checks are available in the viewer, not just the CLI.** In Run settings,
-Artwork protection → **Native cleanup + OCR checks** disables coarse footprint
-erasure and defers unsupported edits instead of smearing artwork. Translations
-remain available even when source lettering is preserved. Broad replacement is
-still the unchanged default; it is not a quality guarantee.
+- **Output**: Translated page (default), Text only, or Detect text.
+- **Replacement**: **Replace all text** (default) or **Protect artwork**.
+
+**Replace all text** is the pipeline's own default profile: broad replacement,
+aggressive local removal, and *always show available translations*. Where clean
+removal fails, the English is drawn on an opaque patch or a nearby caption, so
+artwork behind text may be smeared or covered—a translated page with some
+background loss is preferred over untranslated text. **Protect artwork** uses
+native cleanup + OCR checks and preserves uncertain artwork; translations it
+cannot place safely stay in the side list only.
+
+Every run uses Coverage first translation and Best effort rendering. Advanced
+holds the call budget (default 64), LaMa background reconstruction (when started
+with `--reconstruction-config`) and paired OCR rereads (when configured). Retries
+send the full current settings, so experimental options from older saved runs
+(enclosure retry, crop localization, fragment previews) are not carried over;
+those remain available from the CLI. See [translation coverage](docs/translation-coverage.md)
+and [always show available translations](docs/visible-translations-experiment.md).
 
 For the optional paired OCR rereads, start the viewer with existing local assets:
 
@@ -44,16 +52,17 @@ For the optional paired OCR rereads, start the viewer with existing local assets
   --fonts PATH/fonts.json --manga-reread-model PATH/existing-manga-ocr-snapshot
 ```
 
-This enables the **Paired OCR quality rereads** checkbox, not automatic inference.
+This enables the **Paired OCR rereads** checkbox under Advanced, not automatic inference.
 It uses the installed `qwen3.8:latest` vision tag (override with `--reread-model`)
 on the configured private Ollama endpoint, plus the supplied local Manga OCR
 snapshot. Only explicit rendering runs send crop presentations; nothing is
 downloaded. The route requires Coverage first translation and remains experimental:
 reader agreement does not prove correct source text.
 
-Saved broad-replacement outputs show a warning and **Retry with quality checks**
-(or artwork protection alone if readers are not configured). This makes a fresh
-job, retains earlier results and labels the policy actually used by each output.
+Saved outputs that left translations off the page (Protect artwork, or older
+broad-replacement runs without the visible-translation fallback) show a notice
+and **Retry and replace all text**. This makes a fresh job, retains earlier
+results and labels the policy actually used by each output.
 Reread-selected sources are shown alongside their retained original OCR. A link
 with `?job=JOB_ID` opens that exact saved job rather than another recent output.
 See [quality iteration evidence and limitations](docs/ocr-rendering-quality-iterations.md).

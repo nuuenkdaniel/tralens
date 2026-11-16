@@ -613,14 +613,13 @@ const finished = {...pending, status: 'partial', stage: 'finished', preview_stag
 assert.equal(outputReady(finished, 'final'), true);
 assert.equal(progressView(finished), 'final');
 assert.equal(previewStates(finished).final.label, '1 replacement');
-assert.match(qualityNotice(finished, true).copy, /broad replacement/);
-assert.equal(qualityNotice(finished, true).action, 'Retry with quality checks');
-assert.equal(qualityNotice(finished, false).action, 'Retry with artwork protection');
+assert.match(qualityNotice(finished).copy, /broad replacement/);
+assert.equal(qualityNotice(finished).action, 'Retry and replace all text');
 const protectedRun = {...finished, replacement_policy: 'confidence-gated', quality_reread: {enabled: true},
   replacement_confidence: {actual_replacements: 1, bound_translations_without_replacement: 1}};
 assert.match(qualityNotice(protectedRun).copy, /paired rereads/);
 assert.match(qualityNotice(protectedRun).copy, /1 translations kept without repainting/);
-assert.equal(qualityNotice(protectedRun).action, null);
+assert.equal(qualityNotice(protectedRun).action, 'Retry and replace all text');
 assert.equal(qualityNotice(base), null);
 assert.equal(localizationNotice(base), '');
 assert.match(localizationNotice({...base, source_localization: {enabled: true}}), /pending calls/);
@@ -650,6 +649,32 @@ assert.equal(previewStates(startupFailed).translation.state, 'skipped');
 '''
         result = subprocess.run([node, '-e', script, str(s.STATIC/'app.js')], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_viewer_presets_are_accepted_by_server_validation(self):
+        node = shutil.which('node')
+        if node is None:
+            self.skipTest('optional Node.js unavailable')
+        script = r'''
+const {runOptions, styleOf} = require(process.argv[1]);
+const out = [];
+for (const mode of ['render', 'translate', 'ocr'])
+  for (const style of ['replace-all', 'protect'])
+    for (const reread of [false, true])
+      for (const lama of [false, true]) out.push(runOptions({mode, style, budget: 64, reread: reread && mode === 'render', lama}));
+out.push({styles: [styleOf({visibility_policy: 'always-show'}), styleOf({replacement_policy: 'confidence-gated', visibility_policy: 'replacement-only'}), styleOf({replacement_policy: 'all'})]});
+console.log(JSON.stringify(out));
+'''
+        result = subprocess.run([node, '-e', script, str(s.STATIC/'app.js')], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        *presets, styles = json.loads(result.stdout)
+        self.assertEqual(styles['styles'], ['replace-all', 'protect', 'replace-all'])
+        for preset in presets:
+            self.assertEqual(s.options(preset, render_enabled=True), preset)
+        replace_all = next(p for p in presets if p['mode'] == 'render' and p['visibility_policy'] == 'always-show')
+        # "Replace all text" is the pipeline's own visible-translation default.
+        self.assertEqual({k: replace_all[k] for k in ('replacement_policy', 'removal_policy', 'translation_policy', 'render_policy')},
+                         {'replacement_policy': 'all', 'removal_policy': 'aggressive',
+                          'translation_policy': 'coverage-first', 'render_policy': 'best-effort'})
 
 
 if __name__ == '__main__':

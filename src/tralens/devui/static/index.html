@@ -9,55 +9,59 @@
 </head>
 <body>
   <header class="app-header">
-    <div class="brand"><span class="brand-mark" aria-hidden="true">t</span><div><h1>Tralens</h1><span>pipeline viewer</span></div></div>
-    <span class="local-badge"><span aria-hidden="true">●</span> Local workspace</span>
+    <div class="brand"><span class="brand-mark" aria-hidden="true">文</span><div><h1>Tralens</h1><span>pipeline viewer</span></div></div>
+    <div class="header-tools">
+      <label class="history-label"><span class="visually-hidden">Recent runs</span><select id="jobs" aria-label="Recent runs"><option value="">No runs yet</option></select></label>
+      <span class="local-badge" title="OCR, translation and rendering run on your own machine"><span aria-hidden="true"></span>Local</span>
+    </div>
   </header>
   <main>
-    <section class="intro"><div><p class="eyebrow">FROM PAGE TO TRANSLATION</p><h2>See every step.</h2><p>Choose a page, run the pipeline, and click through the results.</p></div>
-      <label class="history-label">Recent runs<select id="jobs"><option value="">No runs yet</option></select></label>
-    </section>
     <form id="run-form" class="run-card">
       <div class="upload-row">
-        <label class="file-button" for="file">＋ Choose image<input id="file" class="visually-hidden" type="file" accept="image/png,image/jpeg"></label>
-        <div class="file-info"><strong id="filename">No image selected</strong><span id="file-info">PNG or JPEG · up to 32 MiB / 4M pixels</span></div>
-        <button id="run" class="primary-button" disabled>Run pipeline <span aria-hidden="true">→</span></button>
-        <button id="cancel" type="button" hidden>Cancel run</button>
+        <label class="file-button" for="file"><span aria-hidden="true">＋</span> Choose image<input id="file" class="visually-hidden" type="file" accept="image/png,image/jpeg"></label>
+        <div class="file-info"><strong id="filename">No image selected</strong><span id="file-info">PNG or JPEG · up to 32 MiB / 4M pixels · or drop it anywhere</span></div>
+        <button id="cancel" class="secondary-button" type="button" hidden>Cancel run</button>
+        <button id="run" class="primary-button" disabled>Run pipeline →</button>
+      </div>
+      <div class="choices">
+        <fieldset class="segmented" id="mode-group">
+          <legend>Output</legend>
+          <label><input type="radio" name="mode" value="render" checked><span>Translated page</span></label>
+          <label><input type="radio" name="mode" value="translate"><span>Text only</span></label>
+          <label><input type="radio" name="mode" value="ocr"><span>Detect text</span></label>
+        </fieldset>
+        <fieldset class="segmented" id="style-group">
+          <legend>Replacement</legend>
+          <label title="Every available translation is drawn on the page. Artwork behind text may be smeared or covered by a patch."><input type="radio" name="style" value="replace-all" checked><span>Replace all text</span></label>
+          <label title="Only regions that can be cleaned safely are replaced. Other translations stay in the side list."><input type="radio" name="style" value="protect"><span>Protect artwork</span></label>
+        </fieldset>
+        <p id="style-help" class="choice-help"></p>
       </div>
       <details id="settings" class="run-settings">
-        <summary>Run settings <span id="settings-summary">Loading local settings…</span></summary>
+        <summary>Advanced <span id="settings-summary">Loading local settings…</span></summary>
         <div class="settings-grid">
-          <label>Run through<select id="mode"><option value="ocr">OCR only</option><option value="translate">Translation</option><option value="render">Final rendering</option></select></label>
-          <label>Translation call budget<input id="budget" type="number" min="0" max="64" value="64" required><small>Up to 64. Failed calls count too. A small budget leaves text unattempted.</small></label>
-          <label>Translation coverage<select id="translation-policy"><option value="coverage-first">Coverage first</option><option value="conservative">Conservative</option></select><small>Coverage first also attempts OCR text with uncertain ownership, crop isolation or orientation.</small></label>
-          <label>Rendering policy<select id="policy"><option value="best-effort">Best effort</option><option value="conservative">Conservative</option></select></label>
-          <label>Source removal<select id="removal-policy"><option value="aggressive">Aggressive local removal</option><option value="preserve">Preserve uncertain artwork</option><option value="legacy">Legacy replacement behavior</option></select><small>Independent of final visibility. Aggressive cuts may remove local artwork.</small></label>
-          <label>Reconstruction<select id="reconstruction-policy"><option value="classical">Classical only (no learned model)</option><option value="lama">Local LaMa · private evaluation</option></select><small>LaMa requires an operator-configured approved local runtime.</small></label>
-          <label>Translation visibility<select id="visibility-policy"><option value="replacement-only">Existing replacement choices only</option><option value="always-show">Always show available translations</option></select><small>Prioritizes visible translations; fallback patches may cover artwork.</small></label>
-          <label>Artwork protection<select id="replacement-policy"><option value="all">Broad replacement (may smear artwork)</option><option value="confidence-gated">Native cleanup + OCR checks (experimental)</option></select><small>Checks preserve unsupported regions, while keeping their translations available.</small></label>
-          <div><label class="checkbox-label"><input id="quality-reread" type="checkbox"> Paired OCR quality rereads (experimental)</label><small id="reread-availability">Requires existing local readers. Agreement is not proof of correct text.</small></div>
-          <label>Enclosure layout (experimental)<select id="layout-policy"><option value="source-local">Source-local layout</option><option value="enclosed-retry">Retry failed lettering in supported enclosure space</option></select><small>Requires Best effort + Native cleanup checks. Does not expand erasure or reletter successful dialogue.</small></label>
-          <div><label class="checkbox-label"><input id="source-localization" type="checkbox"> Demand-driven crop localization (experimental)</label><small>Requires Best effort + Native cleanup checks. Uses the existing OCR reader only after unresolved native cleanup; not source correction or verified artwork ownership.</small></div>
-          <label class="checkbox-label"><input id="fragments" type="checkbox"> Include review-only fragment previews</label>
+          <label>Translation call budget<input id="budget" type="number" min="0" max="64" value="64" required><small>Up to 64 model calls per run. Failed calls count too.</small></label>
+          <label>Background reconstruction<select id="reconstruction-policy"><option value="classical">Classical</option><option value="lama">LaMa (local model)</option></select><small id="reconstruction-availability">Used where text is removed in Replace all text mode.</small></label>
+          <div><label class="checkbox-label"><input id="quality-reread" type="checkbox"> Paired OCR rereads</label><small id="reread-availability">Requires existing local readers.</small></div>
         </div>
         <p id="configuration" class="note">Loading local settings…</p>
-        <p class="note">Run uses your local OCR / model, with no downloads. Fragments cannot be rendered. Best-effort edits may damage artwork.</p>
       </details>
     </form>
     <p id="error" class="error-banner" role="alert" hidden></p>
     <div class="run-status"><span id="status-dot" class="status-dot"></span><p id="status" aria-live="polite">Ready when you are.</p><p id="summary"></p></div>
-    <aside id="quality-notice" class="quality-notice" hidden><p id="quality-copy"></p><button id="quality-retry" class="secondary-button" type="button">Retry with quality checks</button></aside>
+    <aside id="quality-notice" class="quality-notice" hidden><p id="quality-copy"></p><button id="quality-retry" class="secondary-button" type="button">Retry and replace all text</button></aside>
     <section id="empty-state" class="empty-state">
-      <span class="page-symbol" aria-hidden="true">文 <span>→ A</span></span>
-      <h2>Your page, step by step.</h2><p>Drop an image here, or choose one above.<br>Start with the original and follow each stage as it finishes.</p>
+      <span class="page-symbol" aria-hidden="true">文 <span>→</span> A</span>
+      <h2>Drop a page to translate it</h2><p>Choose a PNG or JPEG above, or drag one onto this window.<br>Each stage appears as soon as the pipeline publishes it.</p>
       <p class="note">Original → Detected text → Translation → Cleaned page → Final</p>
     </section>
     <section id="results" hidden>
       <nav id="stages" class="stage-strip" aria-label="Pipeline stage previews">
-        <button type="button" data-stage="original" aria-pressed="true"><div class="stage-thumb"><canvas id="thumb-original" aria-hidden="true"></canvas><span class="stage-number">01</span></div><span class="stage-label">Original</span><span class="stage-status">Ready</span></button>
-        <button type="button" data-stage="ocr" aria-pressed="false"><div class="stage-thumb"><canvas id="thumb-ocr" aria-hidden="true"></canvas><span class="stage-number">02</span></div><span class="stage-label">Detected text</span><span class="stage-status">Waiting</span></button>
-        <button type="button" data-stage="translation" aria-pressed="false"><div class="stage-thumb"><canvas id="thumb-translation" aria-hidden="true"></canvas><span class="stage-number">03</span></div><span class="stage-label">Translation</span><span class="stage-status">Waiting</span></button>
-        <button type="button" data-stage="clean" aria-pressed="false"><div class="stage-thumb"><canvas id="thumb-clean" aria-hidden="true"></canvas><span class="stage-number">04</span></div><span class="stage-label">Cleaned page</span><span class="stage-status">Waiting</span></button>
-        <button type="button" data-stage="final" aria-pressed="false"><div class="stage-thumb"><canvas id="thumb-final" aria-hidden="true"></canvas><span class="stage-number">05</span></div><span class="stage-label">Final</span><span class="stage-status">Waiting</span></button>
+        <button type="button" data-stage="original" aria-pressed="true"><div class="stage-thumb"><canvas id="thumb-original" aria-hidden="true"></canvas><span class="stage-number">1</span></div><span class="stage-label">Original</span><span class="stage-status">Ready</span></button>
+        <button type="button" data-stage="ocr" aria-pressed="false"><div class="stage-thumb"><canvas id="thumb-ocr" aria-hidden="true"></canvas><span class="stage-number">2</span></div><span class="stage-label">Detected text</span><span class="stage-status">Waiting</span></button>
+        <button type="button" data-stage="translation" aria-pressed="false"><div class="stage-thumb"><canvas id="thumb-translation" aria-hidden="true"></canvas><span class="stage-number">3</span></div><span class="stage-label">Translation</span><span class="stage-status">Waiting</span></button>
+        <button type="button" data-stage="clean" aria-pressed="false"><div class="stage-thumb"><canvas id="thumb-clean" aria-hidden="true"></canvas><span class="stage-number">4</span></div><span class="stage-label">Cleaned page</span><span class="stage-status">Waiting</span></button>
+        <button type="button" data-stage="final" aria-pressed="false"><div class="stage-thumb"><canvas id="thumb-final" aria-hidden="true"></canvas><span class="stage-number">5</span></div><span class="stage-label">Final</span><span class="stage-status">Waiting</span></button>
       </nav>
       <div class="view-heading"><div><h2 id="view-title">Original page</h2><p id="view-description"></p></div><label class="checkbox-label follow-control"><input id="follow" type="checkbox" checked> Follow progress</label></div>
       <div class="workspace columns">
@@ -86,7 +90,7 @@
       </div>
       <p id="render-note" class="result-note"></p>
       <details class="technical-details"><summary>Technical details &amp; artifacts</summary><p id="notices" class="note"></p><h3>Rendering layers</h3><div id="layers" class="layers"></div><h3>Masks</h3><div id="masks" class="layers"></div><details><summary>Raw OCR text</summary><pre id="ocr-text"></pre></details><ul id="artifacts"></ul><p id="output-directory" class="note"></p></details>
-      <p class="footer-note">Originals stay untouched. Results are unapproved candidates, not verified full-page translations.</p>
+      <p class="footer-note">Originals stay untouched. Results are unreviewed machine translations.</p>
     </section>
   </main>
 </body>
