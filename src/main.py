@@ -19,6 +19,246 @@ def serialized(function):
     return run
 
 
+def run_language_review(*,preview,image,output,run_local_model=False,
+                        endpoint='http://100.121.133.88:11434',review_model='qwen3.8:latest',
+                        model='translategemma:27b',max_reviews=4,max_reader_calls=8,max_translation_calls=8,
+                        proposal_runtime=None,translation_runtime=None,reader_factory=None,idle_check=lambda:None):
+    """First language-quality step: independent queue and source candidates.
+
+    No grouping/English-review selection or renderer changes. Old primary input,
+    translation and successful page layers remain authoritative and untouched.
+    Only changed corroborated sources receive new candidate translation requests.
+    """
+    import json
+    from dataclasses import asdict
+    from io import BytesIO
+    from PIL import Image
+    from tralens import language_review as lr
+    from tralens.ocr import source_review as sr
+    from tralens.translation import source_recovery as recover
+    from tralens.translation.contracts import automatic_units,canonical,revision
+    from tralens.translation.workflow import _atomic_json
+    from tralens.translation.runtime import OllamaRuntime,PreviewTranslator,TRANSLATEGEMMA,GenerationOptions,local_endpoint
+    lr.require(type(run_local_model) is bool and model == 'translategemma:27b',
+        'source review retains TG27 primary; explicit boolean inference opt-in required')
+    lr.require(review_model == 'qwen3.8:latest','use the explicitly configured existing visual reviewer')
+    lr.require(all(type(v) is int and 0 <= v <= 8 for v in (max_reader_calls,max_translation_calls)),
+        'independent reader/translation budgets must be 0..8')
+    endpoint = local_endpoint(endpoint)
+    output = Path(output).absolute();paths = (Path(preview).absolute(),Path(image).absolute())
+    lr.require(not output.exists() and output.parent.is_dir() and not any(p.is_symlink() for p in (output,*output.parents)),
+        'language review output must be fresh without symlinks')
+    lr.require(all(p.stat().st_size <= 32*1024*1024 for p in paths),'source review input byte budget')
+    contents = [p.read_bytes() for p in paths];doc = json.loads(contents[0])
+    lr.require(hashlib.sha256(contents[1]).hexdigest() == doc['input']['sha256'],'source review original file binding')
+    with Image.open(BytesIO(contents[1])) as original:
+        lr.require(getattr(original,'n_frames',1) == 1,'one original frame required');rgb = original.convert('RGB')
+    plan = lr.plan(doc,rgb,max_requests=max_reviews)
+    units = automatic_units(doc['ocr']['batches'][0],(doc['ocr'].get('automatic_recognition_results') or [()])[0])
+    by_id = {u.unit_id:u for u in units};rows = {r['unit_id']:r for r in plan['records']}
+    state = {'policy':'language_review_foundation_v1','experimental':True,'source':doc['input'],
+        'preview_revision':revision(doc),'plan':plan,'source_reviews':[], 'candidate_translations':[],
+        'counts':{'requested':len(plan['requests']),'attempted':0,'failed':0,'corroborating_reader_calls':0,
+            'reader_failures':0,'translation_failures':0,'corroborated_candidates':0,
+            'unchanged_corroborations':0,'uncertain':0,'translation_calls':0},
+        'primary_records':doc['units'],'primary_preview_revision':revision(doc),
+        'selection_policy':'retain primary; candidates only, never fluency-based automatic promotion',
+        'grouping_stage':'not implemented in this foundation','english_review_stage':'not implemented in this foundation',
+        'limits':{'source_calls':max_reviews,'reader_calls':max_reader_calls,'candidate_translation_calls':max_translation_calls},
+        'status':'running','artifacts':{}}
+    output.mkdir(mode=0o700)
+    def persist():_atomic_json(output/'review.json',state,replace_owned=True)
+    def retain(name,data):
+        lr.require(Path(name).name == name and len(data) <= 32*1024*1024
+            and sum(v['bytes'] for v in state['artifacts'].values())+len(data) <= 96*1024*1024,
+            'source review artifact byte/path budget')
+        with (output/name).open('xb') as f:f.write(data)
+        state['artifacts'][name] = {'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
+    def assert_input():
+        lr.require(all(p.read_bytes() == data for p,data in zip(paths,contents)),'language-review inputs changed')
+    retain('primary-preview.json',contents[0]);retain('original-file.bin',contents[1]);persist()
+    if not run_local_model:
+        state['status'] = 'planned_no_inference';persist();return state
+    provider = proposal_runtime if proposal_runtime is not None else OllamaRuntime(endpoint)
+    pending = [];reader = close_reader = None
+    try:
+        for index,uid in enumerate(plan['requests']):
+            idle_check();assert_input()
+            request,native,view,overlay = sr.prepare(doc,plan,uid,rgb)
+            prefix = f'review-{index:03d}'
+            for suffix,raster in (('original',native),('presentation',view),('localization-overlay',overlay)):
+                retain(prefix+'-'+suffix+'.png',sr.png(raster))
+            retain(prefix+'-request.json',canonical(request).encode())
+            item = {'unit_id':uid,'request_revision':request['revision'],'binding':request['binding'], 'phase':'visual_source',
+                'status':'attempted','model':review_model,'source_verified':False,'primary_retained':True}
+            state['source_reviews'].append(item);state['counts']['attempted'] += 1;persist()
+            try:
+                started = time.monotonic()
+                response = provider.generate(model=review_model,payload=request['payload'],timeout=120)
+                item['seconds'] = time.monotonic()-started
+                text = response.text if hasattr(response,'text') else response
+                raw = response.response_json if hasattr(response,'response_json') else text
+                retain(prefix+'-response.txt',raw.encode())
+                lr.require(type(text) is str and len(text) <= 32768,'source proposal output byte budget')
+                candidate = sr.parse(request,text,rgb);item['candidate'] = candidate
+                if candidate['clear'] and sr.normalized(candidate['text']) == sr.normalized(rows[uid]['source_text']):
+                    item['status'] = 'unchanged_visual_corroboration'
+                    state['counts']['unchanged_corroborations'] += 1
+                    item['translation_reused'] = rows[uid]['primary'] is not None
+                elif not candidate['clear']:
+                    item['status'] = 'uncertain_candidate_retained';state['counts']['uncertain'] += 1
+                elif reader_factory is None:
+                    item['status'] = 'changed_candidate_without_independent_reader'
+                elif state['counts']['corroborating_reader_calls'] >= max_reader_calls:
+                    item['status'] = 'independent_reader_budget_excluded'
+                else:
+                    item['phase'] = 'independent_reader'
+                    if reader is None:reader,close_reader = reader_factory()
+                    def counted(crop):
+                        idle_check();assert_input()
+                        state['counts']['corroborating_reader_calls'] += 1;persist()
+                        return reader(crop)
+                    supported,evidence = sr.corroborate(candidate,rgb,counted,
+                        maximum_calls=max_reader_calls-state['counts']['corroborating_reader_calls'])
+                    item['corroboration'] = evidence
+                    state['counts']['reader_failures'] += sum('error' in e for e in evidence)
+                    if supported:
+                        item['status'] = 'corroborated_changed_candidate_not_selected'
+                        state['counts']['corroborated_candidates'] += 1
+                        request = recover.request_for(by_id[uid],rows[uid],candidate,evidence,preview=doc,plan=plan,rgb=rgb)
+                        pending.append((item,request))
+                    else:item['status'] = 'reader_disagreement_or_budget_candidate_retained'
+            except Exception as error:
+                item.update(status='failed_primary_retained',error=type(error).__name__+': '+str(error)[:1024])
+                raw = getattr(error,'response_json',None)
+                if isinstance(raw,str):retain(prefix+'-failed-response.txt',raw.encode())
+                state['counts']['failed'] += 1
+            persist()
+    finally:
+        if close_reader is not None:
+            try:close_reader()
+            except Exception as error:state['reader_release_error'] = str(error)[:512]
+        if proposal_runtime is None and state['counts']['attempted']:
+            try:
+                idle_check();state['reviewer_release'] = provider.unload(model=review_model,timeout=30)
+            except Exception as error:state['reviewer_release_error'] = str(error)[:512]
+            persist()
+    provider = translation_runtime if translation_runtime is not None else OllamaRuntime(endpoint)
+    translator = PreviewTranslator(provider,model=model,profile=TRANSLATEGEMMA,max_attempts=1,timeout=120,
+        generation_options=GenerationOptions(num_ctx=4096,num_predict=1024,keep_alive=60))
+    try:
+        for i,(item,request) in enumerate(pending):
+            if state['counts']['translation_calls'] >= max_translation_calls:
+                item['translation_status'] = 'candidate_translation_budget_excluded';continue
+            idle_check();assert_input();state['counts']['translation_calls'] += 1;persist()
+            events = []
+            result = translator.translate(request,observe=lambda event:events.append(event));result.assert_current(request)
+            record = {'parent_unit_id':item['unit_id'],'request':asdict(request),'request_revision':request.revision,
+                'result':asdict(result),'events':events,'selected':False,'primary_retained':True}
+            state['candidate_translations'].append(record);item['translation_status'] = result.status;persist()
+            state['counts']['translation_failures'] += result.status == 'failed'
+    finally:
+        if translation_runtime is None and state['counts']['translation_calls']:
+            try:
+                idle_check();state['translator_release'] = provider.unload(model=model,timeout=30)
+            except Exception as error:state['translator_release_error'] = str(error)[:512]
+    assert_input()
+    lr.require(state['primary_records'] == doc['units'],'optional source recovery mutated primary results')
+    state['status'] = 'complete_candidates_only';persist();return state
+
+
+def run_balloon_experiment(*, preview, image, fonts, baseline, output, run_local_model=False,
+                          endpoint='http://100.121.133.88:11434', proposal_model='qwen3.8:latest',
+                          model='translategemma:27b', replay=None, proposal_runtime=None,
+                          translation_runtime=None, visibility_policy='always-show'):
+    """Coordinate saved-evidence balloon experiment; never rerun page OCR.
+
+    Explicitly separate from default pipeline behavior while its support boundary
+    is evaluated. Replay consumes immutable bound proposals/derived translations,
+    not arbitrary masks or manual region confirmations.
+    """
+    import json
+    from tralens.ocr import balloon_dialogue as bd
+    from tralens.translation import balloon_dialogue as td
+    from tralens.translation.runtime import OllamaRuntime, PreviewTranslator, TRANSLATEGEMMA, GenerationOptions, local_endpoint
+    from tralens.translation.workflow import _atomic_json
+    from tralens.rendering import balloon_pass
+    if type(run_local_model) is not bool or (replay is not None and run_local_model):
+        raise ValueError('choose bounded model inference or saved replay, never both')
+    output = Path(output).absolute()
+    if output.exists() or not output.parent.is_dir() or any(p.is_symlink() for p in (output,*output.parents)):
+        raise ValueError('balloon experiment needs fresh output without symlinks')
+    endpoint = local_endpoint(endpoint)
+    loaded = balloon_pass.load(preview=preview,image=image,fonts=fonts,baseline=baseline)
+    candidates,rejections = bd.candidates(loaded['context'],loaded['units'],loaded['native']['units'])
+    state = {'experimental':True,'source':loaded['source'],'preview_sha256':hashlib.sha256(loaded['contents'][0]).hexdigest(),
+        'baseline_manifest_sha256':loaded['baseline_manifest_sha256'],
+        'candidates':[c['evidence'] for c in candidates], 'geometry_rejections':rejections,
+        'proposal_calls':0,'translation_calls':0,'proposals':[],'translations':[],
+        'maximum_proposal_calls':4,'maximum_translation_calls':4,'page_ocr_calls':0,
+        'grouping_verified':False,'speaker':'unknown','status':'running'}
+    output.mkdir(mode=0o700)
+    def persist():
+        _atomic_json(output/'experiment.json',state,replace_owned=True)
+    persist()
+    started = time.monotonic()
+    try:
+        if replay is not None:
+            prior = json.loads(Path(replay).read_bytes())
+            if any(prior[k] != state[k] for k in ('source','preview_sha256','candidates')):
+                raise ValueError('balloon replay source/unit/candidate drift')
+            state.update(proposals=prior['proposals'],translations=prior['translations'],
+                replay_sha256=hashlib.sha256(Path(replay).read_bytes()).hexdigest())
+        elif run_local_model:
+            provider = proposal_runtime if proposal_runtime is not None else OllamaRuntime(endpoint)
+            try:
+                for candidate in candidates:
+                    state['proposal_calls'] += 1;persist()
+                    state['proposals'].append(bd.propose(candidate,loaded['rgb'],provider,proposal_model));persist()
+            finally:
+                if proposal_runtime is None and state['proposal_calls']:
+                    state['proposal_release'] = provider.unload(model=proposal_model,timeout=30)
+            requests = []
+            for candidate,proposal in zip(candidates,state['proposals']):
+                if proposal['status'] != 'proposed' or proposal['proposal']['surface'] != 'plain_dialogue':
+                    continue
+                for group in proposal['proposal']['groups']:
+                    if len(group['order']) < 2:
+                        continue
+                    try:
+                        request,evidence = td.derive(candidate,proposal,group,loaded['units'],loaded['doc']['ocr']['batches'][0])
+                        requests.append(request)
+                    except ValueError as error:
+                        state.setdefault('derivation_rejections',[]).append(str(error))
+            provider = translation_runtime if translation_runtime is not None else OllamaRuntime(endpoint)
+            from dataclasses import asdict
+            state['derived_translation_requests'] = [asdict(request) for request in requests]
+            state['translation_budget_excluded'] = max(0,len(requests)-4)
+            persist()
+            translator = PreviewTranslator(provider,model=model,profile=TRANSLATEGEMMA,max_attempts=1,timeout=120,
+                generation_options=GenerationOptions(num_ctx=4096,num_predict=1024,keep_alive=60))
+            try:
+                for request in requests[:4]:
+                    state['translation_calls'] += 1;persist()
+                    state['translations'].append(td.execute(request,translator));persist()
+            finally:
+                if translation_runtime is None and state['translation_calls']:
+                    state['translation_release'] = provider.unload(model=model,timeout=30)
+        rendered = balloon_pass.run(loaded,candidates,state['proposals'],state['translations'],
+            output=output/'rendering',visibility_policy=visibility_policy)
+        state.update(status='complete_experiment_not_verified', rendering='rendering/manifest.json',
+            new_clean_dialogues=rendered['new_clean_dialogues'],
+            native_preserved=rendered['native_preserved'],native_atomically_superseded=rendered['native_atomically_superseded'],
+            display_summary=rendered['display_summary'])
+    except Exception as error:
+        state.update(status='failed',error=type(error).__name__+': '+str(error)[:2000])
+        raise
+    finally:
+        state['seconds'] = time.monotonic()-started
+        persist()
+    return state
+
+
 def crop_localization_pass(preview, plan, *, image, output, device, model_root, ocr_factory=None):
     """Coordinate a fresh crop-only reader; never repeat page OCR or translation."""
     from tralens.ocr.source_localization import execute_requests

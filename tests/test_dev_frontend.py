@@ -32,8 +32,8 @@ class ViewerTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.config = s.Config(root=self.root/'jobs', model_root=self.root/'models')
 
-    def serve(self, app):
-        http = s.create_server(app, 0)
+    def serve(self, app, *, host='127.0.0.1'):
+        http = s.create_server(app, 0, host=host)
         worker = threading.Thread(target=http.serve_forever, daemon=True)
         worker.start()
         def stop():
@@ -67,6 +67,44 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(json.loads(data)['endpoint'], self.config.endpoint)
         self.assertEqual(app.jobs, {})
         runner.assert_not_called()
+
+    def test_wildcard_binding_accepts_destination_interface_and_keeps_request_guards(self):
+        app = s.App(self.config, runner=Mock(return_value=dict(status='complete')))
+        httpd = self.serve(app, host='0.0.0.0')
+        self.assertEqual(httpd.server_address[0], '0.0.0.0')
+        origin = f'http://127.0.0.2:{httpd.server_port}'
+
+        def request(method, path, data=None, headers=None):
+            client = http.client.HTTPConnection('127.0.0.2', httpd.server_port, timeout=5)
+            try:
+                client.request(method, path, body=data, headers=headers or {})
+                response = client.getresponse()
+                return response.status, response.read()
+            finally:
+                client.close()
+
+        status, body = request('GET', '/api/config', headers={'Origin': origin})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)['token'], app.token)
+        for headers in ({'Host': 'attacker.test'},
+                        {'Host': f'100.100.100.100:{httpd.server_port}'},
+                        {'Origin': 'https://attacker.test'},
+                        {'Origin': f'http://127.0.0.3:{httpd.server_port}'},
+                        {'Sec-Fetch-Site': 'cross-site'}):
+            self.assertEqual(request('GET', '/api/config', headers=headers)[0], 403)
+        self.assertEqual(request('POST', '/api/jobs', image_bytes(), {'Origin': origin})[0], 403)
+        status, body = request('POST', '/api/jobs', image_bytes(),
+            {'Origin': origin, 'X-Tralens-Token': app.token})
+        self.assertEqual(status, 202, body)
+        self.assertTrue(app.job(json.loads(body)['id'])['done'].wait(5))
+
+    def test_default_binding_still_rejects_foreign_interface_host(self):
+        app = s.App(self.config, runner=Mock())
+        http = self.serve(app)
+        self.assertEqual(http.server_address[0], '127.0.0.1')
+        self.assertEqual(self.request(http, 'GET', '/api/config',
+            headers={'Host': f'127.0.0.2:{http.server_port}'})[0], 403)
+        app.runner.assert_not_called()
 
     def test_http_upload_executes_real_bound_pipeline_without_live_ocr_or_provider(self):
         from tests.test_pipeline import PipelineTests
@@ -540,6 +578,15 @@ main(['--help'])
             capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('--fonts', result.stdout)
+        self.assertIn('--host', result.stdout)
+
+    def test_frontend_forwards_explicit_bind_address_without_changing_default(self):
+        from tools.dev_frontend import main
+        for arguments, expected in (([], '127.0.0.1'), (['--host', '0.0.0.0'], '0.0.0.0')):
+            with patch.object(s, 'App'), patch.object(s, 'create_server') as create:
+                create.return_value.__enter__.return_value.serve_forever.side_effect = KeyboardInterrupt
+                main([*arguments, '--endpoint', 'http://127.0.0.1:11434'])
+            self.assertEqual(create.call_args.kwargs['host'], expected)
 
     def test_stage_view_states_never_invent_an_unpublished_page(self):
         node = shutil.which('node')

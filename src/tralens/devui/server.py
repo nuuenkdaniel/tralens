@@ -1,4 +1,4 @@
-"""Minimal loopback-only pipeline viewer, not a production upload service.
+"""Minimal loopback-by-default pipeline viewer, not a production upload service.
 
 Polls the real pipeline's atomic checkpoints; no duplicate stage algorithms and
 no simulated progress. Models are initialized only by an explicit uploaded run.
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
+import ipaddress
 import json
 import mimetypes
 import math
@@ -494,8 +495,13 @@ class Handler(BaseHTTPRequestHandler):
     def local_request(self):
         port = self.server.server_port
         hosts = {f'127.0.0.1:{port}', f'localhost:{port}'}
+        if self.server.server_address[0] != '127.0.0.1':
+            # Accept the actual destination interface, never arbitrary Host names
+            # or forwarded headers. Wildcard binding does not disable DNS-rebinding
+            # or browser origin checks.
+            hosts.add(f'{self.connection.getsockname()[0]}:{port}')
         if self.headers.get('Host') not in hosts:
-            raise RequestError('This viewer only accepts its loopback Host.', 403)
+            raise RequestError('This viewer only accepts a configured local-interface Host.', 403)
         origin = self.headers.get('Origin')
         if origin and origin not in {'http://'+host for host in hosts}:
             raise RequestError('Cross-origin requests are not allowed.', 403)
@@ -562,7 +568,8 @@ class Handler(BaseHTTPRequestHandler):
             self.json(500, dict(error='Could not start run: '+str(error)[:1000]))
 
 
-def create_server(app, port=7860):
-    server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+def create_server(app, port=7860, *, host='127.0.0.1'):
+    host = str(ipaddress.IPv4Address(host))
+    server = ThreadingHTTPServer((host, port), Handler)
     server.app = app
     return server

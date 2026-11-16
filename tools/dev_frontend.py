@@ -1,4 +1,4 @@
-"""Run the minimal, local-only pipeline development viewer. No new dependencies."""
+"""Run the loopback-by-default pipeline development viewer. No new dependencies."""
 import argparse
 import ipaddress
 import os
@@ -32,6 +32,8 @@ def configured_endpoint(explicit=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', default='127.0.0.1',
+                        help='IPv4 bind address; use 0.0.0.0 only on trusted networks (no user authentication)')
     parser.add_argument('--port', type=int, default=7860)
     parser.add_argument('--output-root', type=Path, default=ROOT/'test-results/dev-frontend')
     parser.add_argument('--model-root', type=Path, default=Path.home()/'.cache/tralens/paddle-v6-models',
@@ -51,6 +53,7 @@ def main(argv=None):
     if not 1 <= args.port <= 65535:
         parser.error('port must be 1–65535')
     try:
+        host = str(ipaddress.IPv4Address(args.host))
         endpoint = configured_endpoint(args.endpoint)
         if args.manga_reread_model is not None:
             from main import quality_refiner
@@ -65,8 +68,11 @@ def main(argv=None):
         manga_reread_model=args.manga_reread_model.expanduser().absolute() if args.manga_reread_model else None,
         reread_model=args.reread_model,reconstruction_config=args.reconstruction_config,
         text_mask_model=args.text_mask_model.expanduser().absolute() if args.text_mask_model else None,isolated_workers=True))
-    with create_server(app, args.port) as server:
-        print(f'Pipeline viewer: http://127.0.0.1:{args.port}', flush=True)
+    with create_server(app, args.port, host=host) as server:
+        print(f'Pipeline viewer: http://{host}:{args.port}', flush=True)
+        if host != '127.0.0.1':
+            print('Network access enabled: reachable clients can inspect artifacts and start runs. '
+                  'Use only trusted networks; this development viewer has no user authentication.', flush=True)
         print(f'Ollama endpoint: {endpoint}', flush=True)
         print(f'Job artifacts: {app.root}\nNo inference until you upload and click Run. Ctrl+C stops the server.', flush=True)
         try:
