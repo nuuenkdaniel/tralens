@@ -39,6 +39,47 @@ environment settings are restored when the reader closes.
   ordering, model identity, selection and original/view pixels are revalidated.
 - Rendering runs no OCR. Source cleanup remains independent of target placement.
 
+## Optional projective reader evidence
+
+Add `--reader-presentations` alongside `--crop-reader-model` to retain three
+source-bound projective readings of **every saved detector polygon**. The
+coordinator reuses its already-open Hayai reader and closes it before translation.
+The option defaults off. It adds no call quota: each tight, axial and contextual
+view is planned, including empty/rejected OCR records and artwork controls.
+Exact input-pixel deduplication keeps every source association. Non-quadrilateral,
+oversized and otherwise unavailable views have explicit failure records.
+
+`src/tralens/ocr/reader_presentations.py` stores the plan, unique PNG inputs, every
+response and final evidence under `preview/reader-presentations/`. Failed,
+overlength and empty responses remain available; one failed read does not cancel
+later views. Controlled interruption preserves the complete plan and completed
+responses. Existing candidates, selected readings and utterance revisions remain
+untouched. These extra readings are diagnostic and have no erase permission.
+
+The workflow snapshots this evidence into `preview.json` and replays source,
+geometry, pixel, association and artifact bindings before translation. The public
+`validate_saved` function supports the same checks without a reader. The saved
+preview travels through rendering as evidence; rendering dispatches no OCR.
+Transforms, interpolation and white off-page reader borders follow
+`reader_geometry.py`, rather than changing native source or cleanup geometry.
+
+The inspected projective trial in `source-removal-completion-results.md` explains
+why these additional readings remain unselected: corrected tilt recovers some
+text, but different readers also agree on omissions and wrong grouping. Nine
+additional offline tests cover prior-selection preservation, exact-pixel
+deduplication, empty/rejected/nonquad records, failures, interruption, tampering,
+coordinator lifetime, workflow rejection and option validation. The combined
+reader/geometry/grouping/workflow/pipeline check passes 88 tests.
+
+The completed two-page live integration adds 348 reader calls over 116 detector
+polygons, with no failed/unavailable views. All 68 selected-source/target cards and
+the full source/clean/composite pages were inspected. Of 67 translations, 59 are
+displayed and eight are marked unchanged; one further unit has no translation.
+Wrong selected meanings, false unchanged cases and source remnants persist. See
+the live-pipeline section of `source-removal-completion-results.md` for the runtime
+correction, bound evidence and explicit failures. The option is complete as an
+evidence collector; it does not claim improved selection or complete removal.
+
 ## Four-page evidence
 
 Ignored local evidence is retained under `test-results/production-best-effort-v8/`:

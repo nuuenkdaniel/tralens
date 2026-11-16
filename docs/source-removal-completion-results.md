@@ -636,8 +636,8 @@ quarter-turns, affine and perspective coordinate ramps, borders and tampering.
 These views use **linear interpolation**, not one-to-one native pixel samples.
 Off-page sampling has a declared constant-white reader border. Original pixels,
 detector membership, cleanup support and layout geometry remain separate; inverse
-coordinates confer no erase permission. This checkpoint adds the reusable module;
-coordinator/workflow integration is still pending.
+coordinates confer no erase permission. The geometry-only checkpoint added this
+module; the coordinator/workflow integration is completed in the section below.
 
 `coverage-rectified-01/` applies it to all 115 distinct fresh polygons, including
 artwork and clipped/mixed passages. Three contexts produce 345 Hayai calls in
@@ -691,3 +691,89 @@ The new geometry is useful reader infrastructure, with real recoveries and
 documented regressions. All experiment readings remain alternatives. Complete
 source extent, passage membership, correct selected translations and untouched
 end-to-end validation remain open; production V4 remains the rendering baseline.
+
+### Coordinator integration of reader-only evidence
+
+`--reader-presentations`, together with the existing `--crop-reader-model`, now
+connects the reusable projective views to `src/main.py` and the workflow snapshot.
+The existing Hayai reader supplies all three views of every saved detector
+polygon. Exact-pixel deduplication retains every association, including empty and
+rejected OCR controls; unsupported geometry stays in explicit unavailable-view
+records. Inputs, responses, failures and interrupted-trial evidence are retained
+under `preview/reader-presentations/`.
+
+`reader_presentations.validate_saved` replays the complete plan and source/view
+pixels, then verifies saved artifacts before translation. It performs no model
+inference. The coordinator closes the reader before translation, and rendering
+receives the saved evidence. The new readings remain unselected: adding this
+stage preserves existing candidates, source memberships and utterance revisions.
+The option defaults off. Nine new isolation, deduplication, failure, interruption,
+tampering and coordinator/workflow tests pass; the combined targeted check runs
+88 tests successfully.
+
+#### Live pipeline completion and inspected limitations
+
+`reader-presentations-pipeline-02/` exercises fresh Paddle OCR, the existing Hayai
+crop reader, the new reader presentations, TG27 translation, source localization
+and V4 rendering. The first attempt, `reader-presentations-pipeline-01/`, correctly
+rejected `.venv`'s PaddleOCR 3.4.0/PaddleX 3.4.2. The completed run uses
+`.venv-paddle6` with the validated PaddleOCR 3.7.0/PaddleX 3.7.2 runtime. Both
+attempts, their implementation snapshots and failure evidence remain available.
+
+| Development page | Saved units | Translations | Displayed replacements | Unchanged targets | Missing | Additional reader calls | End-to-end seconds |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ubunchu03_0006` | 26 | 26 | 24 | 2 | 0 | 135 | 130.0 |
+| `saved-example` | 42 | 41 | 35 | 6 | 1 | 213 | 171.3 |
+| Total | 68 | 67 | 59 | 8 | 1 | 348 | 301.3 |
+
+All three presentations of all 116 saved detector polygons completed: 348 fresh
+reader calls/associations, zero failed responses and zero unavailable views. TG27
+made 75 generation calls for the 67 saved translations, including retries; both
+pages completed model-unload checks. `saved-example` is the existing
+`images/quality50-v1/ubunchu01_06.png`, not another independent sample. These reused
+pages remain development evidence.
+
+The successful audit binds 1,605 artifacts and checks saved source/geometry/view
+replay, unique memberships, exact target strings, font floors, exact recomposition
+and **zero pixel changes outside declared cleanup/lettering support**. The first
+audit wrongly required both pipeline statuses to be `complete`; its failed script
+and 26 cards remain in `reader-presentations-pipeline-02-review/`, with the log at
+`reader-presentations-pipeline-audit-02.log`.
+The corrected audit explicitly includes the blocked unit and the page's `partial`
+status, rather than discarding it.
+
+Both originals, both full cleanplates/composites and **all 68 comparison cards
+across 23 sheets** were inspected. Per-card observations are retained in
+`reader-presentations-pipeline-observations.tsv`; the completed
+`reader-presentations-pipeline-02-review-02/inspection.json` binds 1,747 artifacts,
+including the failed attempts. This is inspection of selected-source/target
+outputs, not independent bilingual certification of all 348 extra readings.
+
+The review confirms substantial remaining failures:
+
+- On `ubunchu03_0006`, the X-malfunction text absorbs the separate “message” label;
+  the Linux annotation becomes “tone-deaf” plus an invented “No.”; an expectant
+  gaze becomes “Expectation of” plus “gaze, look, glance”; a detached `から`
+  becomes “from”; and one `はやくっ` repetition becomes “It's already…”.
+- On `saved-example`, stylized lettering becomes “Top—”, “Wisdom.” and “Three.”;
+  `週刊` becomes “Established (as a publication)”; the codec reference becomes
+  “Co-Co Deck”. Separate UI tabs/rows are merged, and translations introduce
+  unsupported wording such as “without any permission” and “user-friendly”.
+- Target equality can hide OCR failure. Raw `TP`, `G`, `To` and `2` leave actual
+  Japanese lettering unchanged. Legitimate ellipsis/English unchanged cases do
+  not make these other cases correct. The update label's ending, mixed-language
+  `installで`, security text, clipped report rows and keyboard sounds also expose
+  incomplete reading/removal coverage.
+- `saved-example` card 19 remains untranslated because of
+  `non_waivable_structure:tentative_annotation_ownership`. Recommended-update,
+  Firefox and gnome-panel material has no bound target; neighboring cleanup
+  nevertheless erases part of gnome-panel. Other patches cut panel rules, hair or
+  small character details; some targets cross UI, panel or caption boundaries.
+
+The integration is complete as optional retained reader evidence. The 59 visible
+replacements and replay checks **do not meet complete source removal or zero-error
+translation**. Additional evidence is not yet a justified selection policy.
+Source extent, passage ownership and correct selected meanings remain unresolved,
+as do independent bilingual review, untouched end-to-end validation, sustained
+live soak/memory plateau and distribution provenance. Production V4 and TG27
+remain the evaluated baseline at this stopping point.

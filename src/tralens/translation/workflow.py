@@ -284,6 +284,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                         state['ocr']['dialogue_readings'] = _snapshot(getattr(engine,'dialogue_readings',{}))
                         if hasattr(engine,'crop_readings'):
                             state['ocr']['crop_readings'] = _snapshot(engine.crop_readings)
+                        if hasattr(engine,'reader_presentations'):
+                            state['ocr']['reader_presentations'] = _snapshot(engine.reader_presentations)
                         if hasattr(engine,'ink_column_groups'):
                             state['ocr']['ink_column_groups'] = _snapshot(engine.ink_column_groups)
                     if source_localization:
@@ -321,14 +323,15 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 raise ValueError("candidate state does not bind the single OCR page")
             candidates = tuple(c for r in recognition[0] for c in r.candidates) if recognition else ()
             units = automatic_units(batch, candidates)
-            from ..ocr import crop_readings, ink_groups
+            from ..ocr import crop_readings, ink_groups, reader_presentations
             saved_crop_readings=[c for c in _snapshot(candidates) if c.get('engine')==crop_readings.ENGINE]
             grouped=any(p.grouping_method in ink_groups.POLICIES for p in batch.proposals)
-            if saved_crop_readings or grouped or 'ink_column_groups' in state['ocr']:
+            if saved_crop_readings or grouped or 'ink_column_groups' in state['ocr'] or 'reader_presentations' in state['ocr']:
                 with Image.open(BytesIO(_read_image(image))) as source:
                     rgb=source.convert('RGB')
                     ink_groups.validate_saved(state['ocr'],rgb)
                     for candidate in saved_crop_readings:crop_readings.validate_pixels(candidate,rgb)
+                    reader_presentations.validate_saved(state['ocr'],rgb,output=output)
         records,fragment_requests = {},{}
         for unit in units:
             request = TranslationRequest((unit,), (unit.unit_id,))
