@@ -3617,3 +3617,15 @@ schema1/2/3 CLI integrations, skipped when those local artifacts are unavailable
 ```sh
 .venv/bin/python -m unittest tests.tools.test_translation_review -v
 ```
+
+## License
+
+Copyright (C) 2026 Daniel Lew
+
+Tralens is free software: you can redistribute it and/or modify it under the terms
+of the GNU General Public License as published by the Free Software Foundation,
+either version 3 of the License, or (at your option) any later version. It is
+distributed WITHOUT ANY WARRANTY; see [LICENSE](LICENSE) for the full terms.
+
+Third-party packages, and models or fonts you supply yourself, keep their own
+licenses. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
