@@ -108,6 +108,7 @@ small { font-size: 11px; font-weight: 400; color: var(--muted); line-height: 1.4
 .segmented input:disabled + span { opacity: .45; cursor: default; }
 .segmented[data-disabled=true] { opacity: .55; }
 .choice-help { flex: 1 1 260px; margin: 0; padding-bottom: 7px; font-size: 12px; color: var(--muted); }
+.choice-warning { flex-basis: 100%; margin: 0; padding: 9px 12px; border: 1px solid var(--warn-border); background: var(--warn-bg); color: var(--warn-ink); border-radius: 9px; font-size: 12px; line-height: 1.55; }
 
 .run-settings { border-top: 1px solid var(--border); padding: 10px 18px; }
 .run-settings > summary { font-size: 12px; font-weight: 600; color: var(--ink-2); }

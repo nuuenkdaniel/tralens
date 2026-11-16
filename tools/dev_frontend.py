@@ -74,6 +74,9 @@ def main(argv=None):
             print('Network access enabled: reachable clients can inspect artifacts and start runs. '
                   'Use only trusted networks; this development viewer has no user authentication.', flush=True)
         print(f'Ollama endpoint: {endpoint}', flush=True)
+        if args.fonts and args.text_mask_model is None:
+            print('Warning: no --text-mask-model. Replace all text will erase whole OCR boxes, '
+                  'not just the lettering, and can leave large blank areas.', flush=True)
         print(f'Job artifacts: {app.root}\nNo inference until you upload and click Run. Ctrl+C stops the server.', flush=True)
         try:
             server.serve_forever()

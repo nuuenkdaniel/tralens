@@ -65,6 +65,12 @@ function runOptions({mode, style, budget, reread = false, lama = false}) {
     removal_policy: render ? preset.removal_policy : "legacy",
     reconstruction_policy: render && lama && preset.removal_policy === "aggressive" ? "lama" : "classical"};
 }
+// Without the CTD text-mask model, aggressive removal cannot separate lettering
+// from artwork and erases the whole (sometimes very large) OCR polygon.
+function maskWarning(config, mode, style) {
+  if (!config || config.text_mask_available || mode !== "render" || style !== "replace-all") return "";
+  return "No text-mask model configured: Replace all text will erase whole OCR boxes, not just the lettering, which can leave large blank areas. Restart the viewer with --text-mask-model PATH.";
+}
 function qualityNotice(data) {
   if (!data || !outputReady(data, "final")) return null;
   if (data.visibility_policy === "always-show" || data.options?.visibility_policy === "always-show") {
@@ -89,7 +95,7 @@ function localizationNotice(data) {
     (crop.error ? ` Crop pass failed: ${crop.error}` : "") +
     (crop.failed ? ` ${crop.failed} crop predictions failed.` : "");
 }
-if (typeof module !== "undefined" && module.exports) module.exports = {previewStates, progressView, outputReady, missingOutputMessage, qualityNotice, localizationNotice, runOptions, styleOf, STYLES};
+if (typeof module !== "undefined" && module.exports) module.exports = {previewStates, progressView, outputReady, missingOutputMessage, qualityNotice, localizationNotice, runOptions, styleOf, STYLES, maskWarning};
 
 if (typeof document !== "undefined") {
   const $ = id => document.getElementById(id);
@@ -146,6 +152,8 @@ if (typeof document !== "undefined") {
     $("style-help").textContent = mode !== "render" ? (mode === "ocr" ? "Finds and groups text. No translation model calls." : "Translates the text without changing the image.")
       : style === "replace-all" ? "Every available translation is drawn on the page. Artwork behind text may be smeared or covered by a white patch."
       : "Only regions that clean up safely are replaced. Other translations are listed alongside but not drawn.";
+    const warning = maskWarning(config, mode, style);
+    $("mask-warning").textContent = warning; $("mask-warning").hidden = !warning;
     const parts = [mode === "ocr" ? "no model calls" : `up to ${$("budget").value} calls`];
     if (mode === "render") parts.push(config?.reconstruction_available && style === "replace-all" ? ($("reconstruction-policy").value === "lama" ? "LaMa backgrounds" : "classical backgrounds") : "classical backgrounds");
     if (mode === "render" && config?.quality_reread_available && $("quality-reread").checked) parts.push("paired rereads");

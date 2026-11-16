@@ -588,6 +588,16 @@ main(['--help'])
                 main([*arguments, '--endpoint', 'http://127.0.0.1:11434'])
             self.assertEqual(create.call_args.kwargs['host'], expected)
 
+    def test_frontend_warns_at_startup_without_text_mask_model(self):
+        import contextlib, io
+        from tools.dev_frontend import main
+        for extra, warned in (([], True), (['--text-mask-model', '/models/ctd.onnx'], False)):
+            output = io.StringIO()
+            with patch.object(s, 'App'), patch.object(s, 'create_server') as create, contextlib.redirect_stdout(output):
+                create.return_value.__enter__.return_value.serve_forever.side_effect = KeyboardInterrupt
+                main(['--fonts', '/fonts.json', '--endpoint', 'http://127.0.0.1:11434', *extra])
+            self.assertEqual('no --text-mask-model' in output.getvalue(), warned)
+
     def test_stage_view_states_never_invent_an_unpublished_page(self):
         node = shutil.which('node')
         if node is None:
@@ -655,7 +665,13 @@ assert.equal(previewStates(startupFailed).translation.state, 'skipped');
         if node is None:
             self.skipTest('optional Node.js unavailable')
         script = r'''
-const {runOptions, styleOf} = require(process.argv[1]);
+const assert = require('node:assert/strict');
+const {runOptions, styleOf, maskWarning} = require(process.argv[1]);
+assert.match(maskWarning({text_mask_available: false}, 'render', 'replace-all'), /whole OCR boxes/);
+assert.equal(maskWarning({text_mask_available: true}, 'render', 'replace-all'), '');
+assert.equal(maskWarning({text_mask_available: false}, 'render', 'protect'), '');
+assert.equal(maskWarning({text_mask_available: false}, 'translate', 'replace-all'), '');
+assert.equal(maskWarning(undefined, 'render', 'replace-all'), '');
 const out = [];
 for (const mode of ['render', 'translate', 'ocr'])
   for (const style of ['replace-all', 'protect'])
