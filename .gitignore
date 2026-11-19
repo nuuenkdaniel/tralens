@@ -6,6 +6,7 @@ output.jpg
 *.png
 *.jpg
 *.env
+.claude/
 test.py
 
 # Private/local evaluation originals and generated OCR evidence; never publish.
