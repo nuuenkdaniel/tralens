@@ -26,9 +26,20 @@ UNFINISHED_INSTRUCTION = ('This source stops mid-phrase. Translate only the visi
     'English phrase ending in an ellipsis. Do not supply a missing verb or object. ')
 
 
+WAIT = 'missing_request_to_wait_v1'
+WAIT_SOURCE = re.compile(r'の[をは](?:少し|しばらく)?お待ちください')
+WAIT_TARGET = re.compile(r"\b(?:wait|hold|delay|postpone|refrain|before|until|yet)\b", re.I)
+WAIT_INSTRUCTION = ('Preserve the request to wait, including exactly what the listener '
+    'is asked to wait for or delay. ')
+SELECTION = {POLICY: 'single_rendition', UNFINISHED: 'unfinished_contrast', WAIT: 'request_to_wait'}
+
+
 def retry_policy(source, target, style):
     if needs_retry(source,target):
         return POLICY
+    if (style.source_language in ('Japanese','ja') and style.target_language in ('English','en')
+            and WAIT_SOURCE.search(source) and not WAIT_TARGET.search(target)):
+        return WAIT
     if (style.source_language in ('Japanese','ja') and style.target_language in ('English','en')
             and len(source.strip()) >= 5 and source.rstrip().endswith(('だが','ですが','けれど','けれども'))
             and target.strip().endswith('.') and not target.strip().endswith('...')
@@ -40,6 +51,9 @@ def retry_policy(source, target, style):
 def candidate_matches(policy, primary, candidate):
     if ' / ' in candidate:
         return False
+    if policy == WAIT:
+        return (bool(WAIT_TARGET.search(candidate))
+            and re.findall(r'\d+', primary) == re.findall(r'\d+', candidate))
     if policy != UNFINISHED:
         return True
     # Only take a response that actually restores an open connective and
@@ -57,5 +71,5 @@ def payload(original, policy=POLICY):
     text=messages[0]['content']
     marker='Please translate the following '
     if marker not in text:raise ValueError('unknown specialist prompt structure')
-    messages[0]['content']=text.replace(marker,(UNFINISHED_INSTRUCTION if policy==UNFINISHED else INSTRUCTION)+marker,1)
+    messages[0]['content']=text.replace(marker,{UNFINISHED: UNFINISHED_INSTRUCTION, WAIT: WAIT_INSTRUCTION, POLICY: INSTRUCTION}[policy]+marker,1)
     return result

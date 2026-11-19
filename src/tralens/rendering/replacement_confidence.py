@@ -6,6 +6,7 @@ cleanup support and requested-size lettering are separate requirements. No text,
 script, source ID, visual-review label or expected word is special-cased here.
 """
 import math
+import re
 from dataclasses import replace
 
 from ..translation.contracts import canonical, strict_json
@@ -30,6 +31,35 @@ def settings(policy='all', minimum=None):
         'below_requested_font_size_allowed': False, 'unchanged_target_preserves_source': True,
         'translation_policy_unchanged': True,
         'calibration_scope': 'provisional single-page model visual assessment; not held-out accuracy validation'}
+
+
+def retains_printed_words(unit, target):
+    """Keep confident Latin labels when the model only punctuates their rows."""
+    reading = unit.selected
+    if reading.origin != 'raw_main_reading' or not re.fullmatch(r'[A-Za-z]{2,128}', reading.text):
+        return False
+    if len(target) > 256 or not re.fullmatch(r'[A-Za-z]+(?:[ ,/]+[A-Za-z]+)*[.]?', target):
+        return False
+    lines = strict_json(reading.evidence_json)
+    if type(lines) is not list or len(lines) != len(unit.order):
+        return False
+    words = re.findall(r'[A-Za-z]+', target)
+    if len(words) != len(lines):
+        return False
+    exact_words = set()
+    for line, source_id, word in zip(lines, unit.order, words):
+        if (type(line) is not dict or line.get('source_id') != source_id
+                or line.get('status') != 'accepted' or type(line.get('confidence')) not in (int, float)
+                or not .97 <= line['confidence'] <= 1):
+            return False
+        source = line.get('text')
+        if type(source) is not str or not re.fullmatch(r'[A-Za-z]{2,32}', source):
+            return False
+        if source == word:
+            exact_words.add(source)
+        elif not (source in exact_words and source.istitle() and word == source.lower()):
+            return False
+    return ''.join(line['text'] for line in lines) == reading.text
 
 
 def assess_source(unit, target, minimum):

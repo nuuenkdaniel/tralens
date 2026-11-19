@@ -48,9 +48,13 @@ class Hardening(unittest.TestCase):
         session=Mock()
         session.get_inputs.return_value=[SimpleNamespace(name='image',type='tensor(float)',shape=['batch',3,512,512]),
             SimpleNamespace(name='mask',type='tensor(float)',shape=['batch',1,512,512])]
+        orientations=iter((1,-1))
         def infer(_,feed):
+            direction=next(orientations)
             self.assertEqual(feed['image'].shape,(1,3,512,512))
-            expected=np.pad(mask,((0,480),(0,472)),mode='symmetric')
+            native=rgb[:,::direction]
+            self.assertTrue(np.array_equal(feed['image'][0,:,:32,:40],native.transpose(2,0,1).astype(np.float32)/255))
+            expected=np.pad(mask[:,::direction],((0,480),(0,472)),mode='symmetric')
             self.assertTrue(np.array_equal(feed['mask'][0,0],expected))
             return [np.full((1,3,512,512),123,np.float32)]
         session.run.side_effect=infer;session.get_providers.return_value=['synthetic-test-only']
@@ -61,7 +65,8 @@ class Hardening(unittest.TestCase):
             worker.main(self.root)
         metadata=json.loads((self.root/'result.json').read_bytes())
         self.assertEqual(metadata['output_pixels_sha256'],rec.pixels_hash(np.full_like(rgb,123)))
-        session.run.assert_called_once()
+        self.assertEqual(session.run.call_count,2)
+        self.assertEqual(metadata['views'],['native','horizontal_reflection'])
         for file in ('input','mask','commit','protected'):
             write();image=Image.open(self.root/(file+'.png')).copy();image.putpixel((0,0),(0,0,0) if file=='input' else 255)
             image.save(self.root/(file+'.png'))

@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 from PIL import Image,ImageDraw,ImageOps
 
+from . import display_readings,sound_readings,upright_latin
 from .automatic_recognition import AutomaticRecognitionResult
 from .manga_dialogue import valid_bounds
 from .recognition_units import image_fingerprint
@@ -77,6 +78,86 @@ def views(image,bounds,polygons):
     return native,isolated,ImageOps.expand(isolated,border=8,fill=color)
 
 
+EXACT_TILTED_VIEWS = 'rectified_and_two_native_isolations_v1'
+TILTED_VIEWS = 'rectified_and_two_native_isolations_v2'
+
+
+def tilted_mapping(size, record):
+    from . import reader_geometry
+    if record['direction'] != 'unknown' or len(record['polygons']) != 1:
+        return None
+    try:
+        mapping = reader_geometry.plan(size, record['polygons'][0])
+    except ValueError:
+        return None
+    width,height = mapping['seed_size']
+    left,right = mapping['ordered_polygon'][:2]
+    dx,dy = right[0]-left[0],abs(right[1]-left[1])
+    return mapping if width >= 1.45*height and dx > 0 and .2*dx <= dy <= dx else None
+
+
+def record_views(image, record):
+    if record.get('view_policy')==display_readings.POLICY:
+        result=display_readings.presentations(image,record)
+        require(result is not None,'display crop ink or geometry drift')
+        return result
+    native, isolated, padded = views(image,record['bounds'],record['polygons'])
+    if record.get('view_policy')==upright_latin.POLICY:
+        alternate=upright_latin.presentations(image,record,record['column_texts'])
+        require(alternate is not None,'upright Latin crop geometry drift')
+        return (*alternate,native)
+    if 'view_policy' in record:
+        from . import reader_geometry
+        mapping = tilted_mapping(image.size,record)
+        require(record['view_policy'] in (EXACT_TILTED_VIEWS,TILTED_VIEWS) and mapping is not None,'tilted crop geometry drift')
+        native = reader_geometry.pixels(image,mapping)
+    return native, isolated, padded
+
+
+def candidate_text(record):
+    trial=record.get('sound_windows')
+    if trial and sound_readings.matches(record):
+        return trial['readings'][0]
+    return record['readings'][0]
+
+
+def select_record(record):
+    if record.get('sound_windows') and sound_readings.matches(record):
+        return selection(record['source'],[candidate_text(record)]*3,record['scores'],'horizontal')
+    direction = record['direction']
+    if record.get('view_policy')==display_readings.POLICY:
+        return direction=='horizontal' and selection(record['source'],record['readings'],record['scores'],direction)
+    if record.get('view_policy')==upright_latin.POLICY:
+        return (direction=='vertical' and ''.join(record['column_texts'])==record['source']
+            and upright_latin.matches(record))
+    if 'view_policy' in record:
+        require(record['view_policy'] in (EXACT_TILTED_VIEWS,TILTED_VIEWS) and direction=='unknown','tilted crop policy drift')
+        readings = record['readings']
+        if len(readings) != 3 or not all(isinstance(v,str) for v in readings):
+            return False
+        texts = [normalized(v) for v in readings]
+        if any(not 4 <= len(t) <= 12 or not all('ァ' <= c <= 'ヺ' or c=='ー' for c in t)
+                for t in texts):
+            return False
+        if record['view_policy'] == EXACT_TILTED_VIEWS:
+            text=texts[0];half=len(text)//2
+            return (len(text)%2==0 and text[:half]==text[half:]
+                and selection(record['source'],readings,record['scores'],'horizontal'))
+        # An edge can clip one repetition of the same sound in a rotated
+        # presentation. Keep the exact rectified response and all three counts.
+        for length in range(2,5):
+            motif = texts[0][:length]
+            counts = [len(t)//length for t in texts]
+            if (len(set(motif)) > 1 and min(counts)>=2 and max(counts)-min(counts)<=1
+                    and all(t == motif*count for t,count in zip(texts,counts))):
+                # Check each original response independently against the raw
+                # reading (including control-character and confidence checks).
+                return all(selection(record['source'],[v]*3,record['scores'],'horizontal')
+                    for v in readings)
+        return False
+    return selection(record['source'],record['readings'],record['scores'],direction)
+
+
 def refine(engine,image,original,*,reader,model_identity,output,max_regions=MAX_REGIONS):
     require(type(max_regions) is int and 0<=max_regions<=MAX_REGIONS,'crop reading region budget')
     require(type(model_identity) is str and bool(model_identity.strip()),'crop reader identity required')
@@ -100,8 +181,9 @@ def refine(engine,image,original,*,reader,model_identity,output,max_regions=MAX_
     for index,(proposal,result) in enumerate(zip(batch['proposals'],results)):
         require(not any(c['engine']==ENGINE for c in result.candidates),'crop reader already attempted; use fresh evidence')
         ids=proposal['main_ids'];bounds=proposal['crop_bounds']
+        oversized=display_readings.candidate(bounds,image.size,proposal['direction'])
         if (proposal['annotation_ids'] or ids!=proposal['member_ids'] or not 1<=len(ids)<=8
-                or not valid_bounds(bounds,image.size) or attempted>=max_regions):continue
+                or not (valid_bounds(bounds,image.size) or oversized) or attempted>=max_regions):continue
         detections=[raw[i] for i in ids];source=''.join(d['text'] for d in detections)
         if not 0<len(source)<=512 or any(d['status'] not in ('accepted','review') for d in detections):continue
         attempted+=1
@@ -111,15 +193,34 @@ def refine(engine,image,original,*,reader,model_identity,output,max_regions=MAX_
             'automatic_accuracy_verified':False}
         stage['records'].append(record)
         try:
-            for j,view in enumerate(views(image,bounds,record['polygons'])):
-                stream=BytesIO();view.save(stream,format='PNG');data=stream.getvalue();name=f'crop-reading-{index:03d}-{j}.png'
-                with (Path(output)/name).open('xb') as f:f.write(data)
-                stage['artifacts'][name]=hashlib.sha256(data).hexdigest()
-                record['view_hashes'].append(image_fingerprint(view));stage['calls']+=1
-                value=reader(view)
-                require(type(value) is str and len(value)<=512,'crop reader output bound/type')
-                record['readings'].append(value)
-            record['selected']=selection(source,record['readings'],record['scores'],record['direction'])
+            columns=[d['text'] for d in detections]
+            if oversized:
+                display_views=display_readings.presentations(image,record)
+                if display_views is None:
+                    record['reason']='no dominant display ink'
+                    continue
+                record['view_policy']=display_readings.POLICY
+            elif upright_latin.presentations(image,record,columns) is not None:
+                record.update(view_policy=upright_latin.POLICY,column_texts=columns)
+            elif tilted_mapping(image.size,record) is not None:
+                record['view_policy']=TILTED_VIEWS
+            def read_views(target,presentations,suffix=''):
+                for j,view in enumerate(presentations):
+                    stream=BytesIO();view.save(stream,format='PNG');data=stream.getvalue()
+                    name=f'crop-reading-{index:03d}{suffix}-{j}.png'
+                    with (Path(output)/name).open('xb') as f:f.write(data)
+                    stage['artifacts'][name]=hashlib.sha256(data).hexdigest()
+                    target['view_hashes'].append(image_fingerprint(view));stage['calls']+=1
+                    value=reader(view)
+                    require(type(value) is str and len(value)<=512,'crop reader output bound/type')
+                    target['readings'].append(value)
+            read_views(record,display_views if oversized else record_views(image,record))
+            if not select_record(record):
+                windows=sound_readings.presentations(image,record)
+                if windows is not None:
+                    record['sound_windows']={'readings':[],'view_hashes':[]}
+                    read_views(record['sound_windows'],windows,'-windows')
+            record['selected']=select_record(record)
             if record['selected']:
                 from . import manga_dialogue,quality_reread
                 previous=quality_reread.preferred_reading(original_units[index]) or manga_dialogue.preferred_reading(original_units[index])
@@ -128,7 +229,7 @@ def refine(engine,image,original,*,reader,model_identity,output,max_regions=MAX_
                     record['deferred_to_prior_reading_revision']=previous.revision
             proof={'policy':POLICY,'record':record,'source_pixels_sha256':batch['page']['pixels_sha256'],
                 'model_identity':model_identity,'erase_permission':False}
-            candidate={'text':record['readings'][0],'reference_main_text':source,'differing_spans':[],
+            candidate={'text':candidate_text(record),'reference_main_text':source,'differing_spans':[],
                 'crop':{'proposal_id':proposal['proposal_id'],'page':batch['page'],'member_ids':proposal['member_ids'],
                     'main_ids':ids,'bounds':bounds,'checked_neighbor_ids':[i for i in raw if i not in ids],
                     'batch_evidence_sha256':batch['evidence_sha256'],
@@ -159,12 +260,13 @@ def validate_candidate(candidate,batch):
         and crop['checked_neighbor_ids']==[d['source_id'] for d in batch['detections'] if d['source_id'] not in proposal['main_ids']]
         and record['proposal_id']==proposal['proposal_id'] and record['main_ids']==proposal['main_ids']
         and record['polygons']==[d['polygon'] for d in main] and record['scores']==[d['confidence'] for d in main]
+        and (record.get('view_policy')!=upright_latin.POLICY or record['column_texts']==[d['text'] for d in main])
         and record['direction']==proposal['direction'] and record['bounds']==crop['bounds']
         and record['source']==candidate['reference_main_text']==''.join(d['text'] for d in main)
-        and candidate['text']==record['readings'][0] and candidate['reviewed'] is False
+        and candidate['text']==candidate_text(record) and candidate['reviewed'] is False
         and record['automatic_accuracy_verified'] is False and len(record['view_hashes'])==3
         and record['selected'] is True
-        and record['selected']==selection(record['source'],record['readings'],record['scores'],record['direction']),
+        and record['selected']==select_record(record),
         'crop reading candidate evidence drift')
 
 
@@ -185,11 +287,12 @@ def preferred_reading(unit):
             and candidate['crop']['main_ids']==list(unit.order)
             and candidate['crop']['bounds']==record['bounds']
             and candidate['reference_main_text']==unit.selected.text and record['selected'] is True
-            and candidate['text']==reading.text==record['readings'][0]
+            and candidate['text']==reading.text==candidate_text(record)
             and record['source']==unit.selected.text and record['main_ids']==list(unit.order)
+            and (record.get('view_policy')!=upright_latin.POLICY or record['column_texts']==[d['text'] for d in raw])
             and record['scores']==[d['confidence'] for d in raw]
             and record['polygons']==[d['polygon'] for d in raw]
-            and record['selected']==selection(unit.selected.text,record['readings'],record['scores'],record['direction']),
+            and record['selected']==select_record(record),
             'crop reading selection drift')
         if record['selected']:choices.append(reading)
     require(len(choices)<=1,'ambiguous crop reading candidates')
@@ -199,5 +302,9 @@ def preferred_reading(unit):
 def validate_pixels(candidate,image):
     proof=strict_json(candidate['model_settings_json']);record=proof['record']
     require(record['bounds']==candidate['crop']['bounds'] and proof['source_pixels_sha256']==image_fingerprint(image)
-        and record['view_hashes']==[image_fingerprint(v) for v in views(image,record['bounds'],record['polygons'])],
+        and record['view_hashes']==[image_fingerprint(v) for v in record_views(image,record)],
         'crop reading pixels changed')
+    if 'sound_windows' in record:
+        windows=sound_readings.presentations(image,record)
+        require(windows is not None and record['sound_windows']['view_hashes']==[image_fingerprint(v) for v in windows],
+            'sound window crop pixels changed')

@@ -1,6 +1,7 @@
 """Bounded preview execution with lazy injected runtimes; no constructor I/O."""
 import time
 import hashlib
+import json
 import base64
 import math
 import re
@@ -120,6 +121,9 @@ def execution_metadata(request, profile, options):
             "alternatives_supplied_to_model": False,
             "source_interpretation": "uncertain" if len(unit.readings) > 1 or unit.lexical_reasons else "unverified",
             "source_uncertainty_retained_in_request": True})
+    if profile.specialist_chat and type(request) is TranslationRequest and request.mode=='B' and request.context_ids:
+        metadata['reduced_capabilities']=[v for v in metadata['reduced_capabilities'] if v!='no_context_or_images']
+        metadata.update(scene_context_ids=list(request.context_ids),images_supplied=False)
     return canonical(metadata)
 
 
@@ -249,7 +253,10 @@ def make_payload(request, profile, *, images=()):
         raise TypeError("strict payload requires TranslationRequest, not a fragment input")
     if len(request.target_ids) > 20 or len(request.units) > 84 or len(canonical(compile_source(request))) > 65536:
         raise ValueError("model-facing source exceeds request budget")
-    if request.context_ids and not profile.context:
+    from . import context
+    from .contracts import Style
+    sound=(profile.specialist_chat and request.mode=='B' and request.style.instructions==Style().instructions+context.SOUND_GUIDE)
+    if request.context_ids and not profile.context and not sound:
         raise ValueError("profile does not support page context")
     if request.mode == "C" and (not profile.images or not images):
         raise ValueError("C requires an explicitly image-capable profile and supplied images")
@@ -267,6 +274,19 @@ def make_payload(request, profile, *, images=()):
         evidence = strict_json(request.image_evidence_json)
         if len(content) > 8 * 1024 * 1024 or hashlib.sha256(content).hexdigest() != evidence["presentation_sha256"]:
             raise ValueError("image presentation hash mismatch or size exceeded")
+    if sound:
+        if len(request.target_ids)!=1 or request.units[0].unit_id!=request.target_ids[0] or images:
+            raise ValueError('sound effect context requires one bound text target')
+        base=TranslationRequest((request.units[0],),request.target_ids,style=replace(request.style,instructions=Style().instructions))
+        planned=context.sound_plan(base,request.units)
+        if planned is None or planned[0]!=request:
+            raise ValueError('invalid sound effect context partition')
+        payload=_specialist_payload(base.units[0].selected.text,base.style,profile)
+        scene=[u.selected.text for u in request.units[1:]]
+        guide=context.SOUND_GUIDE+'Scene dialogue (uncertain OCR): '+json.dumps(scene,ensure_ascii=False)+'\n'
+        message=payload['messages'][0]
+        message['content']=message['content'].replace('Please translate the following ',guide+'Please translate the following ',1)
+        return payload
     if profile.specialist_template:
         if request.mode != "A" or len(request.target_ids) != 1 or request.context_ids or images:
             raise ValueError("specialist supports one text-only utterance per request")
@@ -453,7 +473,7 @@ class PreviewTranslator:
                         rendition_evidence['candidate_translation']=candidate
                         if (isinstance(candidate,str) and candidate.strip() and len(candidate)<=self.generation_options.max_output_chars
                                 and rendition.candidate_matches(retry_policy,primary,candidate) and not cancelled() and time.monotonic()-started<self.timeout):
-                            text=candidate;rendition_evidence['selected']=('single_rendition' if retry_policy==rendition.POLICY else 'unfinished_contrast')
+                            text=candidate;rendition_evidence['selected']=rendition.SELECTION[retry_policy]
                     except Exception as error:
                         rendition_evidence['error']=type(error).__name__+': '+str(error)[:512]
                         failed=notify({'attempt':attempts,'status':'rendition_retry_failed',

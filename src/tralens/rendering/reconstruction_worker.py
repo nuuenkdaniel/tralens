@@ -83,14 +83,11 @@ def main(directory):
     session.disable_fallback()
     load=time.monotonic()-started;started=time.monotonic()
     prediction=predict(session,rgb,mask)
-    views=['native']
-    # Mirrored context reduces directional fill artifacts on painted surfaces.
-    # Reflect the native crop before padding and undo the reflection before blending.
-    known=rgb[~mask]
-    if len(known) and np.mean(np.ptp(known,axis=1)>20) >= .2:
-        mirrored=predict(session,rgb[:,::-1],mask[:,::-1])[:,::-1]
-        prediction=(prediction+mirrored)*.5
-        views.append('horizontal_reflection')
+    # Reflect before padding so both predictions see the same native context.
+    # Averaging also reduces directional streaks across monochrome screen tones.
+    mirrored=predict(session,rgb[:,::-1],mask[:,::-1])[:,::-1]
+    prediction=(prediction+mirrored)*.5
+    views=['native','horizontal_reflection']
     result=prediction.astype(np.uint8)
     elapsed=time.monotonic()-started
     Image.fromarray(result).save(directory/'output.png')

@@ -45,7 +45,7 @@ class Geometry:
             for tx in range(x//128,(r-1)//128+1):
                 for ty in range(y//128,(b-1)//128+1):self.grid.setdefault((tx,ty),set()).add(key)
 
-    def local(self,member_ids,reserved,margin=48,maximum_side=512,source_priority=False,cleanup_polygon=None):
+    def local(self,member_ids,reserved,margin=48,maximum_side=512,source_priority=False,cleanup_polygon=None,cleaned_for_layout=()):
         keys={(type(i).__name__,i) for i in member_ids}
         rec.require(keys and keys<=self.raw.keys() and len(keys)==len(member_ids),'foreign/duplicate recovery membership')
         boxes=[self.boxes[k] for k in keys]
@@ -74,6 +74,8 @@ class Geometry:
             for ty in range(y//128,(b-1)//128+1):nearby.update(self.grid.get((tx,ty),()))
         own=Image.new('L',(r-x,b-y));other=own.copy()
         for key in nearby:
+            if key in cleaned_for_layout and key not in keys:
+                continue
             bx,by,br,bb=self.boxes[key]
             if br<=x or bb<=y or bx>=r or by>=b:continue
             target=own if key in keys else other

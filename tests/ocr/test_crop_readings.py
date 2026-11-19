@@ -27,6 +27,66 @@ class CropReadings(unittest.TestCase):
         c.refine(self.engine,self.image,self.original,reader=reader,model_identity='synthetic',output=self.output)
         return automatic_units(self.batch,self.engine.automatic_recognition_results[0])[0]
 
+    def test_reflowed_abbreviation_requires_native_bar_and_exact_other_characters(self):
+        from PIL import ImageDraw
+        from tralens.ocr import upright_latin as latin
+        image=Image.new('RGB',(36,110),'white');ink=ImageDraw.Draw(image)
+        for i,width in enumerate([13,12,2,12]):
+            ink.rectangle((16-width//2,8+i*23,16+width//2,23+i*23),outline='black',width=2)
+        record=dict(source='AB-の',direction='vertical',polygons=[[(0,0),(35,0),(35,109),(0,109)]],
+            column_texts=['AB-の'],view_policy=latin.POLICY,readings=['ABIの','ABIの','ABーの'])
+        views=latin.presentations(image,record,record['column_texts'])
+        self.assertEqual(len(views),2)
+        self.assertGreater(views[1].width,views[0].width)
+        self.assertTrue(c.select_record(record))
+        self.assertFalse(c.select_record(dict(record,readings=['ABIの','ABIの','ABーを'])))
+        self.assertFalse(c.select_record(dict(record,readings=['ABLの','ABLの','ABーの'])))
+        self.assertIsNone(latin.presentations(image,dict(record,direction='horizontal'),['AB-の']))
+        self.assertIsNone(latin.presentations(image,record,['ABの']))
+
+    def test_oversized_color_reader_is_bounded_and_requires_a_dominant_ink(self):
+        from PIL import ImageDraw
+        from tralens.ocr import display_readings as display
+        im=Image.new('RGB',(900,320),'white')
+        record=dict(direction='horizontal',bounds=[0,0,900,320],
+            polygons=[[[2,2],[897,2],[897,318],[2,318]]])
+        self.assertIsNone(display.presentations(im,record))
+        for x in range(20,750,90):
+            ImageDraw.Draw(im).rectangle((x,65,x+48,240),fill='orange')
+        views=display.presentations(im,record)
+        self.assertEqual(len(views),3)
+        self.assertTrue(all(v.width<=720 and v.height<=320 for v in views))
+        self.assertIsNone(display.presentations(im,dict(record,direction='vertical')))
+        self.assertFalse(display.candidate([0,0,3500,500],(3500,500),'horizontal'))
+    def test_disjoint_halves_must_support_the_full_sound_and_its_length(self):
+        from tralens.ocr import sound_readings as sound
+        motif='ドキ'
+        record=dict(source='読めない語',direction='horizontal',polygons=[[]],scores=[.48],
+            readings=[motif*52,motif*4,'別の文字'],sound_windows={
+                'view_hashes':['a','b','c'],'readings':[motif*4,motif*2,motif*2]})
+        self.assertTrue(c.select_record(record))
+        self.assertEqual(c.candidate_text(record),motif*4)
+        for reads in [[motif*4,motif*2,'トキトキ'],[motif*12,motif*2,motif*2],
+                [motif*4,motif,''],[motif*4,motif*2,motif*8]]:
+            from copy import deepcopy
+            other=deepcopy(record);other['sound_windows']['readings']=reads
+            self.assertFalse(sound.matches(other))
+        damaged = dict(record, readings=['トキ'+motif*8,'トキ'+motif*7,'不明'])
+        self.assertEqual(sound.hint(damaged),motif)
+        self.assertTrue(sound.matches(damaged))
+        self.assertIsNone(sound.hint(dict(damaged, readings=['トキ'+motif*2]*3)))
+        self.assertIsNone(sound.hint(dict(record,scores=[.98])))
+
+    def test_oblique_sound_requires_three_matching_reduplicated_readings(self):
+        record = dict(direction='unknown', source='手人手', scores=[.6],
+            view_policy=c.TILTED_VIEWS, readings=['パチパチ']*3)
+        self.assertTrue(c.select_record(record))
+        for reads in (['パチパチ','パチパチ','ピチピチ'], ['パキッ']*3, ['拍手拍手']*3):
+            self.assertFalse(c.select_record(dict(record, readings=reads)))
+        self.assertTrue(c.select_record(dict(record, readings=['パチパチパチ','パチパチ','パチパチ'])))
+        self.assertFalse(c.select_record(dict(record, readings=['パチパチパチパチ','パチパチ','パチパチ'])))
+        self.assertFalse(c.select_record(dict(record, scores=[.98])))
+
     def test_three_views_keep_original_pixels_and_prior_candidate(self):
         prior=recognize_automatic_batch(self.batch,self.image,Mock(return_value='ネットワー7の'),
             original_image_bytes=self.original,model_identity='prior-synthetic')

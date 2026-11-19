@@ -44,6 +44,16 @@ class SingleRendition(unittest.TestCase):
                 ('アップデートからXが','X stopped.')]:
             self.assertIsNone(rendition.retry_policy(source,target,Style()))
 
+    def test_wait_request_lost_in_translation_can_be_retried(self):
+        from tralens.translation.contracts import Style
+        src = '扉を開けるのは少しお待ちください。'
+        self.assertEqual(rendition.retry_policy(src,'Open the door.',Style()),rendition.WAIT)
+        self.assertIsNone(rendition.retry_policy(src,'Wait before opening the door.',Style()))
+        self.assertIsNone(rendition.retry_policy('どうぞ拍手でお迎えください！','Please applaud!',Style()))
+        self.assertTrue(rendition.candidate_matches(rendition.WAIT,'Open the door.','Please wait before opening the door.'))
+        self.assertFalse(rendition.candidate_matches(rendition.WAIT,'Open door 3.','Wait before opening door 2.'))
+        self.assertFalse(rendition.candidate_matches(rendition.WAIT,'Open the door.','Please open the door.'))
+
     def test_literal_slashes_and_single_symbols_do_not_trigger(self):
         for source,target in [('foo / bar','foo / bar'),('了','Done / Finished'),('かな','A/B test'),('かな','Just one sentence.')]:
             self.assertFalse(rendition.needs_retry(source,target))

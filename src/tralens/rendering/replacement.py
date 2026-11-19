@@ -46,6 +46,90 @@ def extent(crop, own, protected):
     return p.dilate(support,1) & ~protected
 
 
+def complete_color_ink(crop,own,mask,blocked):
+    """Complete a clipped display glyph when a learned mask identifies its ink color."""
+    if max(own.shape)>1024 or np.count_nonzero(mask)<4096:
+        return None
+    hue,saturation,value=cv2.split(cv2.cvtColor(crop,cv2.COLOR_RGB2HSV))
+    vivid=(saturation>=150)&(value>=120)
+    seeds=vivid&mask&own
+    seed_count=int(seeds.sum())
+    if seed_count<256:
+        return None
+    histogram=np.bincount(hue[seeds],minlength=180)
+    band_counts=sum(np.roll(histogram,offset) for offset in range(-4,5))
+    center=int(np.argmax(band_counts))
+    delta=np.abs(hue.astype(np.int16)-center)
+    band=vivid&(np.minimum(delta,180-delta)<=6)
+    supported=int((band&seeds).sum())
+    if supported<.85*seed_count or supported<.5*np.count_nonzero(band&own):
+        return None
+    count,labels,stats,_=cv2.connectedComponentsWithStats(band.astype(np.uint8))
+    if count>8192:
+        return None
+    components=np.zeros_like(own)
+    samples=0
+    for label,(x,y,w,h,area) in enumerate(stats[1:],1):
+        if area<50 or min(w,h)<4 or max(w,h)>280:
+            continue
+        local=np.s_[y:y+h,x:x+w]
+        part=labels[local]==label
+        if np.count_nonzero(part&own[local])<area*.88:
+            continue
+        components[local]|=part
+        samples+=int(np.count_nonzero(part&mask[local])>=.8*area)
+    if samples<2 or np.count_nonzero(components&~p.dilate(mask,4))<200:
+        return None
+    # Stroke and shadow surround the colored core. Bound their completion by
+    # the original detector polygons and all previously reserved pixels.
+    extra=p.dilate(components,10)&p.dilate(own,8)&~blocked&~mask
+    if not extra.any() or extra.sum()>.5*mask.sum():
+        return None
+    return mask|extra,{'hue_bin':center,'supported_components':samples,'extra_pixels':int(extra.sum())}
+
+
+def outlined_ink(crop, broad):
+    """Find small light glyph interiors enclosed by dark ink on a painted page."""
+    if max(broad.shape)>1024 or np.mean(np.ptp(crop,axis=2)>24)<.2:
+        return None
+    dark=crop.max(axis=2)<110
+    white=(crop.min(axis=2)>178)&(np.ptp(crop,axis=2)<40)
+    kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,5))
+    contours,_=cv2.findContours(white.astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+    if len(contours)>8192:
+        return None
+    cores=np.zeros(broad.shape,np.uint8)
+    count=0
+    for contour in contours:
+        x,y,w,h=cv2.boundingRect(contour)
+        if (min(w,h)<2 or w*h>2300 or max(w,h)>88 or min(x,y)<2
+                or x+w+2>broad.shape[1] or y+h+2>broad.shape[0]):
+            continue
+        local=np.s_[y-2:y+h+2,x-2:x+w+2]
+        body=np.zeros((h+4,w+4),np.uint8)
+        cv2.drawContours(body,[contour-np.int32([x-2,y-2])],-1,1,-1)
+        ring=cv2.dilate(body,kernel)>body
+        if not broad[local][body!=0].any() or dark[local][ring].mean()<.70:
+            continue
+        count+=1
+        cores[local]|=body
+    if count<8:
+        return None
+    nearby=p.dilate(cores!=0,6)
+    ink=dark&broad
+    supported=np.count_nonzero(nearby&ink)/max(1,np.count_nonzero(ink))
+    if supported<.62:
+        return None
+    # Include dark strokes even where an individual interior was missed.
+    # The broader original footprint already excludes protected output.
+    strokes=p.dilate((dark&(broad|nearby))|(cores!=0),2)
+    commit=strokes&broad
+    if not commit.any() or commit.sum()>.90*broad.sum():
+        return None
+    return commit,strokes,{'enclosed_light_components':count,'supported_dark_fraction':supported,
+        'original_pixels':int(broad.sum()),'committed_pixels':int(commit.sum())}
+
+
 def patch_layout(text, font_data, coverage, bounds, blocked, style, *, outline=0):
     """Widen a source-centered backing instead of shrinking or breaking words.
 
@@ -124,6 +208,7 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
         for m in row.get('binding',{}).get('member_ids',[])}
     summary={'policy':POLICY,'protection_policy':aggressive.PROTECTION_POLICY,'attempted':0,'removed':0,'placed':0,'unresolved':0,'work_pixels':0,
         'layout_work_pixels':0}
+    cleaned_here=set()
     artifacts={};budget=budget or rec.Budget();backend_error=None;extents=extents or {}
     summary.update(learned_calls=0,learned_failures=0,learned_seconds=0.,selected_learned=0,
         limits={'learned_calls':budget.maximum_calls,'learned_seconds':budget.maximum_seconds})
@@ -188,9 +273,19 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
                     entry['learned_failure']=backend_error;summary['learned_failures']+=1
                 finally:
                     seconds=time.monotonic()-clock;budget.seconds+=seconds;summary['learned_seconds']+=seconds
+            if method=='classical_telea_unverified' and refinement is None:
+                outlined_source=outlined_ink(crop,mask)
+                if outlined_source is not None:
+                    mask,inference,entry['outlined_ink']=outlined_source
+                    candidate=cv2.inpaint(crop,inference.astype(np.uint8),5,cv2.INPAINT_TELEA)
+                    method='outlined_ink_inpaint'
             if method=='classical_telea_unverified':
                 # Broad Telea masks produce conspicuous radial smears and copied
                 # glyphs. At this final fallback prefer a plain, local surface.
+                if 'support_evidence' in entry and refinement is None:
+                    completion=complete_color_ink(crop,own,mask,obstacle)
+                    if completion is not None:
+                        mask,entry['color_ink_completion']=completion
                 ring=p.dilate(mask,4)&~mask&~obstacle
                 samples=crop[ring] if ring.any() else crop[own]
                 color=np.median(samples,axis=0).astype(np.uint8)
@@ -217,17 +312,58 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
             sx,sy,sw,sh=cv2.boundingRect(own.astype(np.uint8))
             surface=0 if np.median(crop[own])<80 else 255
             if font_resolver is not None:font_data,coverage=font_resolver(row)
-            layer,xy,proof=patch_layout(row['binding']['text'],font_data,coverage,
-                (x+sx-ax,y+sy-ay,x+sx+sw-ax,y+sy+sh-ay),blocked,{**style,'fill':[255-surface]*3})
+            frame=(x+sx-ax,y+sy-ay,x+sx+sw-ax,y+sy+sh-ay)
+            colored = np.mean(np.ptp(crop,axis=2)>24) >= .2
+            outlined = False
+            if colored:
+                try:
+                    layer,xy,proof=patch_layout(row['binding']['text'],font_data,coverage,
+                        frame,blocked,{**style,'fill':[255-surface]*3,'outline_fill':[surface]*3},outline=2)
+                    outlined = True
+                except n.ResourceLimit:
+                    raise
+                except ValueError:
+                    pass
+            if not outlined:
+                try:
+                    layer,xy,proof=patch_layout(row['binding']['text'],font_data,coverage,
+                        frame,blocked,{**style,'fill':[255-surface]*3})
+                except n.ResourceLimit:
+                    raise
+                except ValueError:
+                    # Only open former source geometry that overlaps this target.
+                    current=[geometry.boxes[key] for key in ids]
+                    overlapping={key for key in cleaned_here
+                        if any(x1<geometry.boxes[key][2] and x2>geometry.boxes[key][0]
+                            and y1<geometry.boxes[key][3] and y2>geometry.boxes[key][1]
+                            for x1,y1,x2,y2 in current)}
+                    if not overlapping:
+                        raise
+                    # An earlier large title may enclose this smaller caption.
+                    # That title's former geometry can now receive outlined type.
+                    # Keep accepted edits, all actual lettering tiles, and every
+                    # still-unprocessed neighbor protected.
+                    occupied=p.dilate(initial|layout|(np.asarray(text.getchannel('A'))!=0),2)
+                    _,_,overlay_blocked=geometry.local(row['binding']['member_ids'],occupied,
+                        margin=192,maximum_side=2048,source_priority=True,cleaned_for_layout=overlapping)
+                    n.budget_check(summary['layout_work_pixels']+overlay_blocked.size*7<=MAX_LAYOUT_WORK,
+                        'final layout work budget')
+                    summary['layout_work_pixels']+=overlay_blocked.size*7
+                    layer,xy,proof=patch_layout(row['binding']['text'],font_data,coverage,
+                        frame,overlay_blocked,{**style,'fill':[255-surface]*3,'outline_fill':[surface]*3},outline=2)
+                    outlined=True
+                    entry['placed_over_prior_cleanup']=True
             px,py=xy;px+=ax;py+=ay;h,w=layer.height,layer.width
-            # An opaque backing is a declared cleanup commit, separate from
-            # the glyph alpha. It removes source remnants under the new type.
-            plate[py:py+h,px:px+w]=surface;erase[py:py+h,px:px+w]=True
+            # The source commit above always survives. On painted backgrounds
+            # a contrasting outline leaves the space between English glyphs visible.
+            if not outlined:
+                plate[py:py+h,px:px+w]=surface;erase[py:py+h,px:px+w]=True
             text.alpha_composite(layer,dest=(px,py));layout[py:py+h,px:px+w]=True
             proof.update(page_tile_offset=[px,py],glyph_page_origin=[px+6,py+6])
             row.update(status='automatic_composed',reason_code=None,reason=None,render_quality='best_effort',
-                cleanup_method='removal_with_opaque_backing',layout=proof)
-            entry.update(status='removed_and_placed',backing_bounds=[px,py,px+w,py+h])
+                cleanup_method='removal_with_outlined_target' if outlined else 'removal_with_opaque_backing',layout=proof)
+            entry.update(status='removed_and_placed')
+            entry['outlined_tile_bounds' if outlined else 'backing_bounds']=[px,py,px+w,py+h]
             artifacts[prefix+'-text.png']=layer
             summary['placed']+=1
         except rec.BindingError:raise
@@ -237,6 +373,8 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
                 row.update(status='source_removed',source_visibility='source_removed_unverified')
             else:entry['status']='blocked'
             summary['unresolved']+=1
+        if entry['status'] in ('removed','removed_and_placed'):
+            cleaned_here.update(ids)
         # Include both removal and backing even if placement was unavailable.
         protected=erase | (np.asarray(text.getchannel('A'))!=0)
         clearance=p.dilate(protected,2)

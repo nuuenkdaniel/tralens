@@ -88,6 +88,28 @@ class ContextPlanningTests(unittest.TestCase):
         request, _ = c.plan(self.request, self.units, self.bounds)
         with self.assertRaises(ValueError): make_payload(request, TRANSLATEGEMMA)
 
+    def test_specialist_sound_effect_uses_bound_scene_without_translating_the_neighbor(self):
+        def with_text(unit,text):
+            reading=Reading(text,'raw_main_reading',unit.selected.evidence_json)
+            return replace(unit,readings=(reading,),selected_revision=reading.revision)
+        effect=with_text(self.units[0],'チクタク')
+        # The narrow specialist route only handles a reduplicated target.
+        scene=with_text(self.units[1],'静かな部屋には時計の音だけが響いた。')
+        base=TranslationRequest((effect,),(effect.unit_id,))
+        self.assertIsNone(c.sound_plan(base,(effect,scene)))
+        effect=with_text(effect,'ドキドキ')
+        base=TranslationRequest((effect,),(effect.unit_id,))
+        planned,proof=c.sound_plan(base,(effect,scene))
+        self.assertEqual(planned.context_ids,(scene.unit_id,))
+        self.assertEqual(proof['selected_revisions'],[scene.selected_revision])
+        prompt=make_payload(planned,TRANSLATEGEMMA)['messages'][0]['content']
+        self.assertIn(scene.selected.text,prompt)
+        self.assertTrue(prompt.rstrip().endswith(effect.selected.text))
+        self.assertIsNone(c.sound_plan(base,(effect,)))
+        with self.assertRaises(ValueError):
+            make_payload(replace(planned,style=base.style),TRANSLATEGEMMA)
+        self.assertEqual(json.loads(execution_metadata(planned,TRANSLATEGEMMA,GenerationOptions()))['scene_context_ids'],[scene.unit_id])
+
     def test_context_uncertainty_does_not_relabel_a_strict_target_as_coverage(self):
         other = replace(self.units[1], completeness=coverage.COMPLETENESS)
         request, _ = c.plan(self.request, (self.units[0], other), self.bounds)

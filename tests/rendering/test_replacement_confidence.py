@@ -33,6 +33,22 @@ class ReplacementConfidenceTests(unittest.TestCase):
         reading = Reading(''.join(row['text'] for row in rows), 'raw_main_reading', n.canonical(rows))
         return replace(self.unit, member_ids=ids, order=ids, readings=(reading,), selected_revision=reading.revision)
 
+    def test_preserve_existing_printed_labels_only_with_complete_raw_word_evidence(self):
+        unit = self.unit_with_scores([.99, .99])
+        rows = json.loads(unit.selected.evidence_json)
+        rows[0].update(text='Open', status='accepted')
+        rows[1].update(text='Closed', status='accepted')
+
+        def selected():
+            reading = Reading('OpenClosed', 'raw_main_reading', n.canonical(rows))
+            return replace(unit, readings=(reading,), selected_revision=reading.revision)
+
+        self.assertTrue(rc.retains_printed_words(selected(), 'Open, Closed.'))
+        for changed in ('Open!', 'Open, closed.', 'Open and closed.', 'OPEN/CLOSED', 'Closed/Open', 'Open'):
+            self.assertFalse(rc.retains_printed_words(selected(), changed))
+        rows[0]['confidence'] = .8
+        self.assertFalse(rc.retains_printed_words(selected(), 'Open/Closed'))
+
     def test_weakest_line_not_average_and_exact_boundary(self):
         unit = self.unit_with_scores([1, 1, .69, 1])
         result = rc.assess_source(unit, 'Hello', .7)

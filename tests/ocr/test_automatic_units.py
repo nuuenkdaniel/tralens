@@ -42,6 +42,45 @@ class AutomaticUnitTests(unittest.TestCase):
         parents = [child for p in batch.proposals for child, _ in p.annotation_parents]
         self.assertEqual(len(parents), len(set(parents)))
 
+    def test_faint_parallel_table_rules_split_cells_without_splitting_dialogue(self):
+        from tralens.ocr import table_rows
+        from tralens.ocr.types import Text_Group
+        import numpy as np
+        pixels=np.full((150,175,3),245,np.uint8)
+        boxes=[Text_Box(i,.8,[(60,y),(115,y+3),(114,y+21),(59,y+18)],'項目') for i,y in enumerate([35,55,75,95])]
+        group=Text_Group(boxes,direction='horizontal')
+        self.assertEqual(table_rows.split([group],pixels,set()),[group])
+        for x in range(pixels.shape[1]):
+            for y in [34,54,74,94,114]:
+                pixels[y+round(.055*(x-60)),x]=183
+        split=table_rows.split([group],pixels,set())
+        self.assertEqual([[b.box_id for b in part.group] for part in split],[[0],[1],[2],[3]])
+        self.assertEqual(table_rows.split([group],pixels,{1}),[group])
+        pixels[:,:59]=245
+        self.assertEqual(table_rows.split([group],pixels,set()),[group])
+
+    def test_stacked_vertical_condition_requires_a_clear_seam_and_continuation(self):
+        from tralens.ocr.types import Text_Group
+        import numpy as np
+        pixels=np.full((120,100,3),255,np.uint8)
+        def block(start,y,words):
+            boxes=[]
+            for index,word in enumerate(words):
+                x=60-14*index
+                boxes.append(Text_Box(start+index,.9,[(x,y),(x+12,y),(x+12,y+35),(x,y+35)],word))
+            return Text_Group(boxes,direction='vertical')
+        upper=block(0,8,['この本が','どうであろうと'])
+        lower=block(2,50,['私には','関係ない'])
+        groups=[upper,lower];by_id={i:(None,None,None) for i in range(4)}
+        def join():
+            return a.stacked_vertical_clauses(groups,pixels,[],{},by_id,set())
+        self.assertEqual([box.box_id for box in join()[0].group],[0,1,2,3])
+        pixels[46]=0
+        self.assertEqual(join(),groups)
+        pixels[46]=255
+        upper.group[-1].text='どうでしょう。'
+        self.assertEqual(join(),groups)
+
     def test_vertical_order_right_to_left_with_tentative_annotation(self):
         image = self.image.copy()
         ImageDraw.Draw(image).ellipse((3, 5, 100, 118), outline="black", width=3)

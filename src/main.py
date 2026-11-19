@@ -422,6 +422,9 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
     preview_options.setdefault('max_attempts',64)
     if type(source_localization) is not bool:
         raise ValueError('source localization requires explicit boolean enablement')
+    if (crop_reader_model is not None and preview_options.get('profile')=='translategemma'
+            and not preview_options.get('review_ocr')):
+        preview_options.setdefault('translation_context','sound-effects')
     if preview_options.get('translation_context', 'isolated') != 'isolated':
         from tralens.translation.context import validate_policy as validate_context
         from tralens.translation.runtime import GENERALIST, TRANSLATEGEMMA
@@ -646,8 +649,8 @@ def main(argv=None):
     parser.add_argument("--max-attempts", type=int, default=64, help="global model call budget, 0..64, including single-rendition retries")
     parser.add_argument('--translation-policy', choices=('coverage-first', 'conservative'), default='coverage-first',
                          help='default coverage-first: attempt source-bound OCR text despite uncertain ownership/crop/orientation')
-    parser.add_argument('--translation-context', choices=('isolated', 'nearby'), default='isolated',
-                         help='opt-in nearby OCR context and one rendition per target; requires explicit generalist model/profile; no inferred reading order')
+    parser.add_argument('--translation-context', choices=('isolated', 'nearby','sound-effects'), default=None,
+                         help='use page dialogue for specialist sound effects (automatic with the crop reader), isolated text, or nearby context for a generalist')
     parser.add_argument('--source-localization', action='store_true',
                           help='opt-in bounded crop predictions using existing OCR; with render, retry failed cleanup as unverified whole strokes')
     parser.add_argument('--visibility-policy', choices=('replacement-only','always-show'),default=None,
@@ -710,7 +713,7 @@ def main(argv=None):
             allow_fragment_previews=args.allow_fragment_previews,review_ocr=args.review_ocr,review_model=args.review_model,
             max_review_attempts=args.max_review_attempts,review_timeout=args.review_timeout)
         preview_options['translation_policy'] = args.translation_policy
-        if args.translation_context != 'isolated':
+        if args.translation_context is not None:
             preview_options['translation_context'] = args.translation_context
         if args.source_localization:
             preview_options['source_localization'] = True

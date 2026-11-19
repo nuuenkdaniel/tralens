@@ -36,6 +36,57 @@ class RemovalFirst(unittest.TestCase):
         self.assertGreater(rows[0]['removal_fallback']['backing_bounds'][2]-rows[0]['removal_fallback']['backing_bounds'][0],12)
         n.verify_pixel_audit(n.pixel_audit(self.image,clean,composite,erase,np.asarray(text.getchannel('A'))!=0,~(erase|layout)))
 
+    def test_dominant_color_completes_only_matching_owned_ink(self):
+        rgb=np.full((150,300,3),[240,221,204],np.uint8)
+        own=np.zeros(rgb.shape[:2],bool);own[10:125,10:245]=True
+        initial=np.zeros_like(own);initial[15:115,68:245]=True
+        for x in [24,80,142,204,268]:
+            rgb[35:95,x:x+20]=[245,151,10]
+        rgb[12:30,18:40]=[30,48,230]
+        protected=np.zeros_like(own);protected[75:100,18:52]=True
+        mask,proof=replacement.complete_color_ink(rgb,own,initial,protected)
+        self.assertGreaterEqual(proof['supported_components'],2)
+        self.assertTrue(mask[45,30])
+        self.assertFalse(mask[85,30] or mask[50,275] or mask[16,20])
+        self.assertTrue((mask[initial]).all())
+
+    def test_renderable_greek_letter_in_mixed_caption(self):
+        text='Measured at 5 μm.'
+        n.validate_text(text,set(map(ord,text)))
+        with self.assertRaisesRegex(ValueError,'missing glyph coverage'):
+            n.validate_text(text,set(map(ord,text))-set(map(ord,'μ')))
+
+    def test_outlined_ink_requires_repeated_enclosed_light_cores(self):
+        page=Image.new('RGB',(180,80),(95,155,120))
+        pen=ImageDraw.Draw(page)
+        for x in range(15,145,15):
+            pen.rectangle((x,18,x+8,44),fill='black')
+            pen.rectangle((x+3,22,x+5,38),fill='white')
+        pixels=np.array(page)
+        broad=np.zeros((80,180),bool)
+        broad[10:51,8:156]=True
+        commit,inference,proof=replacement.outlined_ink(pixels,broad)
+        self.assertGreaterEqual(proof['enclosed_light_components'],8)
+        self.assertFalse((commit&~broad).any())
+        self.assertTrue((commit<=inference).all())
+        self.assertTrue(commit[20:43,15:24].all())
+        self.assertFalse(commit[11:13,10:150].any())
+        self.assertIsNone(replacement.outlined_ink(pixels,broad & (np.indices(broad.shape)[1]<50)))
+        self.assertIsNone(replacement.outlined_ink(np.array(page.convert('L').convert('RGB')),broad))
+
+    def test_painted_fallback_preserves_background_inside_english_tile(self):
+        painted = Image.new('RGB',self.image.size,(100,175,130))
+        ImageDraw.Draw(painted).rectangle((198,94,204,168),fill='black')
+        self.image=painted
+        rows,clean,text,_,erase,_,_,summary=self.finish()
+        self.assertEqual(summary['placed'],1)
+        self.assertEqual(rows[0]['cleanup_method'],'removal_with_outlined_target')
+        left,top,right,bottom=rows[0]['removal_fallback']['outlined_tile_bounds']
+        self.assertTrue((~erase[top:bottom,left:right]).any())
+        self.assertIsNotNone(text.getbbox())
+        self.assertFalse((np.array(clean)[95:168,199:204]==0).all(axis=2).any())
+        self.assertTrue(np.array_equal(np.array(clean)[~erase],np.array(painted)[~erase]))
+
     def test_placement_failure_cannot_cancel_cleanup(self):
         with patch.object(replacement,'patch_layout',side_effect=ValueError('no room')):
             rows,clean,text,_,erase,_,_,summary=self.finish()

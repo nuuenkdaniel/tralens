@@ -178,7 +178,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
         from . import ocr_review as visual
         visual.validate_options(review_ocr,review_model,model,max_review_attempts,review_timeout,run_local_model)
     endpoint = local_endpoint(endpoint)
-    options = GenerationOptions(num_ctx=8192 if translation_context != 'isolated' else 4096,
+    options = GenerationOptions(num_ctx=8192 if translation_context == 'nearby' else 4096,
                                 num_predict=num_predict, keep_alive=keep_alive)
     paddle = resolve_profile(DEFAULT_PROFILE, device=device, model_root=model_root)
     if ocr_factory is None:
@@ -214,8 +214,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
     if source_localization:
         state['settings']['source_localization'] = True
     if translation_context != 'isolated':
-        state['settings'].update(translation_context=translation_context, context_policy=context.POLICY,
-            context='separately identified nearby OCR text; order/speaker/relevance unverified; no image sent to translator')
+        state['settings'].update(translation_context=translation_context, context_policy=context.SOUND_POLICY if translation_context=='sound-effects' else context.POLICY,
+            context='separately identified page OCR text; order/speaker/relevance unverified; no image sent to translator')
     state.update(coverage_attempts=0, coverage_eligible_units=0)
     if allow_fragment_previews:
         state["settings"]["call_order"] = ("selected strict inputs first; explicit fragment selection order"
@@ -381,7 +381,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
             state["units"].append(record)
             records[unit.unit_id] = (record, request)
         if translation_context != 'isolated' and units:
-            planned = context.page_plan(units, state['units'], state['ocr']['batches'][0])
+            planned = context.page_plan(units, state['units'], state['ocr']['batches'][0],translation_context)
             for identity, (request, proof) in planned.items():
                 record, _ = records[identity]
                 record.update(request=_snapshot(request), request_revision=request.revision, context_selection=proof)

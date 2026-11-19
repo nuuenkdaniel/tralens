@@ -357,12 +357,12 @@ def validate_text(text, coverage):
     require(type(text) is str and 0 < len(text) <= 1000 and text.strip(), "text budget/blank")
     require(all(c == "\n" or (32 <= ord(c) < 127) or
                 (unicodedata.category(c)[0] in ("L", "M") and
-                 (unicodedata.name(c, "").startswith(('LATIN ', 'HIRAGANA ', 'KATAKANA ', 'KATAKANA-HIRAGANA ',
+                 (unicodedata.name(c, "").startswith(('LATIN ', 'GREEK ', 'HIRAGANA ', 'KATAKANA ', 'KATAKANA-HIRAGANA ',
                      'CJK UNIFIED IDEOGRAPH-', 'CJK COMPATIBILITY IDEOGRAPH-')) or
                   unicodedata.category(c)[0] == "M")) or
                 unicodedata.category(c)[0] == "P" or
                 (unicodedata.category(c) == "Sm" and unicodedata.bidirectional(c) == "ON")
-                for c in text), "supported Latin/CJK horizontal text required")
+                for c in text), "supported horizontal text required")
     require(all(ord(c) in coverage for c in text if c != "\n"), "missing glyph coverage")
 
 

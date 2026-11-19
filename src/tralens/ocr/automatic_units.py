@@ -14,6 +14,7 @@ from PIL import Image
 
 from .grouping import GroupingMixin, analyze_manga_regions, group_manga_boxes
 from .automatic_evidence import OriginalInkEvidence
+from . import table_rows
 from .types import Text_Group
 from .recognition_units import (PageProvenance, _area, _intersection, _rectangle,
                                 _valid_polygon, image_fingerprint, snapshot_detections)
@@ -144,6 +145,49 @@ def _kana(text):
 
 def _kanji(text):
     return any("\u3400" <= c <= "\u9fff" or "\U00020000" <= c <= "\U0002fa1f" for c in text)
+
+
+def stacked_vertical_clauses(groups, pixels, detections, regions, by_id, excluded):
+    """Join two tiers of vertical print across a blank seam after a concessive."""
+    blocks = []
+    for group in groups:
+        if group.direction != 'vertical' or not 2 <= len(group.group) <= 5:
+            continue
+        ids = tuple(box.box_id for box in group.group)
+        if any(i in excluded for i in ids):
+            continue
+        boxes = [box.bbox for box in group.group]
+        widths = [r-x for x,y,r,b in boxes]
+        if min(widths) < 6 or max(widths) > 1.45*min(widths):
+            continue
+        bounds = (min(v[0] for v in boxes),min(v[1] for v in boxes),
+            max(v[2] for v in boxes),max(v[3] for v in boxes))
+        blocks.append((group,ids,bounds,min(widths)))
+    pairs = []
+    for upper,ids,(x,y,r,b),scale in blocks:
+        if not upper.group[-1].text.rstrip().endswith(('だろうと','であろうと','であっても')):
+            continue
+        for lower,other,(lx,ly,lr,lb),other_scale in blocks:
+            gap = ly-b
+            left,right = max(x,lx),min(r,lr)
+            if not (2 <= gap <= scale and .75 <= other_scale/scale <= 1.33
+                    and right-left >= .8*min(r-x,lr-lx) and abs((x+r)-(lx+lr)) <= 1.5*scale):
+                continue
+            members=ids+other
+            known={regions[by_id[i][2]][0] for i in members if by_id[i][2] in regions}
+            if len(known)>1 or crop_conflicts((min(x,lx),y,max(r,lr),lb),members,detections):
+                continue
+            seam = pixels[b+1:ly,left:right]
+            if seam.size and (seam.min(axis=2)>=245).mean() >= .98:
+                pairs.append((upper,lower))
+    result=list(groups)
+    for upper,lower in pairs:
+        if any(sum(g in pair for pair in pairs)!=1 for g in (upper,lower)):
+            continue
+        result[result.index(upper)]=Text_Group(upper.group+lower.group,
+            method='stacked_vertical_concessive',direction='vertical')
+        result.remove(lower)
+    return result
 
 
 def horizontal_rule_between(first, second, pixels):
@@ -659,6 +703,10 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
     if regroup_companions:
         groups,companion_regroupings,companion_rejections = _regroup_companions(
             groups,regions,by_id,glyphs,ink,annotations,detections,relationships,single_context)
+    if not unassigned:
+        excluded=set(annotations) | set(annotations.values()) | set(relationship_reasons) | set(dark_runs)
+        groups=table_rows.split(groups,bgr,excluded)
+        groups=stacked_vertical_clauses(groups,bgr,detections,regions,by_id,excluded)
     proposals = []
     for group in groups:
         main_ids = tuple(box.box_id for box in group.group)
