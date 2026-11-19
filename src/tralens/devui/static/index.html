@@ -68,15 +68,22 @@
       <div class="workspace columns">
         <section class="image-panel" aria-label="Selected stage image">
           <div class="image-toolbar">
-            <label class="checkbox-label"><input id="compare" type="checkbox"> Compare with original</label>
-            <label class="compact-label"><span class="visually-hidden">Zoom</span><select id="zoom"><option value="fit">Fit page</option><option value="actual">Actual size</option></select></label>
+            <label class="compact-label">Compare<select id="compare"><option value="off">Off</option><option value="swipe">Swipe</option><option value="side">Side by side</option></select></label>
+            <label class="compact-label">Zoom<select id="zoom"><option value="fit">Fit page</option><option value="width">Fit width</option><option value="actual">Actual size</option></select></label>
             <a id="download" class="text-link" target="_blank" rel="noopener" hidden>Open image ↗</a>
+            <button id="expand" class="text-button expand-button" type="button" aria-pressed="false" title="Fill the window (Esc to close)">⤢ Expand</button>
           </div>
           <div id="preview-scroll" class="preview-scroll" data-zoom="fit">
             <figure id="comparison" hidden><figcaption>Original</figcaption><img id="compare-source" alt="Unmodified original page"></figure>
             <figure id="stage-frame"><figcaption id="image-caption">Original</figcaption>
-              <canvas id="source" aria-label="Page preview. Select text regions using the list alongside." hidden></canvas>
-              <img id="stage-image" alt="Selected pipeline output" hidden>
+              <div id="stage-box" class="stage-box">
+                <canvas id="source" aria-label="Page preview. Select text regions using the list alongside." hidden></canvas>
+                <img id="stage-image" alt="Selected pipeline output" hidden>
+                <img id="swipe-original" class="swipe-original" alt="" hidden>
+                <span id="swipe-left" class="swipe-tag swipe-tag-left" hidden>Original</span>
+                <span id="swipe-right" class="swipe-tag swipe-tag-right" hidden></span>
+                <div id="swipe-handle" class="swipe-handle" role="slider" tabindex="0" aria-label="Comparison divider: original on the left" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" hidden><span aria-hidden="true">⇔</span></div>
+              </div>
               <div id="stage-placeholder" class="stage-placeholder" hidden><span aria-hidden="true">○</span><h3 id="placeholder-title"></h3><p id="placeholder-copy"></p><button id="show-previous" class="secondary-button" type="button">View previous stage</button></div>
             </figure>
           </div>

@@ -176,6 +176,30 @@ body.dragging .run-card, body.dragging .empty-state { outline: 3px solid var(--r
 .preview-scroll[data-zoom=actual] { justify-content: flex-start; }
 .preview-scroll[data-zoom=actual] figure { flex: none; }
 .preview-scroll[data-zoom=actual] canvas, .preview-scroll[data-zoom=actual] img { max-width: none; max-height: none; }
+.preview-scroll[data-zoom=width] canvas, .preview-scroll[data-zoom=width] img { width: 100%; max-height: none; }
+.preview-scroll[data-zoom=width] .stage-box { width: 100%; }
+
+/* Swipe comparison */
+.stage-box { --split: 50%; position: relative; width: fit-content; max-width: 100%; line-height: 0; }
+.preview-scroll .stage-box .swipe-original { position: absolute; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; box-shadow: none;
+  clip-path: inset(0 calc(100% - var(--split)) 0 0); pointer-events: none; user-select: none; }
+.swipe-handle { position: absolute; top: 0; bottom: 0; left: var(--split); width: 32px; margin-left: -16px; cursor: ew-resize; touch-action: none; display: flex; align-items: center; justify-content: center; line-height: 1.2; }
+.swipe-handle::before { content: ""; position: absolute; top: 0; bottom: 0; left: 15px; width: 2px; background: #fff; box-shadow: 0 0 0 1px rgb(0 0 0 / .35); }
+.swipe-handle span { position: relative; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: #fff; color: #1d2422; font-size: 15px; box-shadow: 0 2px 8px rgb(0 0 0 / .35); }
+.swipe-handle:focus-visible { outline: none; }
+.swipe-handle:focus-visible span { outline: 3px solid var(--ring); outline-offset: 2px; }
+.stage-box:has(.swipe-handle:not([hidden])) { cursor: ew-resize; touch-action: none; }
+.swipe-tag { position: absolute; top: 8px; padding: 3px 8px; border-radius: 999px; background: rgb(0 0 0 / .62); color: #fff; font-size: 11px; font-weight: 600; line-height: 1.4; pointer-events: none; }
+.swipe-tag-left { left: 8px; }
+.swipe-tag-right { right: 8px; }
+
+/* Expanded viewer */
+.expand-button { font-weight: 600; margin-left: auto; }
+.text-link:not([hidden]) + .expand-button { margin-left: 12px; }
+body.no-scroll { overflow: hidden; }
+.image-panel.expanded { position: fixed; inset: 12px; z-index: 50; display: flex; flex-direction: column; box-shadow: 0 0 0 100vmax rgb(0 0 0 / .7); }
+.image-panel.expanded .preview-scroll { flex: 1; height: auto; }
+.image-panel.expanded .preview-scroll[data-zoom=fit] canvas, .image-panel.expanded .preview-scroll[data-zoom=fit] img:not(.swipe-original) { max-height: calc(100vh - 190px); }
 #source[data-interactive=true] { cursor: crosshair; }
 .stage-placeholder { align-self: center; margin: auto; padding: 40px 20px; max-width: 420px; text-align: center; }
 .stage-placeholder > span { color: var(--muted); font-size: 36px; }

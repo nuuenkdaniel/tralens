@@ -243,8 +243,12 @@ if (typeof document !== "undefined") {
     $("download").hidden = true;
     const comparison = available && sourceLoaded() && selectedView !== "original";
     $("compare").disabled = !comparison;
-    $("comparison").hidden = !comparison || !$("compare").checked;
-    if (comparison && $("compare").checked && $("compare-source").src !== sourceImage.src) $("compare-source").src = sourceImage.src;
+    const compareMode = comparison ? $("compare").value : "off";
+    $("comparison").hidden = compareMode !== "side";
+    for (const id of ["swipe-original", "swipe-handle", "swipe-left", "swipe-right"]) $(id).hidden = compareMode !== "swipe";
+    $("swipe-right").textContent = titles[selectedView];
+    if (compareMode === "side" && $("compare-source").src !== sourceImage.src) $("compare-source").src = sourceImage.src;
+    if (compareMode === "swipe" && $("swipe-original").src !== sourceImage.src) $("swipe-original").src = sourceImage.src;
     if (available && ["original", "ocr", "translation"].includes(selectedView) && sourceLoaded()) {
       $("source").hidden = false;
       $("source").dataset.interactive = String(selectedView !== "original");
@@ -496,8 +500,55 @@ if (typeof document !== "undefined") {
     });
   }
   $("overlay").addEventListener("change", () => { updateThumbnails(); renderImage(); renderInspector(); });
-  $("compare").addEventListener("change", renderImage);
-  $("zoom").addEventListener("change", () => { $("preview-scroll").dataset.zoom = $("zoom").value; });
+  // Viewing preferences are per-viewer conveniences; storage may be unavailable.
+  const remember = (key, value) => { try { localStorage.setItem("tralens." + key, value); } catch { /* ignore */ } };
+  const recall = key => { try { return localStorage.getItem("tralens." + key); } catch { return null; } };
+  for (const [id, key] of [["compare", "compare"], ["zoom", "zoom"]]) {
+    const saved = recall(key);
+    if (saved && [...$(id).options].some(option => option.value === saved)) $(id).value = saved;
+  }
+  $("preview-scroll").dataset.zoom = $("zoom").value;
+  $("compare").addEventListener("change", () => { remember("compare", $("compare").value); renderImage(); });
+  $("zoom").addEventListener("change", () => { $("preview-scroll").dataset.zoom = $("zoom").value; remember("zoom", $("zoom").value); });
+  // Swipe comparison: original on the left of the divider, selected stage on the right.
+  let dragging = false;
+  const setSplit = percent => {
+    const value = Math.min(100, Math.max(0, percent));
+    $("stage-box").style.setProperty("--split", value + "%");
+    $("swipe-handle").setAttribute("aria-valuenow", String(Math.round(value)));
+  };
+  const splitAt = event => { const rect = $("stage-box").getBoundingClientRect(); if (rect.width) setSplit((event.clientX - rect.left) / rect.width * 100); };
+  const swipeActive = () => !$("swipe-handle").hidden;
+  $("swipe-handle").addEventListener("pointerdown", event => { event.preventDefault(); dragging = true; $("swipe-handle").setPointerCapture(event.pointerId); });
+  // Outside the clickable OCR/translation overlays, dragging anywhere on the page moves the divider.
+  $("stage-box").addEventListener("pointerdown", event => {
+    if (!swipeActive() || event.target === $("swipe-handle") || event.target.closest("#swipe-handle") || $("source").dataset.interactive === "true" && !$("source").hidden) return;
+    event.preventDefault(); dragging = true; $("stage-box").setPointerCapture(event.pointerId); splitAt(event);
+  });
+  for (const target of [$("swipe-handle"), $("stage-box")]) {
+    target.addEventListener("pointermove", event => { if (dragging) splitAt(event); });
+    for (const name of ["pointerup", "pointercancel"]) target.addEventListener(name, () => { dragging = false; });
+  }
+  $("swipe-handle").addEventListener("keydown", event => {
+    const now = Number($("swipe-handle").getAttribute("aria-valuenow"));
+    const next = {ArrowLeft: now - 5, ArrowRight: now + 5, Home: 0, End: 100}[event.key];
+    if (next !== undefined) { event.preventDefault(); setSplit(next); }
+  });
+  // Expanded view fills the window; arrow keys step through stages, Esc closes.
+  const panel = document.querySelector(".image-panel");
+  function setExpanded(on) {
+    panel.classList.toggle("expanded", on); document.body.classList.toggle("no-scroll", on);
+    $("expand").setAttribute("aria-pressed", String(on)); $("expand").textContent = on ? "✕ Close" : "⤢ Expand";
+  }
+  $("expand").addEventListener("click", () => setExpanded(!panel.classList.contains("expanded")));
+  document.addEventListener("keydown", event => {
+    if (!panel.classList.contains("expanded")) return;
+    if (event.key === "Escape") { setExpanded(false); return; }
+    if (event.target.closest?.("select, input, textarea, [role=slider], #stages")) return;
+    const index = VIEW_ORDER.indexOf(selectedView);
+    const next = event.key === "ArrowRight" ? Math.min(index + 1, 4) : event.key === "ArrowLeft" ? Math.max(index - 1, 0) : null;
+    if (next !== null && next !== index) { event.preventDefault(); selectView(VIEW_ORDER[next]); }
+  });
   $("follow").addEventListener("change", () => { if ($("follow").checked && snapshot) selectView(progressView(snapshot), false); });
   $("clear-selection").addEventListener("click", () => chooseUnit(null));
   $("show-previous").addEventListener("click", () => selectView(["clean", "final"].includes(selectedView) ? "translation" : "original"));
