@@ -425,7 +425,7 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
     preview_options.setdefault('max_attempts',64)
     if type(source_localization) is not bool:
         raise ValueError('source localization requires explicit boolean enablement')
-    if (crop_reader_model is not None and preview_options.get('profile')=='translategemma'
+    if (crop_reader_model is not None and preview_options.get('model') != 'gpt-6-luna' and preview_options.get('profile')=='translategemma'
             and not preview_options.get('review_ocr')):
         preview_options.setdefault('translation_context','sound-effects')
     if preview_options.get('translation_context', 'isolated') != 'isolated':
@@ -646,6 +646,8 @@ def main(argv=None):
     parser.add_argument("--max-review-attempts",type=int,default=4,help="independent review-generation budget, 0..20")
     parser.add_argument("--review-timeout",type=float,default=90,help="review timeout, at most 120 seconds")
     parser.add_argument("--model", default="translategemma:27b", help="installed model (default: translategemma:27b); no download/fallback")
+    parser.add_argument("--luna-mode", choices=("page","isolated","panel","atlas","reviewed"), default=None)
+    parser.add_argument("--related-page", type=Path, action="append", default=[], help="explicit same-manga context image for Luna, repeatable")
     parser.add_argument("--profile", choices=("generalist", "translategemma"), default="translategemma",
                         help="capability profile (default: translategemma); Qwen overrides require generalist")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434")
@@ -715,6 +717,8 @@ def main(argv=None):
             keep_alive=args.keep_alive, num_predict=args.num_predict, selected_ids=tuple(args.unit_id),
             allow_fragment_previews=args.allow_fragment_previews,review_ocr=args.review_ocr,review_model=args.review_model,
             max_review_attempts=args.max_review_attempts,review_timeout=args.review_timeout)
+        if args.model == "gpt-6-luna" or args.related_page or args.luna_mode:
+            preview_options.update(luna_mode=args.luna_mode or "reviewed", related_pages=args.related_page)
         preview_options['translation_policy'] = args.translation_policy
         if args.translation_context is not None:
             preview_options['translation_context'] = args.translation_context

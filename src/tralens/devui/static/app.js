@@ -128,9 +128,11 @@ if (typeof document !== "undefined") {
   const radios = name => [...document.querySelectorAll(`input[name="${name}"]`)];
   const choice = name => radios(name).find(input => input.checked)?.value;
   const setChoice = (name, value) => radios(name).forEach(input => { input.checked = input.value === value; });
-  const currentSettings = () => runOptions({mode: choice("mode"), style: choice("style"), budget: Number($("budget").value),
+  const currentSettings = () => ({translation_model: choice("mode") === "ocr" ? "local" : $("translation-model").value,
+    luna_mode: $("luna-mode").value, related_jobs: $("related-label").hidden ? [] : [...$("related-jobs").selectedOptions].map(o => o.value),
+    ...runOptions({mode: choice("mode"), style: choice("style"), budget: Number($("budget").value),
     reread: Boolean(config?.quality_reread_available) && $("quality-reread").checked,
-    lama: Boolean(config?.reconstruction_available) && $("reconstruction-policy").value === "lama"});
+    lama: Boolean(config?.reconstruction_available) && $("reconstruction-policy").value === "lama"})});
   function setBusy(value) {
     busy = value;
     const retry = Boolean(current && snapshot && snapshot.status !== "running");
@@ -139,7 +141,8 @@ if (typeof document !== "undefined") {
     $("run").textContent = value ? "Running…" : retry ? "Retry pipeline ↻" : "Run pipeline →";
     $("run").title = retry ? "Rerun this saved upload with the current settings. Previous results are kept." : "Start a new run with the selected image.";
     $("jobs").disabled = value;
-    for (const id of ["file", "budget"]) $(id).disabled = value;
+    $("translation-model").disabled = value || choice("mode") === "ocr";
+    for (const id of ["file", "budget", "luna-mode", "related-jobs"]) $(id).disabled = value;
     for (const input of radios("mode")) input.disabled = value || (input.value === "render" && !config?.render_enabled);
     for (const input of radios("style")) input.disabled = value || !render;
     $("style-group").dataset.disabled = String(!render);
@@ -152,6 +155,8 @@ if (typeof document !== "undefined") {
     $("style-help").textContent = mode !== "render" ? (mode === "ocr" ? "Finds and groups text. No translation model calls." : "Translates the text without changing the image.")
       : style === "replace-all" ? "Every available translation is drawn on the page. Artwork behind text may be smeared or covered by a white patch."
       : "Only regions that clean up safely are replaced. Other translations are listed alongside but not drawn.";
+    $("luna-mode-label").hidden = mode === "ocr" || $("translation-model").value === "local";
+    $("related-label").hidden = $("luna-mode-label").hidden || $("luna-mode").value === "isolated";
     const warning = maskWarning(config, mode, style);
     $("mask-warning").textContent = warning; $("mask-warning").hidden = !warning;
     const parts = [mode === "ocr" ? "no model calls" : `up to ${$("budget").value} calls`];
@@ -320,6 +325,7 @@ if (typeof document !== "undefined") {
       button.type = "button"; button.addEventListener("click", () => chooseUnit(unit.id));
       const [text, tone] = unitStatus(unit), badge = node("span", text, "unit-status"); badge.dataset.tone = tone;
       heading.append(button, badge); box.append(heading, node("pre", unit.source || "No selected source reading"));
+      if (unit.luna_reading && unit.luna_reading !== unit.source) box.append(node("p", "Luna reading"), node("pre", unit.luna_reading));
       if (unit.reread_selected) {
         box.append(node("p", "Unverified paired reread used for translation; original OCR retained below.", "note"));
         const original = node("details"); original.append(node("summary", "Original OCR"), node("pre", unit.raw_source)); box.append(original);
@@ -397,6 +403,9 @@ if (typeof document !== "undefined") {
     if (settingsJob !== data.id) {
       if (data.options.mode !== "render" || config?.render_enabled) setChoice("mode", data.options.mode);
       setChoice("style", styleOf(data.options));
+      $("translation-model").value = data.options.translation_model || "local";
+      $("luna-mode").value = data.options.luna_mode || "reviewed";
+      for (const option of $("related-jobs").options) option.selected = (data.options.related_jobs || []).includes(option.value);
       $("budget").value = data.options.max_attempts;
       $("quality-reread").checked = Boolean(data.options.quality_reread);
       settingsJob = data.id; settingsSummary();
@@ -474,7 +483,7 @@ if (typeof document !== "undefined") {
       const result = retry
         ? await request(`/api/jobs/${parent}/retry`, {method: "POST", headers: {"Content-Type": "application/json", "X-Tralens-Token": config.token}, body: JSON.stringify(settings)})
         : await request("/api/jobs", {method: "POST", headers: {"Content-Type": "application/octet-stream", "X-Tralens-Token": config.token, "X-Tralens-Options": JSON.stringify(settings)}, body: file});
-      const choice = node("option", `${retry ? "Retry " + parent.slice(0, 8) : file.name} · ${result.id.slice(0, 8)}`); choice.value = result.id; $("jobs").append(choice); $("jobs").value = result.id; selectJob(result.id, true);
+      const choice = node("option", `${retry ? "Retry " + parent.slice(0, 8) : file.name} · ${result.id.slice(0, 8)}`); choice.value = result.id; $("jobs").append(choice); $("related-jobs").append(choice.cloneNode(true)); $("jobs").value = result.id; selectJob(result.id, true);
     } catch (error) { showError(error.message); $("status").textContent = "Run was not started."; setBusy(false); }
   });
   $("cancel").addEventListener("click", async () => {
@@ -561,7 +570,7 @@ if (typeof document !== "undefined") {
       if (context.isPointInPath(path, x, y)) { const owner = owners.get(JSON.stringify(detection.source_id)); if (owner) chooseUnit(owner.unit.id, true); break; }
     }
   });
-  for (const id of ["budget", "quality-reread", "reconstruction-policy"]) $(id).addEventListener("input", settingsSummary);
+  for (const id of ["budget", "quality-reread", "reconstruction-policy", "translation-model", "luna-mode"]) $(id).addEventListener("input", settingsSummary);
   for (const input of [...radios("mode"), ...radios("style")]) input.addEventListener("change", settingsSummary);
   for (const eventName of ["dragenter", "dragover"]) document.addEventListener(eventName, event => {
     if (event.dataTransfer?.types.includes("Files")) { event.preventDefault(); if (!busy) document.body.classList.add("dragging"); }
@@ -581,7 +590,7 @@ if (typeof document !== "undefined") {
     $("reread-availability").textContent = config.quality_reread_available ? `Rereads low-confidence text with local Manga OCR and ${config.reread_model}.` : "Not configured (start with --manga-reread-model).";
     setChoice("mode", config.render_enabled ? "render" : "translate"); settingsSummary(); setBusy(false);
     const jobs = await request("/api/jobs");
-    for (const job of jobs) { const choice = node("option", `Run ${job.id.slice(0, 8)} · ${friendly(job.status)}`); choice.value = job.id; $("jobs").append(choice); }
+    for (const job of jobs) { const choice = node("option", `Run ${job.id.slice(0, 8)} · ${friendly(job.status)}`); choice.value = job.id; $("jobs").append(choice); $("related-jobs").append(choice.cloneNode(true)); }
     if (jobs.length && !pendingFile) { const requested = new URL(window.location.href).searchParams.get("job"); const last = jobs.find(job => job.id === requested) || jobs[jobs.length - 1]; $("jobs").value = last.id; selectJob(last.id); }
   }).catch(error => showError(error.message));
 }

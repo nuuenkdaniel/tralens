@@ -56,7 +56,7 @@ class Config:
 
 def options(value, *, render_enabled):
     if type(value) is not dict or set(value) - {'mode', 'max_attempts', 'allow_fragments', 'render_policy', 'translation_policy',
-                                             'replacement_policy', 'quality_reread', 'layout_policy', 'source_localization', 'visibility_policy', 'removal_policy', 'reconstruction_policy'}:
+                                             'replacement_policy', 'quality_reread', 'layout_policy', 'source_localization', 'visibility_policy', 'removal_policy', 'reconstruction_policy', 'translation_model', 'luna_mode', 'related_jobs'}:
         raise RequestError('Unknown run options.')
     result = dict(mode='render' if render_enabled else 'ocr', max_attempts=64,
         allow_fragments=False, render_policy='best-effort', translation_policy='coverage-first',
@@ -101,6 +101,18 @@ def options(value, *, render_enabled):
         raise RequestError('Unknown removal or reconstruction policy.')
     if result['reconstruction_policy']=='lama' and (result['mode']!='render' or result['removal_policy']!='aggressive'):
         raise RequestError('LaMa requires Final rendering and Aggressive removal.')
+    from ..translation import luna
+    model = result.get('translation_model', 'local')
+    mode = result.get('luna_mode', 'reviewed')
+    related = result.get('related_jobs', [])
+    if model not in ('local', luna.MODEL) or mode not in luna.MODES:
+        raise RequestError('Unknown translation model or Luna mode.')
+    if (not isinstance(related, list) or len(related) > 6 or
+            any(type(i) is not str or not re.fullmatch('[0-9a-f]{32}', i) for i in related)
+            or len(set(related)) != len(related)):
+        raise RequestError('Select up to six distinct saved context pages.')
+    if related and (model != luna.MODEL or mode == 'isolated' or result['mode'] == 'ocr'):
+        raise RequestError('Context pages require visual Luna translation.')
     return result
 
 
@@ -137,6 +149,15 @@ def execute_job(config, job):
         run_local_model=settings['mode'] != 'ocr', model=config.model, profile=config.profile,
         endpoint=config.endpoint, max_attempts=settings['max_attempts'],
         allow_fragment_previews=settings['allow_fragments'], translation_policy=settings['translation_policy'])
+    if settings.get('translation_model') == 'gpt-6-luna' and settings['mode'] != 'ocr':
+        related = []
+        for identity in settings.get('related_jobs', []):
+            directory = config.root / identity
+            paths = [directory/name for name in ('input.jpg', 'input.png') if (directory/name).is_file()]
+            if directory.is_symlink() or len(paths) != 1 or paths[0].is_symlink():
+                raise ValueError('Saved context image is unavailable')
+            related.append(paths[0])
+        kwargs.update(model='gpt-6-luna', luna_mode=settings.get('luna_mode', 'reviewed'), related_pages=related)
     if settings['mode'] == 'render':
         from main import run_pipeline
         if (config.crop_reader_model is not None and settings['translation_policy']=='coverage-first'
@@ -423,6 +444,7 @@ class App:
             units.append(dict(id=unit['unit_id'], member_ids=unit['member_ids'],
                 input_kind=record.get('input_kind', 'strict_utterance'),
                 source=selected_text(record.get('translation_input') or unit), raw_source=selected_text(unit),
+                luna_reading=(record.get('luna_decision') or {}).get('source'),
                 reread_selected=bool(record.get('coverage', {}).get('reread_selected_revision')), status=record['status'],
                 target=dict(result.get('translations', [])).get(unit['unit_id']),
                 reasons=record.get('blocking_reasons', []) +

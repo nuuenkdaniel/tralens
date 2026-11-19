@@ -73,8 +73,16 @@ selection is needed, including after refresh. A retry reruns the pipeline in a
 fresh directory with a fresh call budget; it does not resume or overwrite the
 previous run. Choosing a different image switches the button back to Run pipeline.
 
+Select **Advanced → Translation model → GPT-6 Luna** to use the signed-in Codex
+CLI. Visual modes send the current page and the same-manga pages you select to
+OpenAI. The default Luna mode sends numbered crops with the page and rechecks
+skipped regions while the call budget allows. Choose **OCR text per region** for
+the text-only comparison. The CLI equivalent is `--model gpt-6-luna` with
+optional repeated `--related-page PATH` arguments. The local model remains the
+viewer default. See the [four-page Luna comparison](docs/luna-translation-trial.md).
+
 The default OCR export root is `~/.cache/tralens/paddle-v6-models`; override with
-`--model-root PATH` if needed. Translation uses the existing local Ollama service
+`--model-root PATH` if needed. Local translation uses the existing Ollama service
 and `translategemma:27b`; no models are downloaded. The viewer respects
 `OLLAMA_HOST` (including a bare local IP, with port 11434); `--endpoint http://IP:PORT`
 overrides it. Otherwise it uses `http://127.0.0.1:11434`. The selected endpoint is

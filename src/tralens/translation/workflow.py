@@ -125,7 +125,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 timeout=120, keep_alive=60, num_predict=1024, selected_ids=(), ocr_factory=None, runtime=None,
                 allow_fragment_previews=False, review_ocr=False, review_model="qwen3.8:latest",
                 max_review_attempts=4, review_timeout=90, review_runtime=None, cancelled=lambda:False,
-                translation_policy='coverage-first', ocr_refine=None, translation_context='isolated', source_localization=False):
+                translation_policy='coverage-first', ocr_refine=None, translation_context='isolated', source_localization=False,
+                luna_mode=None, related_pages=()):
     """Injected OCR factory is workflow-owned; an injected translation runtime is caller-owned.
 
     Invalid arguments/paths are rejected before creating any engine. Runtime/engine
@@ -165,6 +166,19 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
     from ..ocr.recognition_units import image_fingerprint, snapshot_detections
     from PIL import Image
 
+    from . import luna
+    frontier = model == luna.MODEL
+    if frontier:
+        luna_mode = luna_mode or "reviewed"
+        if len(related_pages) > 6:
+            raise ValueError('select at most six related manga pages')
+        if luna_mode not in luna.MODES or (luna_mode == 'isolated' and related_pages):
+            raise ValueError('invalid Luna mode or context')
+        if allow_fragment_previews or review_ocr or translation_context != 'isolated':
+            raise ValueError('Luna uses its own page context and review')
+        profile = 'generalist'
+    elif related_pages or luna_mode is not None:
+        raise ValueError('Luna options require gpt-6-luna')
     profiles = {"generalist": GENERALIST, "translategemma": TRANSLATEGEMMA}
     if profile not in profiles:
         raise ValueError("unknown translation profile")
@@ -199,6 +213,11 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
     size = rgb.size
     rgb.close()
     del content
+    related_hashes = {}
+    for path in related_pages:
+        path = Path(path).expanduser().resolve(strict=True)
+        related_hashes[path] = hashlib.sha256(_read_image(path)).hexdigest()
+    related_pages = tuple(related_hashes)
     output.mkdir(mode=0o700, exist_ok=False)
     state = {"schema_version": 2 if allow_fragment_previews else 1, "preview_only": True, "status": "running", "stage": "ocr",
         "input": {"path": str(image), "sha256": image_hash, "pixels_sha256": pixels_hash, "size": list(size)},
@@ -211,6 +230,11 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
         "ocr": None, "units": [], "attempts": 0, "strict_attempts": 0, "fragment_attempts": 0,
         "strict_eligible_units": 0, "fragment_candidate_inputs": 0, "cleanup": None, "error": None}
     state['settings']['translation_policy'] = translation_policy
+    if frontier:
+        state['settings'].update(provider='Codex CLI', profile=luna_mode, endpoint=None,
+            context='isolated OCR' if luna_mode == 'isolated' else 'target image and explicit related pages',
+            related_pages=[{'path': str(p), 'sha256': h} for p,h in related_hashes.items()],
+            model_identity='requested signed-in Codex model')
     if source_localization:
         state['settings']['source_localization'] = True
     if translation_context != 'isolated':
@@ -232,6 +256,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
         state['settings']['call_order'] = ('strict inputs first, then source-bound uncertain text regions, then optional fragments; '
             'explicit selection order within each kind' if selected_ids else
             'strict inputs first, then uncertain text regions with weak grouped-text/script/length hints, then optional fragments')
+    if frontier:
+        state['settings']['call_order'] = 'page batch then skipped-region reviews' if luna_mode == 'reviewed' else luna_mode
     checkpoint = output / "preview.json"
     _atomic_json(checkpoint, state)
 
@@ -241,6 +267,11 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
     def assert_source():
         try:
             current = hashlib.sha256(_read_image(image)).hexdigest()
+            for path, expected in related_hashes.items():
+                if hashlib.sha256(_read_image(path)).hexdigest() != expected:
+                    raise SourceChanged('related manga page changed during workflow')
+        except SourceChanged:
+            raise
         except (OSError, ValueError) as error:
             state["input"]["source_check_error"] = type(error).__name__
             raise SourceChanged("original image is no longer readable for source binding") from error
@@ -450,7 +481,11 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                     "reason":entry["scheduling"]["reason"] if kind else "strict_inputs_first"})
         persist()  # Persist every candidate and planned order before provider entry.
         with (output / "results.jsonl").open("x", encoding="utf-8") as journal:
-            for record,request,original,prefix,kind in jobs:
+            if frontier:
+                luna.translate_jobs(jobs, state, mode=luna_mode, image=image, related=related_pages,
+                    budget=max_attempts, timeout=timeout, persist=persist, assert_source=assert_source,
+                    cancelled=cancelled, journal=journal)
+            for record,request,original,prefix,kind in (() if frontier else jobs):
                 is_fragment,is_alternate = kind is True,kind == "alternate"
                 status_prefix = "alternate_" if is_alternate else "fragment_" if is_fragment else ""
                 unit_id = request.target_ids[0]
