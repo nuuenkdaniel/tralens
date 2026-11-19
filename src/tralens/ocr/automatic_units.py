@@ -190,6 +190,45 @@ def stacked_vertical_clauses(groups, pixels, detections, regions, by_id, exclude
     return result
 
 
+def join_horizontal_continuations(groups, pixels, detections, regions, by_id, excluded, clause_parents):
+    """Bind a split obligation or a caption whose emphatic last line changes scale."""
+    pairs = []
+    for upper in groups:
+        last = upper.group[-1]
+        obligation = last.text.rstrip().endswith(('ないと','なくては','なければ'))
+        if upper.direction != 'horizontal' or last.confidence < .90 or not (obligation or last.box_id in clause_parents):
+            continue
+        x,y,r,b = last.bbox
+        for lower in groups:
+            first = lower.group[0]
+            emphatic = first.box_id in clause_parents.get(last.box_id, ())
+            if (lower is upper or lower.direction != 'horizontal' or first.confidence < .90
+                    or not (emphatic or (obligation and first.text.lstrip().startswith(('いけな','ならな'))))):
+                continue
+            lx,ly,lr,lb = first.bbox
+            height = b-y
+            left,right = max(lx,x),min(lr,r)
+            if (not 1 <= ly-b <= height*.6 or not .75 <= (lb-ly)/height <= (1.85 if emphatic else 1.33)
+                    or right-left < .8*min(r-x,lr-lx) or abs((lx+lr)-(x+r)) > height):
+                continue
+            boxes = upper.group+lower.group
+            ids = tuple(box.box_id for box in boxes)
+            known = {regions[by_id[i][2]][0] for i in ids if by_id[i][2] in regions}
+            bounds = (min(box.bbox[0] for box in boxes),min(box.bbox[1] for box in boxes),
+                      max(box.bbox[2] for box in boxes),max(box.bbox[3] for box in boxes))
+            seam = pixels[b:ly,left:right]
+            if (excluded.isdisjoint(set(ids) - ({last.box_id} if emphatic else set())) and len(known)<=1 and not crop_conflicts(bounds,ids,detections)
+                    and (seam.min(2)>240).mean()>=.97):
+                pairs.append((upper,lower))
+    result = list(groups)
+    for upper,lower in pairs:
+        if all(sum(g in pair for pair in pairs)==1 for g in (upper,lower)):
+            result[result.index(upper)] = Text_Group(upper.group+lower.group,
+                method='horizontal_clause_continuation',direction='horizontal')
+            result.remove(lower)
+    return result
+
+
 def horizontal_rule_between(first, second, pixels):
     """Find a thin, near-horizontal printed rule crossing overlapping row boxes."""
     a,b=sorted((first.bbox,second.bbox),key=lambda box:box[1]+box[3])
@@ -560,6 +599,12 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
             if (child_glyphs.scale and parent_glyphs.scale
                     and child_glyphs.scale > .75*parent_glyphs.scale):
                 rejects.append("original_glyph_scale_not_smaller_than_main")
+            # A complete inflected horizontal clause can sit above a larger
+            # emphatic line, in the same position as a phonetic gloss.
+            wording = unicodedata.normalize("NFKC", child.text).strip()
+            if (direction == "horizontal" and child.confidence >= .9 and len(wording) >= 4
+                    and _kanji(wording) and wording.endswith(("は", "が", "を", "には", "では"))):
+                rejects.append("horizontal_clause_with_case_particle")
             row = {"parent_id": parent.source_id, "child_glyphs": asdict(child_glyphs),
                 "parent_glyphs": asdict(parent_glyphs), "boundary": boundary, "rejected_reasons": tuple(rejects)}
             child_reading = unicodedata.normalize("NFKC",child.text).strip()
@@ -698,6 +743,32 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
                 tuple(by_id[child][2] for child in sorted(
                     (child for child,parent in annotations.items() if parent in group_ids),key=_key))))
         regions,ownership_repairs = ink.complementary_ownership(boxes,member_groups,regions)
+        for mains, children in member_groups:
+            missing = tuple(i for i in children if i not in regions)
+            if (len(missing)!=1 or len(children)!=1 or len(mains)<3 or any(i not in regions for i in mains)
+                    or len({regions[i][0] for i in mains+children if i in regions})!=1
+                    or any(boxes[i].confidence < .90 for i in mains)
+                    or any(len(possibilities[boxes[i].box_id])!=1 for i in missing)):
+                continue
+            child = boxes[missing[0]]
+            parent = by_id[annotations[child.box_id]][1]
+            x,y,r,b = child.bbox
+            px,py,pr,pb = parent.bbox
+            if (len(child.text.strip())!=1 or child.confidence>=.85 or parent.confidence<.9
+                    or not (px<x<pr and py<=y<b<=pb and r-x <= .5*(pr-px))):
+                continue
+            if single_context is None:
+                single_context = ink.single_glyph_context()
+            support = ink.enclosed_annotation_support(boxes,mains,children,single_context)
+            if support:
+                owner = regions[mains[0]][0]
+                confidence = min(row[2] for row in support)
+                for i in missing:
+                    regions[i] = (owner,confidence)
+                ownership_repairs += ({"method":"shared_original_annotation_enclosure",
+                    "main_ids":tuple(boxes[i].box_id for i in mains),
+                    "member_ids":tuple(boxes[i].box_id for i in mains+children),
+                    "region_id":owner,"source_evidence":support},)
     repaired_ids = {i for repair in ownership_repairs for i in repair["member_ids"]}
     companion_regroupings,companion_rejections = (),()
     if regroup_companions:
@@ -707,6 +778,10 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
         excluded=set(annotations) | set(annotations.values()) | set(relationship_reasons) | set(dark_runs)
         groups=table_rows.split(groups,bgr,excluded)
         groups=stacked_vertical_clauses(groups,bgr,detections,regions,by_id,excluded)
+        clause_parents = {child: tuple(row["parent_id"] for row in rows
+                if row["rejected_reasons"] == ("horizontal_clause_with_case_particle",))
+            for child,rows in relation_evidence.items() if relationship_reasons.get(child)==("horizontal_clause_with_case_particle",)}
+        groups=join_horizontal_continuations(groups,bgr,detections,regions,by_id,excluded,clause_parents)
     proposals = []
     for group in groups:
         main_ids = tuple(box.box_id for box in group.group)

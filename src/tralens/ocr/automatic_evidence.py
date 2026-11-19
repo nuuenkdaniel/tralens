@@ -173,6 +173,36 @@ class OriginalInkEvidence:
                       original_background=backgrounds[0],original_white_support=tuple(supports))
         return result
 
+    def enclosed_annotation_support(self, boxes, mains, children, context):
+        """Measure each polygon against the same bounded original white component."""
+        _, _, labels, stats = context
+        height, width = labels.shape
+        owner = None
+        supports = []
+        for index in mains + children:
+            box = boxes[index]
+            x,y,r,b = box.bbox
+            if not (0<=x<r<width and 0<=y<b<height):
+                return ()
+            mask = np.zeros((b-y+1,r-x+1),np.uint8)
+            cv2.fillPoly(mask,[box.poly.astype(np.int32)-np.array([x,y])],1)
+            values = labels[y:b+1,x:r+1][mask!=0]
+            white = values[values!=0]
+            if white.size < .55*values.size:
+                return ()
+            ids, counts = np.unique(white,return_counts=True)
+            winner = int(np.argmax(counts))
+            component = int(ids[winner])
+            confidence = float(counts[winner]/white.size)
+            left,top,w,h,area = stats[component]
+            if (confidence < .92 or (owner is not None and owner!=component)
+                    or min(left,top)<=0 or left+w>=width or top+h>=height
+                    or area > .10*width*height or area < .55*w*h):
+                return ()
+            owner = component
+            supports.append((box.box_id,component,confidence))
+        return tuple(supports)
+
     def complementary_ownership(self, boxes, member_groups, known_regions):
         """Narrow opt-in ownership evidence using complementary white connectivity.
 

@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 from PIL import Image,ImageDraw,ImageOps
 
-from . import display_readings,sound_readings,upright_latin
+from . import display_readings,outlined_sounds,sideways_sound,sound_readings,upright_latin
 from .automatic_recognition import AutomaticRecognitionResult
 from .manga_dialogue import valid_bounds
 from .recognition_units import image_fingerprint
@@ -97,6 +97,12 @@ def tilted_mapping(size, record):
 
 
 def record_views(image, record):
+    if record.get('view_policy')==sideways_sound.POLICY:
+        result=sideways_sound.presentations(image,record)
+        require(result is not None,'sideways sound geometry drift')
+        return result
+    if record.get('view_policy')==outlined_sounds.POLICY:
+        return outlined_sounds.views(image,record['polygons'][0])
     if record.get('view_policy')==display_readings.POLICY:
         result=display_readings.presentations(image,record)
         require(result is not None,'display crop ink or geometry drift')
@@ -115,6 +121,8 @@ def record_views(image, record):
 
 
 def candidate_text(record):
+    if record.get('view_policy')==outlined_sounds.POLICY:
+        return outlined_sounds.confirmed_text(record['readings']) or record['readings'][0]
     trial=record.get('sound_windows')
     if trial and sound_readings.matches(record):
         return trial['readings'][0]
@@ -122,6 +130,11 @@ def candidate_text(record):
 
 
 def select_record(record):
+    if record.get('view_policy')==sideways_sound.POLICY:
+        return sideways_sound.matches(record)
+    if record.get('view_policy')==outlined_sounds.POLICY:
+        text=outlined_sounds.confirmed_text(record['readings'])
+        return text is not None and record['source']!=text
     if record.get('sound_windows') and sound_readings.matches(record):
         return selection(record['source'],[candidate_text(record)]*3,record['scores'],'horizontal')
     direction = record['direction']
@@ -200,6 +213,10 @@ def refine(engine,image,original,*,reader,model_identity,output,max_regions=MAX_
                     record['reason']='no dominant display ink'
                     continue
                 record['view_policy']=display_readings.POLICY
+            elif len(detections)==1 and detections[0]['reason']=='supplemental_rotated_sound_region':
+                record['view_policy']=outlined_sounds.POLICY
+            elif sideways_sound.presentations(image,record) is not None:
+                record['view_policy']=sideways_sound.POLICY
             elif upright_latin.presentations(image,record,columns) is not None:
                 record.update(view_policy=upright_latin.POLICY,column_texts=columns)
             elif tilted_mapping(image.size,record) is not None:
@@ -267,7 +284,7 @@ def validate_candidate(candidate,batch):
         and record['direction']==proposal['direction'] and record['bounds']==crop['bounds']
         and record['source']==candidate['reference_main_text']==''.join(d['text'] for d in main)
         and candidate['text']==candidate_text(record) and candidate['reviewed'] is False
-        and record['automatic_accuracy_verified'] is False and len(record['view_hashes'])==3
+        and record['automatic_accuracy_verified'] is False and len(record['view_hashes'])=={outlined_sounds.POLICY:5,sideways_sound.POLICY:4}.get(record.get('view_policy'),3)
         and record['selected'] is True
         and record['selected']==select_record(record),
         'crop reading candidate evidence drift')
@@ -293,6 +310,8 @@ def preferred_reading(unit):
             and candidate['text']==reading.text==candidate_text(record)
             and record['source']==unit.selected.text and record['main_ids']==list(unit.order)
             and (record.get('view_policy')!=upright_latin.POLICY or record['column_texts']==[d['text'] for d in raw])
+            and (record.get('view_policy')!=outlined_sounds.POLICY or (len(raw)==1 and raw[0]['reason']=='supplemental_rotated_sound_region'
+                and strict_json(raw[0]['metadata_json'])[outlined_sounds.POLICY]['readings']==record['readings']))
             and record['scores']==[d['confidence'] for d in raw]
             and record['polygons']==[d['polygon'] for d in raw]
             and record['selected']==select_record(record),

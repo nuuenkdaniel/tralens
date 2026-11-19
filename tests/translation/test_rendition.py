@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import unittest
 from unittest.mock import Mock
 
@@ -9,6 +10,30 @@ from tralens.translation import rendition
 
 
 class SingleRendition(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec('fugashi') and importlib.util.find_spec('unidic_lite'),
+                         'optional UniDic readings unavailable')
+    def test_missed_transfer_command_and_software_package(self):
+        from tralens.translation.contracts import Style
+        self.assertEqual(rendition.retry_policy('それをおよこしなさい！','Welcome!',Style()),rendition.COMMAND)
+        self.assertIsNone(rendition.retry_policy('おかえりなさい！','Welcome!',Style()))
+        self.assertTrue(rendition.candidate_matches(rendition.COMMAND,'Welcome!','Hand it over!'))
+        self.assertFalse(rendition.candidate_matches(rendition.COMMAND,'Welcome!','Welcome back!'))
+        self.assertEqual(rendition.retry_policy('不要パッケージ','extra baggage',Style()),rendition.LOAN)
+        self.assertIsNone(rendition.retry_policy('不要パッケージ','an unused package',Style()))
+        self.assertEqual(rendition.retry_policy('不要なドライバー','Baggage',Style()),rendition.LOAN)
+        self.assertEqual(rendition.retry_policy('お読みなさい','Hello!',Style()),rendition.COMMAND)
+        self.assertIsNone(rendition.retry_policy('プリインストールOSの話','The pre-installed operating system',Style()))
+        self.assertIsNone(rendition.retry_policy('荷物','baggage',Style()))
+
+    def test_computing_sense_requires_independent_same_page_evidence(self):
+        from types import SimpleNamespace
+        def unit(i,text,page):
+            return SimpleNamespace(page_json=page,unit_id=i,selected=SimpleNamespace(text=text),selected_revision=str(i))
+        target=unit(1,'不要なドライバー','a')
+        other=unit(2,'ドライバーをインストールする','a')
+        self.assertEqual(rendition.technical_context(target,[target,other])['unit_id'],2)
+        self.assertIsNone(rendition.technical_context(target,[unit(3,'ドライバーの道具箱','a'),unit(4,other.selected.text,'b')]))
+
     def test_success_keeps_original_and_binding_and_retains_both_responses(self):
         _,_,units=fixture();request=TranslationRequest(units,(units[0].unit_id,))
         provider=Mock();provider.generate.side_effect=['Hello! / Hi there!','Hello!']

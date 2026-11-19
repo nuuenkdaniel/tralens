@@ -286,6 +286,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                             state['ocr']['crop_readings'] = _snapshot(engine.crop_readings)
                         if hasattr(engine,'reader_presentations'):
                             state['ocr']['reader_presentations'] = _snapshot(engine.reader_presentations)
+                        if hasattr(engine,'outlined_sound_discovery'):
+                            state['ocr']['outlined_sound_discovery'] = _snapshot(engine.outlined_sound_discovery)
                         if hasattr(engine,'ink_column_groups'):
                             state['ocr']['ink_column_groups'] = _snapshot(engine.ink_column_groups)
                     if source_localization:
@@ -464,7 +466,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                         counted = _CountedRuntime(provider, state, max_attempts)
                         state["settings"]["provider"] = type(provider).__name__
                         translator = PreviewTranslator(counted, model=model, profile=capability,
-                            max_attempts=1, timeout=timeout, generation_options=options,single_rendition=True)
+                            max_attempts=1, timeout=timeout, generation_options=options,single_rendition=True,terminology_units=units)
                     counted.record = record
                     def observe(event):
                         record["generation_evidence"].append(_retain_event(output,prefix,event))

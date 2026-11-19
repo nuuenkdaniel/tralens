@@ -323,7 +323,7 @@ def make_payload(request, profile, *, images=()):
 
 class PreviewTranslator:
     def __init__(self, runtime, *, model="qwen3.8:latest", profile=GENERALIST,
-                 max_attempts=1, timeout=60.0, generation_options=GenerationOptions(), single_rendition=False):
+                 max_attempts=1, timeout=60.0, generation_options=GenerationOptions(), single_rendition=False, terminology_units=()):
         if type(max_attempts) is not int or not 1 <= max_attempts <= 3:
             raise ValueError("max_attempts must be 1..3")
         if type(timeout) not in (int, float) or not 0 < timeout <= 300:
@@ -336,6 +336,7 @@ class PreviewTranslator:
         self.generation_options = generation_options
         if type(single_rendition) is not bool:raise ValueError('single rendition must be boolean')
         self.single_rendition=single_rendition
+        self.terminology_units=tuple(terminology_units)
 
     def translate(self, request, *, cancelled=lambda: False, images=(), observe=None):
         if type(request) is not TranslationRequest:
@@ -457,22 +458,30 @@ class PreviewTranslator:
             retry_policy = None
             if self.single_rendition and self.profile.specialist_chat and not fragment and not alternate and isinstance(text,str):
                 retry_policy = rendition.retry_policy(request.units[0].selected.text,text,request.style)
+            if retry_policy==rendition.LOAN:
+                proof = rendition.technical_context(request.units[0],self.terminology_units)
+                if proof:
+                    rendition_evidence['technical_term_context'] = proof
+                else:
+                    retry_policy = None
             if retry_policy:
                 primary=text
                 rendition_evidence.update(policy=retry_policy,primary_translation=primary,selected='primary',
                     semantic_accuracy_verified=False)
+                if retry_policy in (rendition.COMMAND,rendition.LOAN):
+                    rendition_evidence['source_dictionary_entry'] = rendition.lexical_hint(request.units[0].selected.text,retry_policy)
                 remaining=self.timeout-(time.monotonic()-started)
                 if remaining>1 and not cancelled():
                     try:
                         attempts+=1
-                        candidate=self.runtime.generate(model=self.model,payload=rendition.payload(payload,retry_policy),timeout=remaining)
+                        candidate=self.runtime.generate(model=self.model,payload=rendition.payload(payload,retry_policy,request.units[0].selected.text),timeout=remaining)
                         raw=candidate.response_json if isinstance(candidate,Generation) else canonical({'text':candidate})
                         failed=notify({'attempt':attempts,'status':'response','purpose':retry_policy,'response_json':raw})
                         if failed is not None:return failed
                         candidate=candidate.text if isinstance(candidate,Generation) else candidate
                         rendition_evidence['candidate_translation']=candidate
                         if (isinstance(candidate,str) and candidate.strip() and len(candidate)<=self.generation_options.max_output_chars
-                                and rendition.candidate_matches(retry_policy,primary,candidate) and not cancelled() and time.monotonic()-started<self.timeout):
+                                and rendition.candidate_matches(retry_policy,primary,candidate,request.units[0].selected.text) and not cancelled() and time.monotonic()-started<self.timeout):
                             text=candidate;rendition_evidence['selected']=rendition.SELECTION[retry_policy]
                     except Exception as error:
                         rendition_evidence['error']=type(error).__name__+': '+str(error)[:512]

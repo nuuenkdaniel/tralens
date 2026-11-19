@@ -48,6 +48,8 @@ def main(argv=None):
                         help='existing local Manga OCR snapshot; enables the optional quality-reread control, never downloads')
     parser.add_argument('--reread-model', default='qwen3.8:latest', help='installed local vision tag for opt-in quality rereads')
     parser.add_argument('--reconstruction-config',type=Path,help='explicit approved local LaMa/runtime configuration; no downloads')
+    parser.add_argument('--crop-reader-model',type=Path,
+                        help='existing Hayai snapshot for source-bound crop readings in coverage-first renders')
     parser.add_argument('--text-mask-model',type=Path,help='existing pinned CTD checkpoint for source-bound cleanup; no downloads')
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
@@ -55,6 +57,9 @@ def main(argv=None):
     try:
         host = str(ipaddress.IPv4Address(args.host))
         endpoint = configured_endpoint(args.endpoint)
+        if args.crop_reader_model is not None:
+            from tralens.ocr.hayai_adapter import verify_snapshot
+            verify_snapshot(args.crop_reader_model)
         if args.manga_reread_model is not None:
             from main import quality_refiner
             # Check local files without importing readers or running inference.
@@ -67,6 +72,7 @@ def main(argv=None):
         font_id=args.font_id, model=args.model, profile=args.profile, endpoint=endpoint,
         manga_reread_model=args.manga_reread_model.expanduser().absolute() if args.manga_reread_model else None,
         reread_model=args.reread_model,reconstruction_config=args.reconstruction_config,
+        crop_reader_model=args.crop_reader_model.expanduser().absolute() if args.crop_reader_model else None,
         text_mask_model=args.text_mask_model.expanduser().absolute() if args.text_mask_model else None,isolated_workers=True))
     with create_server(app, args.port, host=host) as server:
         print(f'Pipeline viewer: http://{host}:{args.port}', flush=True)

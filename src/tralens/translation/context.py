@@ -115,8 +115,19 @@ def _clipped_crop_sound(reading):
             and sound_readings.shifted_target(record) == reading.text)
 
 
+def _sideways_sound(reading):
+    from ..ocr import crop_readings, sideways_sound
+    if reading.origin != crop_readings.ENGINE:
+        return False
+    candidate = strict_json(reading.evidence_json)
+    record = strict_json(candidate['model_settings_json'])['record']
+    return record.get('view_policy')==sideways_sound.POLICY and sideways_sound.matches(record) and reading.text==record['readings'][0]
+
+
 def sound_guide(reading):
     from ..ocr.sound_readings import clipped_motif
+    if _sideways_sound(reading):
+        return SOUND_GUIDE + 'Repeated vowels extend the same sound. Use one English effect with the same emphasis. '
     if not _clipped_crop_sound(reading):
         return SOUND_GUIDE
     motif = clipped_motif(reading.text)
@@ -128,7 +139,7 @@ def sound_plan(request,pool):
     from ..ocr.sound_readings import repeat
     target=request.units[0]
     if (request.style.source_language not in ('ja','Japanese') or request.style.target_language not in ('en','English')
-            or len(target.selected.text)>32 or not (repeat(target.selected.text) or _clipped_crop_sound(target.selected))):
+            or len(target.selected.text)>32 or not (repeat(target.selected.text) or _clipped_crop_sound(target.selected) or _sideways_sound(target.selected))):
         return None
     scene=[]
     seen=set()

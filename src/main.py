@@ -380,6 +380,9 @@ def crop_reader_refiner(model_path, *, ink_column_groups=False, ink_boundary_gro
         try:
             with Image.open(BytesIO(original)) as source:
                 image=source.convert('RGB')
+                if reader_presentations and hasattr(engine,'raw_detections') and hasattr(engine,'ocr'):
+                    from tralens.ocr import outlined_sounds
+                    outlined_sounds.discover(engine,image,reader)
                 if ink_column_groups or ink_boundary_groups:
                     from tralens.ocr import ink_groups
                     ink_groups.refine(engine,image,original,

@@ -338,7 +338,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'font_faces.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'source_support.py', 'source_extents.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/crop_readings.py', '../ocr/upright_latin.py', '../ocr/sound_readings.py', '../ocr/display_readings.py', '../ocr/ink_groups.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
+                       for name in ('automatic.py', 'natural.py', 'font_faces.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'source_support.py', 'source_extents.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'outlined_sound_cleanup.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/crop_readings.py', '../ocr/upright_latin.py', '../ocr/sound_readings.py', '../ocr/outlined_sounds.py', '../ocr/sideways_sound.py', '../ocr/display_readings.py', '../ocr/ink_groups.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
 
 
 def _report_html(report):
@@ -1167,6 +1167,12 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             probability=text_mask.raw if text_mask is not None else None,source=source,backend=backend,
             budget=reconstruction.Budget(maximum_calls=4,maximum_seconds=40),extents=extents)
         recovery_artifacts.update(final_artifacts)
+        from . import outlined_sound_cleanup
+        clean, text, joint_repairs = outlined_sound_cleanup.finish(rgb,clean,text,layout_union,erase_union,raw,units,
+            report['units'],source,backend,recovery_artifacts,faces.resolve,style)
+        if joint_repairs:
+            report['outlined_sound_cleanup'] = joint_repairs
+            composite = Image.alpha_composite(clean.convert('RGBA'),text).convert('RGB')
         alpha_union = np.asarray(text.getchannel('A')) != 0
         protected = ~(erase_union | layout_union)
         report['pixel_audit'] = n.pixel_audit(rgb,clean,composite,erase_union,alpha_union,protected)

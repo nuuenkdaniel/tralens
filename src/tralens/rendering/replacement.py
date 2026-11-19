@@ -136,6 +136,40 @@ def outlined_ink(crop, broad):
         'remote_outline_max_rgb':remote_ceiling,'original_pixels':int(broad.sum()),'committed_pixels':int(commit.sum())}
 
 
+def painted_panel_limits(pixels, frame):
+    """Find broad white gutters crossing the source along each axis."""
+    left,top,right,bottom = frame
+    white = pixels.min(2) >= 245
+    h,w = white.shape
+    limits = [0,0,w,h]
+    for axis, profile, start, end in (
+            (0,white[max(top-8,0):min(bottom+8,h)].mean(0),left,right),
+            (1,white[:,max(left-8,0):min(right+8,w)].mean(1),top,bottom)):
+        changes = np.flatnonzero(np.diff(np.r_[False,profile>.98,False]))
+        for a,b in changes.reshape(-1,2):
+            if b-a<5:
+                continue
+            if b<=start:
+                limits[axis] = max(limits[axis],int(b))
+            if a>=end:
+                limits[axis+2] = min(limits[axis+2],int(a))
+    # A painted word can straddle the gutter. Look across the group as
+    # well as the individual crop, with the word's center inside its panel.
+    neutral = white & (np.ptp(pixels,axis=2)<8)
+    for axis,profile,local,center in (
+            (0,neutral.mean(0),neutral[top:bottom].mean(0),(left+right)//2),
+            (1,neutral.mean(1),neutral[:,left:right].mean(1),(top+bottom)//2)):
+        changes = np.flatnonzero(np.diff(np.r_[False,(profile>.72)&(local>.60),False]))
+        for a,b in changes.reshape(-1,2):
+            if not 5<=b-a<=80:
+                continue
+            if b<=center:
+                limits[axis]=max(limits[axis],int(b))
+            if a>=center:
+                limits[axis+2]=min(limits[axis+2],int(a))
+    return limits
+
+
 def patch_layout(text, font_data, coverage, bounds, blocked, style, *, outline=0):
     """Widen a source-centered backing instead of shrinking or breaking words.
 

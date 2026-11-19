@@ -51,6 +51,7 @@ class Config:
     job_seconds: int = 1800
     job_storage_bytes: int = 2*1024**3
     root_storage_bytes: int = 8*1024**3
+    crop_reader_model: Path | None = None
 
 
 def options(value, *, render_enabled):
@@ -138,6 +139,9 @@ def execute_job(config, job):
         allow_fragment_previews=settings['allow_fragments'], translation_policy=settings['translation_policy'])
     if settings['mode'] == 'render':
         from main import run_pipeline
+        if (config.crop_reader_model is not None and settings['translation_policy']=='coverage-first'
+                and not settings.get('quality_reread')):
+            kwargs.update(crop_reader_model=config.crop_reader_model, reader_presentations=True)
         return run_pipeline(job['image'], job['directory']/'run', fonts=config.fonts,
             font_id=config.font_id, render_policy=settings['render_policy'],
             replacement_policy=settings.get('replacement_policy', 'all'),
@@ -149,7 +153,7 @@ def execute_job(config, job):
             reconstruction_config=config.reconstruction_config if settings.get('reconstruction_policy')=='lama' else None,
             text_mask_model=config.text_mask_model,
             quality_reread=settings.get('quality_reread', False), reread_model=config.reread_model,
-            manga_reread_model=config.manga_reread_model if settings.get('translation_policy','coverage-first')=='coverage-first' else None, **kwargs)
+            manga_reread_model=config.manga_reread_model if settings.get('translation_policy','coverage-first')=='coverage-first' and 'crop_reader_model' not in kwargs else None, **kwargs)
     from ..translation.workflow import run_preview
     return run_preview(job['image'], job['directory']/'run'/'preview', **kwargs)
 

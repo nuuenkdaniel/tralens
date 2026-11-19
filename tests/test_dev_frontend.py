@@ -434,6 +434,20 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(pipeline.call_args.kwargs['manga_reread_model'], config.manga_reread_model)
         self.assertEqual(pipeline.call_args.kwargs['replacement_policy'], 'all')
 
+    def test_render_prefers_configured_crop_reader_except_for_explicit_visual_reread(self):
+        import main
+        config=replace(self.config, fonts=self.root/'fonts.json', crop_reader_model=self.root/'hayai',
+                       manga_reread_model=self.root/'manga')
+        for quality,policy,use_crop in [(False,'coverage-first',True),(True,'coverage-first',False),
+                                        (False,'conservative',False)]:
+            settings=s.options({'quality_reread':quality,'translation_policy':policy},render_enabled=True)
+            with patch.object(main,'run_pipeline') as pipeline:
+                s.execute_job(config,dict(image=self.root/'page.png',directory=self.root/'job',options=settings))
+            kwargs=pipeline.call_args.kwargs
+            self.assertEqual(kwargs.get('reader_presentations',False),use_crop)
+            self.assertEqual(kwargs.get('crop_reader_model'),config.crop_reader_model if use_crop else None)
+            self.assertEqual(kwargs['manga_reread_model'],config.manga_reread_model if quality else None)
+
     def test_mode_dispatch_reuses_coordinator_and_preview_workflow(self):
         import main
         from tralens.translation import workflow
