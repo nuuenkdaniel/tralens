@@ -1,6 +1,7 @@
 """One explicit image -> immutable utterance previews. No diagnostics or rendering imports."""
 from dataclasses import asdict, is_dataclass
 from enum import Enum
+import subprocess
 import hashlib
 from io import BytesIO
 import json
@@ -167,18 +168,18 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
     from PIL import Image
 
     from . import luna
-    frontier = model == luna.MODEL
+    frontier = model in luna.MODELS
     if frontier:
         luna_mode = luna_mode or "reviewed"
         if len(related_pages) > 6:
             raise ValueError('select at most six related manga pages')
         if luna_mode not in luna.MODES or (luna_mode == 'isolated' and related_pages):
-            raise ValueError('invalid Luna mode or context')
+            raise ValueError('invalid frontier mode or context')
         if allow_fragment_previews or review_ocr or translation_context != 'isolated':
-            raise ValueError('Luna uses its own page context and review')
+            raise ValueError('Frontier models use their own page context and review')
         profile = 'generalist'
     elif related_pages or luna_mode is not None:
-        raise ValueError('Luna options require gpt-6-luna')
+        raise ValueError('Frontier input options require a supported frontier model')
     profiles = {"generalist": GENERALIST, "translategemma": TRANSLATEGEMMA}
     if profile not in profiles:
         raise ValueError("unknown translation profile")
@@ -292,6 +293,18 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
             engine = ocr_factory(str(image), device=device, model_root=str(Path(model_root).expanduser()),
                                  model_profile=DEFAULT_PROFILE, enable_manga_ocr=False)
             engine.process_images(propose_units=True, complementary_ownership=True, regroup_companions=True)
+            if frontier and run_local_model and luna_mode != 'isolated' and not selected_ids and max_attempts >= 2:
+                from . import discovery
+                if cancelled():
+                    raise KeyboardInterrupt('cancelled before page discovery')
+                assert_source()
+                state['attempts'] += 1
+                persist()
+                try:
+                    state['frontier_discovery'] = discovery.extend(engine, image, size, model, timeout)
+                except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
+                    state['frontier_discovery'] = dict(model=model, added_ids=[], error=str(error)[:512])
+                assert_source()
             if ocr_refine is not None:
                 ocr_refine(engine, output=output)
             if source_localization:
@@ -482,7 +495,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
         persist()  # Persist every candidate and planned order before provider entry.
         with (output / "results.jsonl").open("x", encoding="utf-8") as journal:
             if frontier:
-                luna.translate_jobs(jobs, state, mode=luna_mode, image=image, related=related_pages,
+                luna.translate_jobs(jobs, state, model=model, mode=luna_mode, image=image, related=related_pages,
                     budget=max_attempts, timeout=timeout, persist=persist, assert_source=assert_source,
                     cancelled=cancelled, journal=journal)
             for record,request,original,prefix,kind in (() if frontier else jobs):

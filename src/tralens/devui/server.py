@@ -105,14 +105,14 @@ def options(value, *, render_enabled):
     model = result.get('translation_model', 'local')
     mode = result.get('luna_mode', 'reviewed')
     related = result.get('related_jobs', [])
-    if model not in ('local', luna.MODEL) or mode not in luna.MODES:
-        raise RequestError('Unknown translation model or Luna mode.')
+    if model not in ('local', *luna.MODELS) or mode not in luna.MODES:
+        raise RequestError('Unknown translation model or input mode.')
     if (not isinstance(related, list) or len(related) > 6 or
             any(type(i) is not str or not re.fullmatch('[0-9a-f]{32}', i) for i in related)
             or len(set(related)) != len(related)):
         raise RequestError('Select up to six distinct saved context pages.')
-    if related and (model != luna.MODEL or mode == 'isolated' or result['mode'] == 'ocr'):
-        raise RequestError('Context pages require visual Luna translation.')
+    if related and (model not in luna.MODELS or mode == 'isolated' or result['mode'] == 'ocr'):
+        raise RequestError('Context pages require a visual frontier model.')
     return result
 
 
@@ -149,7 +149,9 @@ def execute_job(config, job):
         run_local_model=settings['mode'] != 'ocr', model=config.model, profile=config.profile,
         endpoint=config.endpoint, max_attempts=settings['max_attempts'],
         allow_fragment_previews=settings['allow_fragments'], translation_policy=settings['translation_policy'])
-    if settings.get('translation_model') == 'gpt-6-luna' and settings['mode'] != 'ocr':
+    from ..translation.luna import MODELS
+    model = settings.get('translation_model', 'local')
+    if model in MODELS and settings['mode'] != 'ocr':
         related = []
         for identity in settings.get('related_jobs', []):
             directory = config.root / identity
@@ -157,7 +159,7 @@ def execute_job(config, job):
             if directory.is_symlink() or len(paths) != 1 or paths[0].is_symlink():
                 raise ValueError('Saved context image is unavailable')
             related.append(paths[0])
-        kwargs.update(model='gpt-6-luna', luna_mode=settings.get('luna_mode', 'reviewed'), related_pages=related)
+        kwargs.update(model=model, luna_mode=settings.get('luna_mode', 'reviewed'), related_pages=related)
     if settings['mode'] == 'render':
         from main import run_pipeline
         if (config.crop_reader_model is not None and settings['translation_policy']=='coverage-first'
@@ -425,6 +427,12 @@ class App:
         rendering = checkpoint(directory/'run/rendering/manifest.json', notices)
         native = checkpoint(directory/'run/rendering-native/manifest.json', notices) if job['options'].get('source_localization') else None
         preview = preview or {}
+        discovery = preview.get('frontier_discovery')
+        if discovery:
+            if discovery.get('error'):
+                notices.append('Page discovery failed. Translation continued with the local detections.')
+            else:
+                notices.append(f"Page discovery added {len(discovery['added_ids'])} of {discovery['proposed']} proposed regions.")
         rendering = rendering or {}
         replacement = rendering.get('replacement_policy', (pipeline or {}).get('replacement_policy', 'all'))
         replacement = replacement.get('name', 'all') if isinstance(replacement, dict) else replacement

@@ -232,6 +232,17 @@ class ViewerTests(unittest.TestCase):
         self.assertEqual(app.artifact(identity, view['input']).read_bytes(), original)
         self.assertIsNone(app.active)
 
+    def test_retry_switches_between_frontier_and_configured_local_models(self):
+        app = s.App(self.config)
+        with patch('tralens.translation.workflow.run_preview', return_value={'status': 'complete'}) as preview:
+            for i, model in enumerate(('local', 'gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.2-sol', 'local')):
+                settings = dict(mode='translate', translation_model=model)
+                identity = app.start(image_bytes(), settings) if i == 0 else app.retry(identity, settings)
+                self.assertTrue(app.job(identity)['done'].wait(5))
+                self.assertEqual(app.snapshot(identity)['options']['translation_model'], model)
+                self.assertEqual(preview.call_args.kwargs['model'], self.config.model if model == 'local' else model)
+                self.assertEqual('luna_mode' in preview.call_args.kwargs, model != 'local')
+
     def test_retry_reuses_upload_in_a_fresh_job_and_keeps_previous_results(self):
         runner = Mock(side_effect=[RuntimeError('first run failed'), dict(status='complete')])
         app = s.App(self.config, runner=runner)

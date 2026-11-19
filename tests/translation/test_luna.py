@@ -37,13 +37,33 @@ class LunaTests(unittest.TestCase):
         def decide(rows, **kwargs):
             return {r['id']: dict(id=r['id'], source='かな', reason='reading',
                     english='Boom!' if kwargs.get('panel') or r['id'] == 0 else '') for r in rows}
-        with patch.object(luna, 'decide', side_effect=decide) as model:
-            state = self.f.run_flow(model=luna.MODEL, run_local_model=True, max_attempts=2)
+        with patch('tralens.translation.discovery.propose', return_value=[]), patch.object(luna, 'decide', side_effect=decide) as model:
+            state = self.f.run_flow(model="gpt-6.2-sol", run_local_model=True, max_attempts=3)
+        self.assertTrue(all(call.kwargs["model"] == "gpt-6.2-sol" for call in model.call_args_list))
+        self.assertTrue(all(row["result"]["model"] == "gpt-6.2-sol" for row in state["units"]))
         self.assertEqual(state['unit_status_counts'], {'preview': 2})
-        self.assertEqual(state['attempts'], 2)
+        self.assertEqual(state['attempts'], 3)
         self.assertTrue(model.call_args_list[0].kwargs['atlas'])
         self.assertTrue(model.call_args_list[1].kwargs['panel'])
         self.assertEqual(len(model.call_args_list[1].args[0]), 1)
+
+    def test_discovered_regions_join_translation_and_duplicate_boxes_are_skipped(self):
+        rows = [dict(box=box, source='ドン', english='Boom!', landmark='test panel')
+                for box in ([145,180,245,660], [310,870,530,990], [310,870,530,990])]
+        def decide(regions, **kwargs):
+            return {r['id']: dict(id=r['id'], source=r['ocr'], english='Boom!', reason='test')
+                    for r in regions}
+        with patch('tralens.translation.discovery.propose',return_value=rows), patch.object(luna,'decide',side_effect=decide):
+            state = self.f.run_flow(model=luna.MODEL, run_local_model=True, max_attempts=2,
+                                    translation_policy='coverage-first')
+        self.assertEqual(state['status'], 'complete', state['error'])
+        report = state['frontier_discovery']
+        self.assertEqual(len(report['added_ids']),1)
+        self.assertEqual(report['skipped'],[[0,'already_covered'],[2,'already_covered']])
+        self.assertEqual(state['attempts'],2)
+        identity = report['added_ids'][0]
+        record = next(r for r in state['units'] if identity in r['unit']['member_ids'])
+        self.assertEqual(record['status'],'preview')
 
     def test_viewer_context_requires_safe_saved_job_ids_and_visual_mode(self):
         for bad in [{'related_jobs': ['../private']}, {'related_jobs': ['a'*32], 'luna_mode': 'isolated'}]:

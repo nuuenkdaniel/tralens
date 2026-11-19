@@ -7,6 +7,7 @@ import tempfile
 from .contracts import TranslationResult, UnitOutcome
 
 MODEL = 'gpt-6-luna'
+MODELS = (MODEL, 'gpt-6.1-terra', 'gpt-6.2-sol')
 MODES = ('page', 'isolated', 'panel', 'atlas', 'reviewed')
 FIELDS = ('id', 'source', 'english', 'reason')
 ROW = {'type': 'object', 'additionalProperties': False, 'required': list(FIELDS),
@@ -43,7 +44,7 @@ def crop_sheet(target, rows):
     return sheet
 
 
-def decide(rows, *, image=None, related=(), panel=False, atlas=False, timeout=180):
+def decide(rows, *, image=None, related=(), panel=False, atlas=False, timeout=180, model=MODEL):
     """Images are explicit inputs. Only target rows can produce renderable results."""
     from PIL import Image
     prompt = ('Translate Japanese comic lettering into concise idiomatic English. Use no tools. '
@@ -58,7 +59,7 @@ def decide(rows, *, image=None, related=(), panel=False, atlas=False, timeout=18
         schema.write_text(json.dumps(SCHEMA))
         cmd = ['codex', 'exec', '--ignore-user-config', '--ephemeral', '--skip-git-repo-check',
                '--disable', 'shell_tool', '--disable', 'plugins', '-c', 'web_search="disabled"',
-               '-s', 'read-only', '-m', MODEL, '--output-schema', str(schema), '-o', str(answer)]
+               '-s', 'read-only', '-m', model, '--output-schema', str(schema), '-o', str(answer)]
         if image is not None:
             paths = [Path(image), *map(Path, related)]
             with Image.open(image) as target:
@@ -91,17 +92,17 @@ def decide(rows, *, image=None, related=(), panel=False, atlas=False, timeout=18
         completed = subprocess.run([*cmd, '-'], cwd=root, input=prompt, text=True,
                                    capture_output=True, timeout=timeout)
         if completed.returncode or not answer.is_file():
-            raise RuntimeError('Luna call failed: '+completed.stderr[-1200:])
+            raise RuntimeError(f'{model} call failed: '+completed.stderr[-1200:])
         results = json.loads(answer.read_text())['regions']
     if (not isinstance(results, list) or len(results) != len(rows)
             or any(not isinstance(r, dict) or type(r.get('id')) is not int or set(r) != set(FIELDS)
             or any(type(r[k]) is not str for k in FIELDS[1:]) for r in results)
             or {r['id'] for r in results} != {r['id'] for r in rows}):
-        raise ValueError('Luna returned missing, duplicate or foreign region IDs or malformed fields')
+        raise ValueError(f'{model} returned missing, duplicate or foreign region IDs or malformed fields')
     return {r['id']: r for r in results}
 
 
-def result_for(request, decision, mode, kind):
+def result_for(request, decision, mode, kind, model=MODEL):
     from .contracts import canonical
     unit = request.units[0]
     english = decision['english'].strip()
@@ -109,27 +110,27 @@ def result_for(request, decision, mode, kind):
     outcome = UnitOutcome(unit.unit_id, "review" if english else status, english, (decision['reason'].strip()[:512] or status,),
                           'unverified', unit.selected_revision)
     result = TranslationResult(request.revision, status, ((unit.unit_id, english),) if english else (),
-                               attempts=1, provider='Codex CLI', model=MODEL, profile=mode, outcomes=(outcome,),
+                               attempts=1, provider='Codex CLI', model=model, profile=mode, outcomes=(outcome,),
                                execution_metadata_json=canonical(dict(output_kind=kind, review_required=True,
                                    complete_utterance_claimed=False, source_readability_verified=False)))
     result.assert_current(request)
     return result
 
 
-def translate_jobs(jobs, state, *, mode, image, related, budget, timeout, persist, assert_source, cancelled, journal):
+def translate_jobs(jobs, state, *, model, mode, image, related, budget, timeout, persist, assert_source, cancelled, journal):
     from dataclasses import asdict
     rows = regions([job[0] for job in jobs], state['ocr']['raw_detections'][0])
     groups = [rows] if mode in ('page','atlas','reviewed') and rows else [[row] for row in rows]
     for group in groups:
         if cancelled():
-            raise KeyboardInterrupt('Luna translation cancelled')
+            raise KeyboardInterrupt(f'{model} translation cancelled')
         assert_source()
         decisions = {}
         if state['settings']['run_local_model'] and state['attempts'] < budget:
             state['attempts'] += 1
             persist()
             decisions = decide(group, image=image if mode != 'isolated' else None, related=related,
-                               panel=mode == 'panel', atlas=mode in ('atlas','reviewed'), timeout=timeout)
+                               panel=mode == 'panel', atlas=mode in ('atlas','reviewed'), timeout=timeout, model=model)
             assert_source()
         batch_call = state['attempts']
         for row in group:
@@ -141,19 +142,19 @@ def translate_jobs(jobs, state, *, mode, image, related, budget, timeout, persis
                 call_number = batch_call
                 if mode == 'reviewed' and not decision['english'].strip() and state['attempts'] < budget:
                     if cancelled():
-                        raise KeyboardInterrupt('Luna review cancelled')
+                        raise KeyboardInterrupt(f'{model} review cancelled')
                     assert_source()
                     record['luna_first_decision'] = decision
                     state['attempts'] += 1
                     persist()
                     try:
-                        detail = decide([row], image=image, related=related, panel=True, timeout=timeout)
+                        detail = decide([row], image=image, related=related, panel=True, timeout=timeout, model=model)
                         decision = detail[row['id']]
                         call_number = state['attempts']
                     except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as error:
                         record['luna_review_error'] = str(error)[:1024]
                     assert_source()
-                result = result_for(request, decision, mode, record['input_kind'])
+                result = result_for(request, decision, mode, record['input_kind'], model=model)
                 record.update(status=result.status, result=asdict(result), attempts_started=1+int('luna_first_decision' in record),
                               luna_decision=decision, luna_call=call_number)
             journal.write(json.dumps(dict(unit_id=request.target_ids[0], status=record['status'],

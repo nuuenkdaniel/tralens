@@ -73,11 +73,13 @@ selection is needed, including after refresh. A retry reruns the pipeline in a
 fresh directory with a fresh call budget; it does not resume or overwrite the
 previous run. Choosing a different image switches the button back to Run pipeline.
 
-Select **Advanced → Translation model → GPT-6 Luna** to use the signed-in Codex
-CLI. Visual modes send the current page and the same-manga pages you select to
-OpenAI. The default Luna mode sends numbered crops with the page and rechecks
+Under **Advanced → Translation model**, choose the configured local model, GPT-6 Luna,
+GPT-6.1 Terra, or GPT-6.2 Sol. The three frontier options use the signed-in Codex CLI. Visual modes send the current page and the same-manga pages you select to
+OpenAI. Visual full-page runs use one budgeted call to find missed Japanese lettering
+when at least two calls are available. New regions enter the regular grouping,
+translation and replacement stages. The default frontier mode sends numbered crops with the page and rechecks
 skipped regions while the call budget allows. Choose **OCR text per region** for
-the text-only comparison. The CLI equivalent is `--model gpt-6-luna` with
+the text-only comparison. The CLI accepts `--model gpt-6-luna`, `--model gpt-6.1-terra`, or `--model gpt-6.2-sol` with
 optional repeated `--related-page PATH` arguments. The local model remains the
 viewer default. See the [four-page Luna comparison](docs/luna-translation-trial.md).
 

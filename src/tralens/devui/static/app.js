@@ -325,7 +325,7 @@ if (typeof document !== "undefined") {
       button.type = "button"; button.addEventListener("click", () => chooseUnit(unit.id));
       const [text, tone] = unitStatus(unit), badge = node("span", text, "unit-status"); badge.dataset.tone = tone;
       heading.append(button, badge); box.append(heading, node("pre", unit.source || "No selected source reading"));
-      if (unit.luna_reading && unit.luna_reading !== unit.source) box.append(node("p", "Luna reading"), node("pre", unit.luna_reading));
+      if (unit.luna_reading && unit.luna_reading !== unit.source) box.append(node("p", "Model reading"), node("pre", unit.luna_reading));
       if (unit.reread_selected) {
         box.append(node("p", "Unverified paired reread used for translation; original OCR retained below.", "note"));
         const original = node("details"); original.append(node("summary", "Original OCR"), node("pre", unit.raw_source)); box.append(original);
