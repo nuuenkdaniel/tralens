@@ -54,7 +54,7 @@ def presentations(image,record):
     return line,line.crop((0,0,mid,h)),line.crop((mid,0,w,h))
 
 
-def matches(record):
+def midpoint_matches(record):
     motif=hint(record)
     if not motif:
         return False
@@ -70,3 +70,59 @@ def matches(record):
         counts.append(count)
     full,a,b=counts
     return full>=2 and abs(a+b-full)<=max(1,round(full*.2)) and max(a,b)<=2*min(a,b)
+
+def clipped_motif(text):
+    """Recognize a suffix of a beat followed by at least four whole beats."""
+    text = unicodedata.normalize('NFKC', text).strip()
+    for offset in range(1, min(4, len(text))):
+        tail = text[offset:]
+        motif = repeat(tail)
+        if (motif and offset < len(motif) and text[:offset] == motif[-offset:]
+                and len(tail) >= 4 * len(motif)):
+            return motif
+    return None
+
+
+def shifted_target(record):
+    """Only retry a midpoint disagreement consistent with a single edge glyph."""
+    trial = record.get('sound_windows', {})
+    if len(trial.get('readings', [])) != 3 or len(trial.get('view_hashes', [])) != 3:
+        return None
+    whole, left, right = trial['readings']
+    motif = hint(record)
+    if (not motif or len(whole) > 32 or (repeat(whole) or clipped_motif(whole)) != motif
+            or min(len(left), len(right)) < len(motif)):
+        return None
+    joined = left + right
+    if joined == whole:
+        return whole
+    if (len(joined) == len(whole) + 1 and joined[1:] == whole and 'ァ' <= joined[0] <= 'ヺ'
+            and whole in record['readings']):
+        return whole
+    return None
+
+
+SPLITS = (0.4, 0.7)
+
+
+def shifted_views(line):
+    crops = []
+    for fraction in SPLITS:
+        split = round(line.width * fraction)
+        crops.extend((line.crop((0, 0, split, line.height)), line.crop((split, 0, line.width, line.height))))
+    return crops
+
+
+def matches(record):
+    if midpoint_matches(record):
+        return True
+    trial = record.get('shifted_windows', {})
+    readings = trial.get('readings', [])
+    if len(readings) != 4 or len(trial.get('view_hashes', [])) != 4:
+        return False
+    target = shifted_target(record)
+    if target is None:
+        return False
+    return any(left and right and left + right == target
+               and abs(len(left) - fraction * len(target)) <= 2
+               for fraction, left, right in zip(SPLITS, readings[::2], readings[1::2]))

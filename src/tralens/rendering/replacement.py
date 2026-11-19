@@ -92,13 +92,15 @@ def outlined_ink(crop, broad):
     """Find small light glyph interiors enclosed by dark ink on a painted page."""
     if max(broad.shape)>1024 or np.mean(np.ptp(crop,axis=2)>24)<.2:
         return None
-    dark=crop.max(axis=2)<110
+    brightness=crop.max(axis=2)
+    dark=brightness<110
     white=(crop.min(axis=2)>178)&(np.ptp(crop,axis=2)<40)
     kernel=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,5))
     contours,_=cv2.findContours(white.astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
     if len(contours)>8192:
         return None
     cores=np.zeros(broad.shape,np.uint8)
+    outline_histogram=np.zeros(256,np.int64)
     count=0
     for contour in contours:
         x,y,w,h=cv2.boundingRect(contour)
@@ -111,6 +113,7 @@ def outlined_ink(crop, broad):
         ring=cv2.dilate(body,kernel)>body
         if not broad[local][body!=0].any() or dark[local][ring].mean()<.70:
             continue
+        outline_histogram+=np.bincount(brightness[local][ring & dark[local]],minlength=256)
         count+=1
         cores[local]|=body
     if count<8:
@@ -120,14 +123,17 @@ def outlined_ink(crop, broad):
     supported=np.count_nonzero(nearby&ink)/max(1,np.count_nonzero(ink))
     if supported<.62:
         return None
-    # Include dark strokes even where an individual interior was missed.
-    # The broader original footprint already excludes protected output.
-    strokes=p.dilate((dark&(broad|nearby))|(cores!=0),2)
+    # Away from a light glyph core, require the darkness of the measured
+    # outlines. A shaded costume can otherwise look like one giant stroke.
+    upper_quartile=np.searchsorted(outline_histogram.cumsum(), .75*outline_histogram.sum())
+    remote_ceiling=min(109,int(upper_quartile)+12)
+    remote_ink=(brightness<=remote_ceiling)&broad
+    strokes=p.dilate((dark&nearby)|remote_ink|(cores!=0),2)
     commit=strokes&broad
     if not commit.any() or commit.sum()>.90*broad.sum():
         return None
     return commit,strokes,{'enclosed_light_components':count,'supported_dark_fraction':supported,
-        'original_pixels':int(broad.sum()),'committed_pixels':int(commit.sum())}
+        'remote_outline_max_rgb':remote_ceiling,'original_pixels':int(broad.sum()),'committed_pixels':int(commit.sum())}
 
 
 def patch_layout(text, font_data, coverage, bounds, blocked, style, *, outline=0):

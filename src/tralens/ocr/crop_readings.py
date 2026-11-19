@@ -220,6 +220,9 @@ def refine(engine,image,original,*,reader,model_identity,output,max_regions=MAX_
                 if windows is not None:
                     record['sound_windows']={'readings':[],'view_hashes':[]}
                     read_views(record['sound_windows'],windows,'-windows')
+                    if not sound_readings.matches(record) and sound_readings.shifted_target(record):
+                        record['shifted_windows']={'readings':[],'view_hashes':[]}
+                        read_views(record['shifted_windows'],sound_readings.shifted_views(windows[0]),'-shifted')
             record['selected']=select_record(record)
             if record['selected']:
                 from . import manga_dialogue,quality_reread
@@ -308,3 +311,8 @@ def validate_pixels(candidate,image):
         windows=sound_readings.presentations(image,record)
         require(windows is not None and record['sound_windows']['view_hashes']==[image_fingerprint(v) for v in windows],
             'sound window crop pixels changed')
+
+    if 'shifted_windows' in record:
+        require('sound_windows' in record and sound_readings.shifted_target(record) is not None
+            and record['shifted_windows']['view_hashes']==[image_fingerprint(v) for v in sound_readings.shifted_views(windows[0])],
+            'shifted sound crop pixels changed')

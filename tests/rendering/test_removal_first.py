@@ -62,6 +62,8 @@ class RemovalFirst(unittest.TestCase):
         for x in range(15,145,15):
             pen.rectangle((x,18,x+8,44),fill='black')
             pen.rectangle((x+3,22,x+5,38),fill='white')
+        pen.rectangle((43,10,55,13),fill=(77,83,95))
+        pen.rectangle((95,47,109,50),fill=(3,4,2))
         pixels=np.array(page)
         broad=np.zeros((80,180),bool)
         broad[10:51,8:156]=True
@@ -70,6 +72,8 @@ class RemovalFirst(unittest.TestCase):
         self.assertFalse((commit&~broad).any())
         self.assertTrue((commit<=inference).all())
         self.assertTrue(commit[20:43,15:24].all())
+        self.assertFalse(commit[11,49])
+        self.assertTrue(commit[49,105])
         self.assertFalse(commit[11:13,10:150].any())
         self.assertIsNone(replacement.outlined_ink(pixels,broad & (np.indices(broad.shape)[1]<50)))
         self.assertIsNone(replacement.outlined_ink(np.array(page.convert('L').convert('RGB')),broad))

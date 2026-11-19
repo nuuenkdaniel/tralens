@@ -255,7 +255,7 @@ def make_payload(request, profile, *, images=()):
         raise ValueError("model-facing source exceeds request budget")
     from . import context
     from .contracts import Style
-    sound=(profile.specialist_chat and request.mode=='B' and request.style.instructions==Style().instructions+context.SOUND_GUIDE)
+    sound=(profile.specialist_chat and request.mode=='B' and request.style.instructions==Style().instructions+context.sound_guide(request.units[0].selected))
     if request.context_ids and not profile.context and not sound:
         raise ValueError("profile does not support page context")
     if request.mode == "C" and (not profile.images or not images):
@@ -283,7 +283,7 @@ def make_payload(request, profile, *, images=()):
             raise ValueError('invalid sound effect context partition')
         payload=_specialist_payload(base.units[0].selected.text,base.style,profile)
         scene=[u.selected.text for u in request.units[1:]]
-        guide=context.SOUND_GUIDE+'Scene dialogue (uncertain OCR): '+json.dumps(scene,ensure_ascii=False)+'\n'
+        guide=context.sound_guide(base.units[0].selected)+'Scene dialogue (uncertain OCR): '+json.dumps(scene,ensure_ascii=False)+'\n'
         message=payload['messages'][0]
         message['content']=message['content'].replace('Please translate the following ',guide+'Please translate the following ',1)
         return payload

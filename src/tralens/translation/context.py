@@ -105,11 +105,30 @@ def plan(request, pool, bounds):
     return planned, evidence
 
 
+def _clipped_crop_sound(reading):
+    from ..ocr import crop_readings, sound_readings
+    if reading.origin != crop_readings.ENGINE or not sound_readings.clipped_motif(reading.text):
+        return False
+    candidate = strict_json(reading.evidence_json)
+    record = strict_json(candidate['model_settings_json'])['record']
+    return ('shifted_windows' in record and sound_readings.matches(record)
+            and sound_readings.shifted_target(record) == reading.text)
+
+
+def sound_guide(reading):
+    from ..ocr.sound_readings import clipped_motif
+    if not _clipped_crop_sound(reading):
+        return SOUND_GUIDE
+    motif = clipped_motif(reading.text)
+    return (SOUND_GUIDE + 'Read the cropped leading character as the tail of the preceding beat. '
+            + f'Interpret {motif*2} in the scene, then repeat that English sound for the complete beats in the target. ')
+
+
 def sound_plan(request,pool):
     from ..ocr.sound_readings import repeat
     target=request.units[0]
     if (request.style.source_language not in ('ja','Japanese') or request.style.target_language not in ('en','English')
-            or len(target.selected.text)>32 or not repeat(target.selected.text)):
+            or len(target.selected.text)>32 or not (repeat(target.selected.text) or _clipped_crop_sound(target.selected))):
         return None
     scene=[]
     seen=set()
@@ -117,7 +136,7 @@ def sound_plan(request,pool):
     for unit in pool:
         text=unit.selected.text
         if (unit.unit_id==target.unit_id or unit.disposition=='blocked' or text in seen or not 10<len(text)<=256
-                or repeat(text) or not any('ぁ'<=c<='ヺ' or '㐀'<=c<='鿿' for c in text)):
+                or repeat(text) or _clipped_crop_sound(unit.selected) or not any('ぁ'<=c<='ヺ' or '㐀'<=c<='鿿' for c in text)):
             continue
         if characters+len(text)>MAX_CONTEXT_CHARS:
             continue
@@ -127,7 +146,7 @@ def sound_plan(request,pool):
     if not scene:
         return None
     planned=replace(request,units=(target,*scene),context_ids=tuple(u.unit_id for u in scene),mode='B',
-        style=replace(request.style,instructions=request.style.instructions+SOUND_GUIDE))
+        style=replace(request.style,instructions=request.style.instructions+sound_guide(target.selected)))
     return planned,{'policy':SOUND_POLICY,'target_revision':target.revision,
         'selected_revisions':[u.selected_revision for u in scene],'request_revision':planned.revision,
         'scene_order':'detector order, reading order unverified','context_characters':characters}

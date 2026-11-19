@@ -77,6 +77,31 @@ class CropReadings(unittest.TestCase):
         self.assertIsNone(sound.hint(dict(damaged, readings=['トキ'+motif*2]*3)))
         self.assertIsNone(sound.hint(dict(record,scores=[.98])))
 
+    def test_shifted_split_must_reproduce_whole_reading_verbatim(self):
+        from tralens.ocr import sound_readings as sound
+        motif = 'ドキ'
+        whole = 'キ' + motif * 5
+        record = dict(source='他の文字', direction='horizontal', polygons=[[]], scores=[.4],
+            readings=[whole, whole, '別'], sound_windows={
+                'view_hashes':['a','b','c'], 'readings':[whole, 'キ'+motif*2, motif*3]})
+        self.assertFalse(sound.matches(record))
+        record['shifted_windows'] = {'view_hashes':list('abcd'),
+            'readings':[whole[:4], whole[4:], '違', 'う']}
+        self.assertTrue(sound.matches(record))
+        self.assertEqual(c.candidate_text(record), whole)
+        record['shifted_windows']['readings'][1] += motif
+        self.assertFalse(sound.matches(record))
+        self.assertIsNone(sound.clipped_motif('ソ'+motif*5))
+        self.assertIsNone(sound.clipped_motif('キ'+motif*2))
+
+        whole = motif*2
+        record.update(readings=[whole, 'ナ'+whole, whole+'ー'])
+        record['sound_windows']['readings'] = [whole, 'ナ'+motif, motif]
+        record['shifted_windows']['readings'] = ['違', 'う', whole[:3], whole[3:]]
+        self.assertTrue(sound.matches(record))
+        record['readings'][0] = '違う'
+        self.assertFalse(sound.matches(record))
+
     def test_oblique_sound_requires_three_matching_reduplicated_readings(self):
         record = dict(direction='unknown', source='手人手', scores=[.6],
             view_policy=c.TILTED_VIEWS, readings=['パチパチ']*3)
