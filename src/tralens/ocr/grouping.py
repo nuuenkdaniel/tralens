@@ -8,6 +8,36 @@ from sklearn.cluster import DBSCAN
 from .types import Text_Box, Text_Group
 
 
+def centered_dialogue_rows(boxes, pixels):
+    """A bounded stack of centered print separated by uninterrupted light seams."""
+    if pixels is None or not 2 <= len(boxes) <= 6:
+        return False
+    ordered = sorted(boxes, key=lambda box: box.bbox[1])
+    # A centered exclamation or question can be a separate address or reply.
+    # Do not extend the usual distance rule across a sentence boundary.
+    if any(box.text.rstrip().endswith(('!', '！', '?', '？', '。')) for box in ordered[:-1]):
+        return False
+    rows = [box.bbox for box in ordered]
+    heights = [b-y for x,y,r,b in rows]
+    scale = min(heights)
+    if scale < 6 or max(heights) > 1.35*scale:
+        return False
+    centers = [(x+r)/2 for x,y,r,b in rows]
+    if max(centers)-min(centers) > .45*scale:
+        return False
+    for x,y,r,b in rows:
+        if r-x < 2.5*scale or not (0 <= x < r <= pixels.shape[1] and 0 <= y < b <= pixels.shape[0]):
+            return False
+    for upper, lower in zip(rows, rows[1:]):
+        gap = lower[1]-upper[3]
+        if not 2 <= gap <= .55*scale:
+            return False
+        seam = pixels[upper[3]+1:lower[1], max(upper[0],lower[0]):min(upper[2],lower[2])]
+        if not seam.size or np.mean(seam.min(axis=2) >= 244) < .98:
+            return False
+    return True
+
+
 class GroupingMixin:
     def _calc_edge_dist(self, box1: Text_Box, box2: Text_Box):
         b1 = box1.bbox
@@ -29,7 +59,7 @@ class GroupingMixin:
         return normalized_dist
 
     def _group_boxes_manga(self, text_boxes: list[Text_Box], *, regions=None, region_status=None,
-                          merge_guard=None):
+                          merge_guard=None, original_pixels=None):
         if not text_boxes: return []
 
         if regions is None:
@@ -43,7 +73,8 @@ class GroupingMixin:
                 for b in range(a + 1, len(clusters)):
                     second = clusters[b]
                     pairs = [(i, j) for i in first for j in second]
-                    if not all(self._manga_compatible(text_boxes[i], text_boxes[j],
+                    centered = centered_dialogue_rows([text_boxes[i] for i in first+second], original_pixels)
+                    if not centered and not all(self._manga_compatible(text_boxes[i], text_boxes[j],
                                                      relaxed=True) for i, j in pairs):
                         continue
                     known = {regions[i][0] for i in first + second if i in regions}
@@ -51,6 +82,8 @@ class GroupingMixin:
                         continue
                     local = [(i, j) for i, j in pairs
                              if self._manga_compatible(text_boxes[i], text_boxes[j])]
+                    if centered and not local:
+                        local = pairs
                     if local:
                         if merge_guard is not None and not merge_guard(
                                 [text_boxes[i] for i in first], [text_boxes[i] for i in second]):
@@ -230,7 +263,7 @@ def analyze_manga_regions(text_boxes, image, *, include_uncertain=True):
     return GroupingMixin()._manga_regions(text_boxes, image=image, include_uncertain=include_uncertain)
 
 
-def group_manga_boxes(text_boxes, *, regions=None, region_status="image_unavailable", merge_guard=None):
+def group_manga_boxes(text_boxes, *, regions=None, region_status="image_unavailable", merge_guard=None, original_pixels=None):
     """Reuse complete-link grouping/order with explicit evidence and no file/engine I/O."""
     return GroupingMixin()._group_boxes_manga(text_boxes, regions={} if regions is None else regions,
-                                             region_status=region_status, merge_guard=merge_guard)
+                                             region_status=region_status, merge_guard=merge_guard, original_pixels=original_pixels)

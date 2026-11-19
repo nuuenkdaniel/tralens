@@ -434,28 +434,30 @@ class PreviewTranslator:
                 failure, detail = "timeout", "runtime exceeded total generation deadline"
                 break
             from . import rendition
-            if (self.single_rendition and self.profile.specialist_chat and not fragment and not alternate
-                    and isinstance(text,str) and rendition.needs_retry(request.units[0].selected.text,text)):
+            retry_policy = None
+            if self.single_rendition and self.profile.specialist_chat and not fragment and not alternate and isinstance(text,str):
+                retry_policy = rendition.retry_policy(request.units[0].selected.text,text,request.style)
+            if retry_policy:
                 primary=text
-                rendition_evidence.update(policy=rendition.POLICY,primary_translation=primary,selected='primary',
+                rendition_evidence.update(policy=retry_policy,primary_translation=primary,selected='primary',
                     semantic_accuracy_verified=False)
                 remaining=self.timeout-(time.monotonic()-started)
                 if remaining>1 and not cancelled():
                     try:
                         attempts+=1
-                        candidate=self.runtime.generate(model=self.model,payload=rendition.payload(payload),timeout=remaining)
+                        candidate=self.runtime.generate(model=self.model,payload=rendition.payload(payload,retry_policy),timeout=remaining)
                         raw=candidate.response_json if isinstance(candidate,Generation) else canonical({'text':candidate})
-                        failed=notify({'attempt':attempts,'status':'response','purpose':rendition.POLICY,'response_json':raw})
+                        failed=notify({'attempt':attempts,'status':'response','purpose':retry_policy,'response_json':raw})
                         if failed is not None:return failed
                         candidate=candidate.text if isinstance(candidate,Generation) else candidate
                         rendition_evidence['candidate_translation']=candidate
                         if (isinstance(candidate,str) and candidate.strip() and len(candidate)<=self.generation_options.max_output_chars
-                                and ' / ' not in candidate and not cancelled() and time.monotonic()-started<self.timeout):
-                            text=candidate;rendition_evidence['selected']='single_rendition'
+                                and rendition.candidate_matches(retry_policy,primary,candidate) and not cancelled() and time.monotonic()-started<self.timeout):
+                            text=candidate;rendition_evidence['selected']=('single_rendition' if retry_policy==rendition.POLICY else 'unfinished_contrast')
                     except Exception as error:
                         rendition_evidence['error']=type(error).__name__+': '+str(error)[:512]
                         failed=notify({'attempt':attempts,'status':'rendition_retry_failed',
-                            'purpose':rendition.POLICY,'response_json':getattr(error,'response_json',None)})
+                            'purpose':retry_policy,'response_json':getattr(error,'response_json',None)})
                         if failed is not None:return failed
             try:
                 if not isinstance(text, str):

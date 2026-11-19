@@ -360,7 +360,9 @@ def validate_text(text, coverage):
                  (unicodedata.name(c, "").startswith(('LATIN ', 'HIRAGANA ', 'KATAKANA ', 'KATAKANA-HIRAGANA ',
                      'CJK UNIFIED IDEOGRAPH-', 'CJK COMPATIBILITY IDEOGRAPH-')) or
                   unicodedata.category(c)[0] == "M")) or
-                unicodedata.category(c)[0] == "P" for c in text), "supported Latin/CJK horizontal text required")
+                unicodedata.category(c)[0] == "P" or
+                (unicodedata.category(c) == "Sm" and unicodedata.bidirectional(c) == "ON")
+                for c in text), "supported Latin/CJK horizontal text required")
     require(all(ord(c) in coverage for c in text if c != "\n"), "missing glyph coverage")
 
 

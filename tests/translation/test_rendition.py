@@ -33,6 +33,17 @@ class SingleRendition(unittest.TestCase):
             self.assertEqual(result.translations[0][1],'Hello! / Hi there!')
             self.assertEqual(provider.generate.call_count,2)
 
+    def test_only_retry_lost_contrast_in_japanese_to_english(self):
+        from tralens.translation.contracts import Style
+        policy = rendition.retry_policy('行きたいけれど','I want to go.',Style())
+        self.assertEqual(policy,rendition.UNFINISHED)
+        self.assertTrue(rendition.candidate_matches(policy,'I want to go.', 'I want to go, but…'))
+        self.assertFalse(rendition.candidate_matches(policy,'I want to go.', 'I want to go, but I cannot.'))
+        self.assertFalse(rendition.candidate_matches(policy,'It costs 30.', 'It costs 300, but…'))
+        for source,target in [('行きたいけれど','I want to go, though.'),('どこにいるの','Where are you?'),
+                ('アップデートからXが','X stopped.')]:
+            self.assertIsNone(rendition.retry_policy(source,target,Style()))
+
     def test_literal_slashes_and_single_symbols_do_not_trigger(self):
         for source,target in [('foo / bar','foo / bar'),('了','Done / Finished'),('かな','A/B test'),('かな','Just one sentence.')]:
             self.assertFalse(rendition.needs_retry(source,target))

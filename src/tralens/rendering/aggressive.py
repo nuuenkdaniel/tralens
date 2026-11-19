@@ -87,6 +87,38 @@ class Geometry:
         return [x,y,r,b],np.asarray(own)!=0,protected
 
 
+def adjacent_ellipsis(crop, own, protected):
+    """Recover isolated three-dot runs just outside a horizontal detector line."""
+    added = np.zeros_like(own)
+    x, y, w, h = cv2.boundingRect(own.astype(np.uint8))
+    if w < 2*h or h < 8 or np.mean(crop[own].min(axis=1) >= 244) < .55:
+        return added
+    for start, end in ((max(0,x-round(1.5*h)), x), (x+w, min(crop.shape[1],x+w+round(1.5*h)))):
+        if end-start < 5:
+            continue
+        strip = crop[y:y+h,start:end]
+        if protected[y:y+h,start:end].any():
+            continue
+        dark = strip.max(axis=2) < 180
+        count, labels, stats, centers = cv2.connectedComponentsWithStats(dark.astype(np.uint8))
+        if count != 4:
+            continue
+        boxes = stats[1:]
+        if (boxes[:,2:4].min() < 2 or boxes[:,2:4].max() > max(3,h*.24)
+                or boxes[:,4].max() > boxes[:,4].min()*1.7):
+            continue
+        points = centers[1:]; gaps = np.diff(np.sort(points[:,0]))
+        if np.ptp(points[:,1]) > 1.5 or gaps.min() < 3 or gaps.max() > min(.5*h,1.25*gaps.min()):
+            continue
+        mask = p.dilate(labels != 0, 2)
+        collar = p.dilate(mask,2) & ~mask
+        if (dark[0].any() or dark[-1].any() or dark[:,0].any() or dark[:,-1].any()
+                or not collar.any() or np.mean(strip[collar].min(axis=1) >= 244) < .98):
+            continue
+        added[y:y+h,start:end] |= mask
+    return added
+
+
 def masks(crop,own,protected,*,probability=None):
     """Return distinct evidence and removal candidates; uncertain cuts are allowed."""
     # Multichannel local contrast captures light outlines and colored lettering;
@@ -156,6 +188,29 @@ def cheap(crop,mask,protected):
     return candidate,'classical_telea_unverified'
 
 
+def light_dialogue_frame(crop, own, allowed):
+    """Estimate local placement space for dark print on a white balloon."""
+    light = crop.min(axis=2) >= 244
+    if np.mean(light[own]) < .55:
+        return None
+    # A long straight rule near the source suggests a form or panel. Its white
+    # field is a poor guide to dialogue placement.
+    line_width = max(48, round(crop.shape[1]*.5))
+    rules = cv2.morphologyEx((crop.max(axis=2)<120).astype(np.uint8), cv2.MORPH_OPEN,
+        np.ones((1,line_width),np.uint8))
+    if (rules.astype(bool) & p.dilate(own,24)).any():
+        return None
+    # Bridge the original letters only inside their detector footprints.
+    # Choose the connected surface covering most of this passage.
+    _, labels = cv2.connectedComponents((light | own).astype(np.uint8), connectivity=4)
+    ids, counts = np.unique(labels[own], return_counts=True)
+    largest = counts.argmax()
+    if counts[largest] < .9 * counts.sum():
+        return None
+    frame = (labels == ids[largest]) & allowed
+    return frame if frame.any() else None
+
+
 def tall_layout(layer,proof):
     """Only retry automatic wrapping, never an explicitly supplied line layout."""
     if '\n' in proof['original_text'] or len(proof['draw_text'].splitlines())<4:return False
@@ -204,6 +259,16 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             rec.require(crop.size and own.any(),'empty recovery source')
             predicted,ladder,evidence=masks(crop,own,protected,
                 probability=probability[y:b,x:r] if probability is not None else None)
+            dots = np.zeros_like(own)
+            for member in row['binding']['member_ids']:
+                points = np.asarray(geometry.raw[(type(member).__name__,member)]['polygon'])
+                line = Image.new('L',(r-x,b-y))
+                ImageDraw.Draw(line).polygon([(px-x,py-y) for px,py in points],fill=255)
+                line = np.asarray(line) != 0
+                dots |= adjacent_ellipsis(crop,line,protected | (own & ~line))
+            if dots.any():
+                ladder = [(name+'+ellipsis',mask | dots) for name,mask in ladder]
+                evidence = {**evidence, 'adjacent_ellipsis_pixels':int(dots.sum())}
             if extent:
                 ladder=[(name+'+'+source_extents.POLICY,source_extents.apply(mask,extent,bounds,protected))
                     for name,mask in ladder]
@@ -221,7 +286,20 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                         'outline':1,'outline_fill':[0 if dark else 255]*3})
                 rec.require(proof['original_text']==row['binding']['text'] and proof['size']>=style['min_size'],
                     'reconstruction layout dropped wording or reduced requested floor')
-                retry=tall_layout(layer,proof)
+                frame = light_dialogue_frame(crop, own, allowed)
+                if frame is not None and (np.asarray(layer.getchannel('A')).astype(bool) & ~frame).any():
+                    try:
+                        fitted = typography.layout_dialogue(row['binding']['text'],font_data,coverage,
+                            Image.fromarray(frame.astype(np.uint8)*255),{**style,'fill':[0]*3,
+                                'outline':1,'outline_fill':[255]*3})
+                    except n.ResourceLimit:
+                        raise
+                    except ValueError:
+                        pass  # Keep the already readable target if the balloon is too small.
+                    else:
+                        layer,proof,content = fitted
+                        entry['placement_frame'] = 'local_light_dialogue_surface'
+                retry=tall_layout(layer,proof) and 'placement_frame' not in entry
             except rec.BindingError:raise
             except ValueError as error:
                 entry['placement_failure']=str(error);retry=True

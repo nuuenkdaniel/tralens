@@ -43,6 +43,27 @@ def model_bytes(directory,config):
     return model
 
 
+def predict(session, rgb, mask):
+    import numpy as np
+    h,w=mask.shape
+    # Reflect masked lettering as masked too. Zero mask padding would expose
+    # mirrored source glyphs to the model as known context.
+    image=np.pad(rgb,((0,512-h),(0,512-w),(0,0)),mode='symmetric')
+    removal=np.pad(mask,((0,512-h),(0,512-w)),mode='symmetric')
+    feed={}
+    for value in session.get_inputs():
+        if value.type!='tensor(float)' or len(value.shape)!=4 or value.shape[0] not in (1,'batch'):
+            raise ValueError('unexpected LaMa input type/batch')
+        if value.shape[1:]==[3,512,512]:feed[value.name]=image.transpose(2,0,1)[None].astype(np.float32)/255
+        elif value.shape[1:]==[1,512,512]:feed[value.name]=removal[None,None].astype(np.float32)
+        else:raise ValueError('unexpected LaMa input contract '+str(value.shape))
+    if len(feed)!=2:raise ValueError('two model inputs required')
+    outputs=session.run(None,feed)
+    if len(outputs)!=1 or outputs[0].shape!=(1,3,512,512) or not np.isfinite(outputs[0]).all():
+        raise ValueError('invalid LaMa output contract')
+    return np.clip(outputs[0][0].transpose(1,2,0)[:h,:w],0,255)
+
+
 def main(directory):
     # Limits precede native imports/model parsing; CPU execution only.
     resource.setrlimit(resource.RLIMIT_AS,(6*1024**3,6*1024**3))
@@ -56,33 +77,26 @@ def main(directory):
     model=model_bytes(directory,config)
     h,w=mask.shape
     if rgb.shape!=(h,w,3) or not 0<max(h,w)<=512:raise ValueError('invalid native crop')
-    # Reflect masked lettering as masked too. Zero mask padding would expose
-    # mirrored source glyphs to the model as known context.
-    image=np.pad(rgb,((0,512-h),(0,512-w),(0,0)),mode='symmetric')
-    removal=np.pad(mask,((0,512-h),(0,512-w)),mode='symmetric')
     options=ort.SessionOptions();options.intra_op_num_threads=2;options.inter_op_num_threads=1
     options.execution_mode=ort.ExecutionMode.ORT_SEQUENTIAL
     started=time.monotonic();session=ort.InferenceSession(model,sess_options=options,providers=['CPUExecutionProvider'])
     session.disable_fallback()
-    model_inputs=session.get_inputs()
-    feed={}
-    for value in model_inputs:
-        if value.type!='tensor(float)' or len(value.shape)!=4 or value.shape[0] not in (1,'batch'):
-            raise ValueError('unexpected LaMa input type/batch')
-        if value.shape[1:]==[3,512,512]:feed[value.name]=image.transpose(2,0,1)[None].astype(np.float32)/255
-        elif value.shape[1:]==[1,512,512]:feed[value.name]=removal[None,None].astype(np.float32)
-        else:raise ValueError('unexpected LaMa input contract '+str(value.shape))
-    if len(feed)!=2:raise ValueError('two model inputs required')
     load=time.monotonic()-started;started=time.monotonic()
-    outputs=session.run(None,feed)
-    if len(outputs)!=1 or outputs[0].shape!=(1,3,512,512) or not np.isfinite(outputs[0]).all():
-        raise ValueError('invalid LaMa output contract')
-    result=np.clip(outputs[0][0].transpose(1,2,0)[:h,:w],0,255).astype(np.uint8)
+    prediction=predict(session,rgb,mask)
+    views=['native']
+    # Mirrored context reduces directional fill artifacts on painted surfaces.
+    # Reflect the native crop before padding and undo the reflection before blending.
+    known=rgb[~mask]
+    if len(known) and np.mean(np.ptp(known,axis=1)>20) >= .2:
+        mirrored=predict(session,rgb[:,::-1],mask[:,::-1])[:,::-1]
+        prediction=(prediction+mirrored)*.5
+        views.append('horizontal_reflection')
+    result=prediction.astype(np.uint8)
     elapsed=time.monotonic()-started
     Image.fromarray(result).save(directory/'output.png')
     (directory/'result.json').write_text(json.dumps({'request_revision':req['revision'],
         'output_pixels_sha256':hashlib.sha256(str((result.dtype.str,result.shape)).encode()+result.tobytes()).hexdigest(),
         'model_sha256':config['sha256'],'backend':'lama-onnx-512','runtime':ort.__version__,
         'providers':session.get_providers(),'load_seconds':load,'inference_seconds':elapsed,
-        'output_minimum':float(outputs[0].min()),'output_maximum':float(outputs[0].max()),
+        'views':views,'output_minimum':float(prediction.min()),'output_maximum':float(prediction.max()),
         'peak_rss_kib':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,'pid':os.getpid()}))

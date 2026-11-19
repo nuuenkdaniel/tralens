@@ -146,6 +146,33 @@ def _kanji(text):
     return any("\u3400" <= c <= "\u9fff" or "\U00020000" <= c <= "\U0002fa1f" for c in text)
 
 
+def horizontal_rule_between(first, second, pixels):
+    """Find a thin, near-horizontal printed rule crossing overlapping row boxes."""
+    a,b=sorted((first.bbox,second.bbox),key=lambda box:box[1]+box[3])
+    h=min(a[3]-a[1],b[3]-b[1])
+    left,right=max(a[0],b[0]),min(a[2],b[2])
+    if h < 6 or right-left < max(48,3*h) or b[1]-a[3] > 2*h or b[1] < a[1]+.45*h:
+        return False
+    # Sample across the shared row width. The strip may tilt slightly in scans.
+    top=max(0,int((a[1]+a[3])/2)+1)
+    bottom=min(pixels.shape[0],int((b[1]+b[3])/2))
+    left,right=max(left,0),min(right,pixels.shape[1])
+    if right-left < 48 or bottom-top < 3:
+        return False
+    ink=pixels[top:bottom,left:right].max(axis=2)<110
+    height,width=ink.shape
+    slopes=min(6,max(1,round(.02*width)))
+    xs=np.unique(np.linspace(0,width-1,min(256,width)).astype(int))
+    for rise in range(-slopes,slopes+1):
+        offsets=np.rint(xs*rise/(width-1)).astype(int)
+        ys=np.arange(2-min(0,rise),height-2-max(0,rise))[:,None]+offsets
+        dark=ink[ys,xs].mean(axis=1)
+        light=np.maximum((~ink[ys-2,xs]).mean(axis=1),(~ink[ys+2,xs]).mean(axis=1))
+        if ((dark >= .90) & (light >= .7)).any():
+            return True
+    return False
+
+
 def _annotation_geometry(child, parent):
     direction = GroupingMixin._manga_direction(parent)
     # Short one/two-glyph reading runs need not have the parent's aspect ratio.
@@ -574,6 +601,7 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
                     if by_id[raw.source_id][2] in regions}
     rejected_merges = {}
     boundary_cache = {}
+    rule_cache = {}
     def merge_guard(first,second):
         members = tuple(sorted((box.box_id for box in first+second),key=_key))
         reasons, barriers = [], []
@@ -597,6 +625,11 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
                         first_glyphs=glyphs[left.box_id],second_glyphs=glyphs[right.box_id],
                         included_members=included,nonmember_boxes=nonmembers)
                 evidence = boundary_cache[key]
+                if pair not in rule_cache:
+                    rule_cache[pair] = (GroupingMixin._manga_direction(left) == GroupingMixin._manga_direction(right) == 'horizontal'
+                        and horizontal_rule_between(left,right,bgr))
+                if rule_cache[pair]:
+                    reasons.append("printed_rule_between_horizontal_rows")
                 if evidence["blocked"]:
                     reasons.append("original_image_boundary_blocks_column_merge")
                     barriers.append({"source_ids": pair, "evidence": evidence})
@@ -611,7 +644,7 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
             return False
         return True
     groups = group_manga_boxes([box for _, box in mains], regions=main_regions, region_status=region_status,
-                              merge_guard=merge_guard)
+                              merge_guard=merge_guard, original_pixels=bgr)
     ownership_repairs = ()
     if complementary_ownership:
         member_groups = []
