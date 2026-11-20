@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "purpose": "native_manga_quality_development",
+  "source_sha256": "bc5a90b6952e45f11f9d6de80195cef48d2c0dee211e6071521001dd0848abe3",
+  "split": "development",
+  "exposure": "This page and its coverage outputs were inspected before this freeze. All overlapping crops and negatives are development evidence, not independent samples or held-out validation.",
+  "missing_strata": [
+    "untouched native held-out pages",
+    "independently checked transcription and grouping references",
+    "clear furigana with independently checked annotation roles",
+    "controlled overlays with clean-background and lettering-alpha references",
+    "representative color, textured and light-on-dark dialogue beyond this one page"
+  ],
+  "cases": [
+    {
+      "id": "double-click-block-and-terminal-line",
+      "kind": "detected_text",
+      "anchor_ids": [25, 26, 27, 29],
+      "bounds": [65, 980, 285, 1140],
+      "tags": ["garbled_ocr", "hand_lettered", "split_block", "neighboring_text"],
+      "observation": "Instruction balloon has garbled selected OCR; the short bottom line is in a different unit. Inspect the whole block and its neighbors without supplying corrected source words. Anchor membership is a review target, not a certified merge."
+    },
+    {
+      "id": "livecd-mixed-script-block",
+      "kind": "detected_text",
+      "anchor_ids": [13, 18, 20],
+      "bounds": [65, 700, 220, 875],
+      "tags": ["mixed_language", "hand_lettered", "block_reread"],
+      "observation": "Mixed Latin/Japanese balloon now has a translation but exact OCR remains unverified. Compare contextual and line candidates; do not route away genuine Latin content."
+    },
+    {
+      "id": "desktop-dialogue",
+      "kind": "detected_text",
+      "anchor_ids": [14, 19, 21, 22],
+      "bounds": [418, 697, 563, 890],
+      "tags": ["garbled_ocr", "hand_lettered", "neighboring_text"],
+      "observation": "The desktop dialogue has incorrect selected characters and a semantically suspect target. Nearby borders and the separate footnote must survive cleanup."
+    },
+    {
+      "id": "separate-short-interjection",
+      "kind": "detected_text",
+      "anchor_ids": [35],
+      "bounds": [475, 1200, 563, 1340],
+      "tags": ["short_interjection", "neighboring_text", "grouping_uncertain"],
+      "observation": "Keep the separately detected short interjection available. Its proximity to the following dialogue does not by itself prove that they should merge."
+    },
+    {
+      "id": "joined-balloon-lobes",
+      "kind": "detected_text",
+      "anchor_ids": [8, 10],
+      "bounds": [115, 490, 385, 679],
+      "tags": ["joined_balloons", "grouping_uncertain", "layout_geometry"],
+      "observation": "Two currently strict units occupy joined balloon lobes. Evaluate grouping/order separately from connected whitespace and layout. Do not assume one connected fill means one utterance."
+    },
+    {
+      "id": "outlined-label-on-black",
+      "kind": "detected_text",
+      "anchor_ids": [9],
+      "bounds": [395, 490, 1050, 676],
+      "tags": ["dark_background", "outlined_lettering", "mixed_language", "embedded_label"],
+      "observation": "Outlined Latin lettering on black is replaced by small plain type. Preserve the neighboring logo; apparent flatness alone does not establish text-only mask support."
+    },
+    {
+      "id": "slanted-latin-label",
+      "kind": "detected_text",
+      "anchor_ids": [7],
+      "bounds": [220, 275, 420, 461],
+      "tags": ["mixed_language", "rotated_lettering", "embedded_label", "artwork_damage"],
+      "observation": "Slanted laptop label has a broad polygon and visible damage after cleanup. A Japanese-only reread must not overwrite Latin source evidence."
+    },
+    {
+      "id": "broad-sound-effect-crossing-art",
+      "kind": "detected_text",
+      "anchor_ids": [24],
+      "bounds": [65, 865, 568, 985],
+      "tags": ["garbled_ocr", "sound_effect", "outlined_lettering", "artwork_damage", "panel_border"],
+      "observation": "A broad sound-effect detection becomes calendar-like OCR and a destructive smear across artwork. Smaller changed area is not success unless the original lettering is also removed."
+    },
+    {
+      "id": "neighboring-vertical-sound-effect",
+      "kind": "detected_text",
+      "anchor_ids": [28, 30],
+      "bounds": [235, 1040, 365, 1187],
+      "tags": ["sound_effect", "neighboring_text", "artwork_damage"],
+      "observation": "Sound effect is near the instruction balloon, other lettering and a face. Test whole-stroke support and neighbor protection rather than erasing its reading envelope."
+    },
+    {
+      "id": "frame-clipped-sound-effect",
+      "kind": "detected_text",
+      "anchor_ids": [0],
+      "bounds": [50, 0, 401, 281],
+      "tags": ["sound_effect", "source_edge", "artwork_damage", "noisy_latin_candidate"],
+      "observation": "Frame-clipped outlined sound effect currently reads as Latin/Kana noise. The replacement visibly removes hair and line art. Report edge uncertainty rather than inventing a complete reading."
+    },
+    {
+      "id": "strict-vertical-dialogue-control",
+      "kind": "detected_text",
+      "anchor_ids": [17, 16, 15],
+      "bounds": [970, 707, 1149, 963],
+      "tags": ["strict_control", "vertical_dialogue", "layout_geometry"],
+      "observation": "Existing strict replacement is a regression control, not a checked translation reference. Preserve its saved artifacts while experiments are opt-in."
+    },
+    {
+      "id": "small-unassigned-gloss",
+      "kind": "undetected_text_observation",
+      "anchor_ids": [],
+      "bounds": [407, 1428, 530, 1475],
+      "tags": ["missed_text", "small_lettering", "annotation_role_uncertain"],
+      "observation": "Small source lettering remains near the bottom of the help balloon and has no dedicated detected unit in this run. This is a provisional missed-text observation, not a transcription or a confirmed furigana role."
+    },
+    {
+      "id": "art-only-negative",
+      "kind": "negative_art",
+      "anchor_ids": [],
+      "bounds": [840, 1055, 1080, 1270],
+      "tags": ["art_only_negative", "face_detail"],
+      "observation": "Visually selected face/art context without an intended text target. Test hallucinated rereads and accidental edits; the negative label is provisional evaluation metadata, not permission for a production mask."
+    },
+    {
+      "id": "neighboring-text-negative",
+      "kind": "negative_neighbor",
+      "anchor_ids": [],
+      "bounds": [65, 1090, 240, 1185],
+      "tags": ["neighbor_negative", "hand_lettered", "overlapping_footprints"],
+      "observation": "Neighboring short lettering must not be absorbed into an instruction reread or cleanup. The saved full-page result edits these regions independently; crop counters therefore include those edits."
+    }
+  ]
+}

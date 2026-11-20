@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Stage all generated native projects, web assets and dependencies under .android-build.
+set -euo pipefail
+src=$(cd -- "$(dirname -- "$0")" && pwd -P)
+root=$(cd "$src/../.." && pwd -P)/.android-build
+run="$src/android-env"
+work="$root/work"
+online=false
+variant=debug
+for flag in "$@"; do
+  case "$flag" in
+    --online) online=true ;;
+    --release) variant=release ;;
+    *) echo "Usage: frontend/android/build-apk [--online] [--release]" >&2; exit 2 ;;
+  esac
+done
+[[ -d "$work" ]] || { echo "Run frontend/android/provision first." >&2; exit 1; }
+cp -- "$src"/{capacitor.config.json,package.json,package-lock.json} "$work/"
+npm_network=(--offline)
+gradle_network=()
+if [[ "$online" == true ]]; then npm_network=(); gradle_network=(--online); fi
+"$run" npm ci "${npm_network[@]}" --no-fund --no-audit
+# www is solely the generated Capacitor web copy.
+rm -rf -- "$work/www"
+cp -R -- "$src/../web" "$work/www"
+cap=(node node_modules/@capacitor/cli/bin/capacitor)
+if [[ ! -d "$work/android" ]]; then "$run" "${cap[@]}" add android; fi
+"$run" "${cap[@]}" sync android
+cp -R -- "$src/native/." "$work/android/app/src/main/"
+if [[ "$variant" == release ]]; then
+  TRALENS_HTTP_HOSTS='' python3 "$src/network-config.py" "$work/android/app/src/main/res"
+  apk=app-release-unsigned.apk
+else
+  python3 "$src/network-config.py" "$work/android/app/src/main/res"
+  apk=app-debug.apk
+fi
+"$run" gradle "${gradle_network[@]}" -p android ":app:assemble${variant^}"
+mkdir -p "$root/outputs"
+output="$root/outputs/${apk/app-/tralens-}"
+cp -- "$work/android/app/build/outputs/apk/$variant/$apk" "$output"
+echo "APK: $output"

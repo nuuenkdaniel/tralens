@@ -1,7 +1,23 @@
 __pycache__
 output.jpg
 *venv*
+# Explicit parent-managed Paddle 3.7 comparison environment.
+/.venv-paddle6/
 *.png
 *.jpg
 *.env
+.claude/
 test.py
+
+# Private/local evaluation originals and generated OCR evidence; never publish.
+/images/
+# Includes non-image license/sample metadata belonging to this local dataset.
+/images/ubunchu-ja-test/
+/test-results/
+
+# Local handoffs and upstream research; keep out of future snapshots.
+/docs/handoffs/
+/docs/upstream-approaches-and-licensing.md
+
+# Disposable Android SDK, build tools, dependencies, keys and outputs.
+/.android-build/

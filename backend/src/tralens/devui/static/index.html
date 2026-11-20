@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tralens pipeline viewer</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">文</span><div><h1>Tralens</h1><span>pipeline viewer</span></div></div>
+    <div class="header-tools">
+      <label class="history-label"><span class="visually-hidden">Recent runs</span><select id="jobs" aria-label="Recent runs"><option value="">No runs yet</option></select></label>
+      <span class="local-badge" title="OCR, translation and rendering run on your own machine"><span aria-hidden="true"></span>Local</span>
+    </div>
+  </header>
+  <main>
+    <form id="run-form" class="run-card">
+      <div class="upload-row">
+        <label class="file-button" for="file"><span aria-hidden="true">＋</span> Choose image<input id="file" class="visually-hidden" type="file" accept="image/png,image/jpeg"></label>
+        <div class="file-info"><strong id="filename">No image selected</strong><span id="file-info">PNG or JPEG · up to 32 MiB / 4M pixels · or drop it anywhere</span></div>
+        <button id="cancel" class="secondary-button" type="button" hidden>Cancel run</button>
+        <button id="run" class="primary-button" disabled>Run pipeline →</button>
+      </div>
+      <div class="choices">
+        <fieldset class="segmented" id="mode-group">
+          <legend>Output</legend>
+          <label><input type="radio" name="mode" value="render" checked><span>Translated page</span></label>
+          <label><input type="radio" name="mode" value="translate"><span>Text only</span></label>
+          <label><input type="radio" name="mode" value="ocr"><span>Detect text</span></label>
+        </fieldset>
+        <fieldset class="segmented" id="style-group">
+          <legend>Replacement</legend>
+          <label title="Every available translation is drawn on the page. Artwork behind text may be smeared or covered by a patch."><input type="radio" name="style" value="replace-all" checked><span>Replace all text</span></label>
+          <label title="Only regions that can be cleaned safely are replaced. Other translations stay in the side list."><input type="radio" name="style" value="protect"><span>Protect artwork</span></label>
+        </fieldset>
+        <p id="style-help" class="choice-help"></p>
+        <p id="mask-warning" class="choice-warning" role="status" hidden></p>
+      </div>
+      <details id="settings" class="run-settings">
+        <summary>Advanced <span id="settings-summary">Loading local settings…</span></summary>
+        <div class="settings-grid">
+          <label>Translation model<select id="translation-model"><option value="local">Configured local model</option><option value="gpt-6-luna">GPT-6 Luna · ChatGPT</option><option value="gpt-6.1-terra">GPT-6.1 Terra · ChatGPT</option><option value="gpt-6.2-sol">GPT-6.2 Sol · ChatGPT</option></select></label>
+          <label id="luna-mode-label" hidden>Model input<select id="luna-mode"><option value="reviewed">Whole page + crops, recheck skipped regions</option><option value="page">Whole page</option><option value="atlas">Whole page + numbered crops</option><option value="isolated">OCR text per region</option><option value="panel">Whole page + magnified region</option></select><small>Visual modes send the page to OpenAI and look for missed lettering before translation.</small></label>
+          <label id="related-label" hidden>Same-manga context pages<select id="related-jobs" multiple></select><small>Choose up to six saved runs. Only the current page is lettered.</small></label>
+          <label>Translation call budget<input id="budget" type="number" min="0" max="64" value="64" required><small>Up to 64 model calls per run. Failed calls count too.</small></label>
+          <label>Background reconstruction<select id="reconstruction-policy"><option value="classical">Classical</option><option value="lama">LaMa (local model)</option></select><small id="reconstruction-availability">Used where text is removed in Replace all text mode.</small></label>
+          <div><label class="checkbox-label"><input id="quality-reread" type="checkbox"> Paired OCR rereads</label><small id="reread-availability">Requires existing local readers.</small></div>
+        </div>
+        <p id="configuration" class="note">Loading local settings…</p>
+      </details>
+    </form>
+    <p id="error" class="error-banner" role="alert" hidden></p>
+    <div class="run-status"><span id="status-dot" class="status-dot"></span><p id="status" aria-live="polite">Ready when you are.</p><p id="summary"></p></div>
+    <aside id="quality-notice" class="quality-notice" hidden><p id="quality-copy"></p><button id="quality-retry" class="secondary-button" type="button">Retry and replace all text</button></aside>
+    <section id="empty-state" class="empty-state">
+      <span class="page-symbol" aria-hidden="true">文 <span>→</span> A</span>
+      <h2>Drop a page to translate it</h2><p>Choose a PNG or JPEG above, or drag one onto this window.<br>Each stage appears as soon as the pipeline publishes it.</p>
+      <p class="note">Original → Detected text → Translation → Cleaned page → Final</p>
+    </section>
+    <section id="results" hidden>
+      <nav id="stages" class="stage-strip" aria-label="Pipeline stage previews">
+        <button type="button" data-stage="original" aria-pressed="true"><div class="stage-thumb"><canvas id="thumb-original" aria-hidden="true"></canvas><span class="stage-number">1</span></div><span class="stage-label">Original</span><span class="stage-status">Ready</span></button>
+        <button type="button" data-stage="ocr" aria-pressed="false"><div class="stage-thumb"><canvas id="thumb-ocr" aria-hidden="true"></canvas><span class="stage-number">2</span></div><span class="stage-label">Detected text</span><span class="stage-status">Waiting</span></button>
+        <button type="button" data-stage="translation" aria-pressed="false"><div class="stage-thumb"><canvas id="thumb-translation" aria-hidden="true"></canvas><span class="stage-number">3</span></div><span class="stage-label">Translation</span><span class="stage-status">Waiting</span></button>
+        <button type="button" data-stage="clean" aria-pressed="false"><div class="stage-thumb"><canvas id="thumb-clean" aria-hidden="true"></canvas><span class="stage-number">4</span></div><span class="stage-label">Cleaned page</span><span class="stage-status">Waiting</span></button>
+        <button type="button" data-stage="final" aria-pressed="false"><div class="stage-thumb"><canvas id="thumb-final" aria-hidden="true"></canvas><span class="stage-number">5</span></div><span class="stage-label">Final</span><span class="stage-status">Waiting</span></button>
+      </nav>
+      <div class="view-heading"><div><h2 id="view-title">Original page</h2><p id="view-description"></p></div><label class="checkbox-label follow-control"><input id="follow" type="checkbox" checked> Follow progress</label></div>
+      <div class="workspace columns">
+        <section class="image-panel" aria-label="Selected stage image">
+          <div class="image-toolbar">
+            <label class="compact-label">Compare<select id="compare"><option value="off">Off</option><option value="swipe">Swipe</option><option value="side">Side by side</option></select></label>
+            <label class="compact-label">Zoom<select id="zoom"><option value="fit">Fit page</option><option value="width">Fit width</option><option value="actual">Actual size</option></select></label>
+            <a id="download" class="text-link" target="_blank" rel="noopener" hidden>Open image ↗</a>
+            <button id="expand" class="text-button expand-button" type="button" aria-pressed="false" title="Fill the window (Esc to close)">⤢ Expand</button>
+          </div>
+          <div id="preview-scroll" class="preview-scroll" data-zoom="fit">
+            <figure id="comparison" hidden><figcaption>Original</figcaption><img id="compare-source" alt="Unmodified original page"></figure>
+            <figure id="stage-frame"><figcaption id="image-caption">Original</figcaption>
+              <div id="stage-box" class="stage-box">
+                <canvas id="source" aria-label="Page preview. Select text regions using the list alongside." hidden></canvas>
+                <img id="stage-image" alt="Selected pipeline output" hidden>
+                <img id="swipe-original" class="swipe-original" alt="" hidden>
+                <span id="swipe-left" class="swipe-tag swipe-tag-left" hidden>Original</span>
+                <span id="swipe-right" class="swipe-tag swipe-tag-right" hidden></span>
+                <div id="swipe-handle" class="swipe-handle" role="slider" tabindex="0" aria-label="Comparison divider: original on the left" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" hidden><span aria-hidden="true">⇔</span></div>
+              </div>
+              <div id="stage-placeholder" class="stage-placeholder" hidden><span aria-hidden="true">○</span><h3 id="placeholder-title"></h3><p id="placeholder-copy"></p><button id="show-previous" class="secondary-button" type="button">View previous stage</button></div>
+            </figure>
+          </div>
+          <p id="image-note" class="image-note"></p>
+        </section>
+        <aside class="inspector">
+          <div class="inspector-heading"><h3 id="inspector-title">About this page</h3><span id="unit-count" class="count-badge"></span></div>
+          <p id="inspector-note" class="note"></p>
+          <div id="overlay-controls" class="overlay-controls" hidden><label class="compact-label">Show<select id="overlay"><option value="units">Grouped text</option><option value="detections">Raw detections</option></select></label><button id="clear-selection" class="text-button" type="button">Clear selection</button></div>
+          <div id="units"></div>
+        </aside>
+      </div>
+      <p id="render-note" class="result-note"></p>
+      <details class="technical-details"><summary>Technical details &amp; artifacts</summary><p id="notices" class="note"></p><h3>Rendering layers</h3><div id="layers" class="layers"></div><h3>Masks</h3><div id="masks" class="layers"></div><details><summary>Raw OCR text</summary><pre id="ocr-text"></pre></details><ul id="artifacts"></ul><p id="output-directory" class="note"></p></details>
+      <p class="footer-note">Originals stay untouched. Results are unreviewed machine translations.</p>
+    </section>
+  </main>
+</body>
+</html>
