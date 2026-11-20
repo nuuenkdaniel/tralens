@@ -1,0 +1,12 @@
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!backend/
+!backend/**
+!frontend/
+!frontend/web/
+!frontend/web/**
+**/__pycache__/

@@ -76,3 +76,34 @@ Open the HTTPS site and enter the owner key. For Android, enter the same hostnam
 The ChatGPT provider checks account model availability when a GPT model is selected and before inference. Both the missed-text scan and the translation/review stages use the selected provider. The existing Codex transport can be selected explicitly with `--frontier-provider codex`. Local jobs continue to use the configured local models.
 
 See OpenAI’s [registration flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) and [model access](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
+
+## Docker Compose on Linux
+
+Use Docker Compose on an x86-64 Linux host. Build the reader with the repository’s `Dockerfile` and run it with `compose.yml`. The image includes CPU OCR and the runtime for optional ONNX LaMa inpainting.
+
+Set these values in an untracked `.env` alongside the Compose file. Use absolute paths on the host and make the writable directories accessible to the configured UID and GID.
+
+```dotenv
+TRALENS_UID=1000
+TRALENS_GID=1000
+TRALENS_PORT=7871
+TRALENS_ORIGIN=https://manga.example.com
+TRALENS_LIBRARY=/srv/tralens/library
+TRALENS_CONFIG=/srv/tralens/config
+TRALENS_STATE=/srv/tralens/state
+TRALENS_MODELS=/srv/tralens/models
+TRALENS_ASSETS=/srv/tralens/assets
+TRALENS_OWNER_KEY=/srv/tralens/owner.key
+TRALENS_OLLAMA=http://127.0.0.1:11434
+```
+
+Put the two OCR exports inside the models directory. Put `fonts.json`, a licensed font, and its license inside the assets directory. In the manifest, use container paths such as `/assets/dialogue.ttf` and `/assets/font-license.txt`. The default Compose command expects a single font face in the manifest. Keep the owner key at mode 0600. Stop any previous reader using the same port or library before starting Compose.
+
+```sh
+docker compose up -d --build
+docker compose logs --tail=50 reader
+```
+
+The container uses Linux host networking so the reader can bind to host loopback. Point your HTTPS proxy at `127.0.0.1` and the chosen port. For Tailscale Serve, use the HTTPS hostname for `TRALENS_ORIGIN` and the Android app’s server address. Keep the library, configuration, and runtime state across container replacements. Share the runtime state directory with other Tralens instances using the same Ollama service so they share the inference lock.
+
+To enable LaMa, mount its checkpoint read-only and supply a reconstruction configuration that names `/app/.venv/bin/python` as the runtime. Pass `--reconstruction-config` to the reader using a Compose command override. SDXL needs its own CUDA-enabled runtime.

@@ -1,0 +1,39 @@
+services:
+  reader:
+    build: ${TRALENS_SOURCE:-.}
+    image: tralens:dev
+    user: "${TRALENS_UID:-1000}:${TRALENS_GID:-1000}"
+    network_mode: host
+    init: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      HOME: /config
+      XDG_CONFIG_HOME: /config
+      XDG_CACHE_HOME: /state/cache
+      TRALENS_STATE_ROOT: /state
+    volumes:
+      - ${TRALENS_LIBRARY:?Set the library directory}:/library
+      - ${TRALENS_CONFIG:?Set the private configuration directory}:/config
+      - ${TRALENS_STATE:?Set the runtime state directory}:/state
+      - ${TRALENS_MODELS:?Set the OCR model directory}:/models:ro
+      - ${TRALENS_ASSETS:?Set the directory containing the font manifest and files}:/assets:ro
+      - ${TRALENS_OWNER_KEY:?Set the owner key file}:/run/owner.key:ro
+    command:
+      - --host
+      - 127.0.0.1
+      - --port
+      - "${TRALENS_PORT:-7871}"
+      - --public-origin
+      - "${TRALENS_ORIGIN:?Set the reader HTTPS origin}"
+      - --owner-key-file
+      - /run/owner.key
+      - --output-root
+      - /library
+      - --model-root
+      - /models
+      - --fonts
+      - /assets/fonts.json
+      - --endpoint
+      - "${TRALENS_OLLAMA:-http://127.0.0.1:11434}"
