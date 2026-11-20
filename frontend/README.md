@@ -60,7 +60,7 @@ The empty-library illustration uses reduced-size demo page thumbnails from *Ubun
 
 ## Disposable Android build tools
 
-From the repository root, run `frontend/android/provision` once. On this Linux workstation it copies the productivity app’s JDK 21, Gradle 8.11.1 distribution, Android SDK platform 35, build-tools 35.0.0, command-line tools and platform-tools into Tralens’s ignored `.android-build/`. It also copies the local Node and npm programs. Pass a seed directory as the first argument if the productivity checkout is elsewhere. The seed is only required during provisioning.
+From the repository root, run `frontend/android/provision` once. For a stand-alone build, set `JAVA_HOME` to a JDK 21 installation, `GRADLE_HOME` to Gradle 8.11.1, and `ANDROID_HOME` to an SDK containing platform 35, build-tools 35.0.0, platform-tools, cmdline-tools/latest and accepted licenses. Node and npm must be on PATH. Provisioning copies those tools into this checkout. On this Linux workstation it copies the productivity app’s JDK 21, Gradle 8.11.1 distribution, Android SDK platform 35, build-tools 35.0.0, command-line tools and platform-tools into Tralens’s ignored `.android-build/`. It also copies the local Node and npm programs. Pass a seed directory as the first argument if the productivity checkout is elsewhere. The seed is only required during provisioning.
 
 Use `frontend/android/android-env` to invoke the tools. For example, run `frontend/android/android-env gradle --version` or `frontend/android/android-env npm config get cache`. Commands start in `.android-build/work/`; keep generated Capacitor projects, node_modules, intermediates and APKs there. Gradle runs offline by default; use `gradle --online` when fetching dependencies for the first time. The launcher scopes Java and Android user files, npm and Gradle caches, temporary files and process home to this workspace. Host Linux libraries and basic shell utilities are still required.
 
@@ -90,3 +90,16 @@ frontend/android/android-env adb -s SERIAL install -r "$PWD/.android-build/outpu
 ```
 
 USB forwarding is optional. For a USB-only session, run `frontend/android/android-env adb -s SERIAL reverse tcp:7871 tcp:7871` and select `localhost` and port `7871` in the app. The dedicated ADB daemon uses port 5059. Stop it with `frontend/android/android-env adb kill-server` before cleaning up. Keep the debug keystore for future in-place updates.
+
+## Android release build
+
+Run `frontend/android/build-apk --online --release` the first time, then `frontend/android/build-apk --release` for cached builds. The artifact is `.android-build/outputs/tralens-release-unsigned.apk`. Release builds permit HTTPS and loopback HTTP. The private-network HTTP exceptions used by debug builds are excluded.
+
+To distribute a release, sign the APK with your Android release key and verify the signature. The command prompts for the keystore password. Keep the same signing identity for future updates and keep its backup outside the disposable build workspace.
+
+```sh
+frontend/android/android-env apksigner sign --ks /absolute/path/to/release.jks \
+  --out "$PWD/.android-build/outputs/tralens-release.apk" \
+  "$PWD/.android-build/outputs/tralens-release-unsigned.apk"
+frontend/android/android-env apksigner verify --verbose "$PWD/.android-build/outputs/tralens-release.apk"
+```

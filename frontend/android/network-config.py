@@ -25,5 +25,5 @@ policy = ET.Element("network-security-config")
 ET.SubElement(policy, "base-config", cleartextTrafficPermitted="false")
 allowed = ET.SubElement(policy, "domain-config", cleartextTrafficPermitted="true")
 for host in sorted(hosts):
-    ET.SubElement(allowed, "domain").text = host
+    ET.SubElement(allowed, "domain", includeSubdomains="false").text = host
 ET.ElementTree(policy).write(res/"xml/network_security.xml", encoding="utf-8", xml_declaration=True)

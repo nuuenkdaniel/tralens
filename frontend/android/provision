@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Seed an independent build workspace from the unpacked productivity-app tools.
+# Copy an installed Android toolchain into a disposable project workspace.
 set -euo pipefail
 repo=$(cd -- "$(dirname -- "$0")/../.." && pwd -P)
 seed=${1:-"$repo/../productivity_app/.android-build"}
@@ -8,9 +8,22 @@ if [[ -e "$target" || -L "$target" ]]; then
   echo "Already present: $target. Provisioning only creates a new workspace." >&2
   exit 1
 fi
-shopt -s nullglob
-distributions=("$seed"/gradle/wrapper/dists/gradle-8.11.1-bin/*/gradle-8.11.1)
-[[ ${#distributions[@]} == 1 ]] || { echo "Expected one Gradle 8.11.1 distribution under $seed" >&2; exit 1; }
+if [[ $# -gt 1 ]]; then echo "Usage: frontend/android/provision [seed-directory]" >&2; exit 2; fi
+if [[ $# == 0 && -n "${JAVA_HOME:-}" && -n "${ANDROID_HOME:-}" && -n "${GRADLE_HOME:-}" ]]; then
+  java_home=$JAVA_HOME
+  sdk_home=$ANDROID_HOME
+  gradle_home=$GRADLE_HOME
+else
+  shopt -s nullglob
+  distributions=("$seed"/gradle/wrapper/dists/gradle-8.11.1-bin/*/gradle-8.11.1)
+  [[ ${#distributions[@]} == 1 ]] || {
+    echo "Set JAVA_HOME, ANDROID_HOME and GRADLE_HOME, or supply a build-tool seed directory." >&2
+    exit 1
+  }
+  java_home="$seed/java"
+  sdk_home="$seed/sdk"
+  gradle_home=${distributions[0]}
+fi
 node=$(type -P node)
 npm_cli=$(realpath -- "$(type -P npm)")
 npm_package=$(dirname -- "$(dirname -- "$npm_cli")")
@@ -24,16 +37,16 @@ copy_tool() {
   mkdir -p -- "$(dirname -- "$2")"
   cp -a --reflink=auto -- "$1" "$2"
 }
-copy_tool "$seed/java" "$target/java"
-copy_tool "${distributions[0]}" "$target/gradle-dist"
+copy_tool "$(realpath -- "$java_home")" "$target/java"
+copy_tool "$(realpath -- "$gradle_home")" "$target/gradle-dist"
 for component in platforms/android-35 build-tools/35.0.0 platform-tools cmdline-tools/latest licenses; do
-  copy_tool "$seed/sdk/$component" "$target/sdk/$component"
+  copy_tool "$(realpath -- "$sdk_home/$component")" "$target/sdk/$component"
 done
 copy_tool "$(realpath -- "$node")" "$target/bin/node"
 copy_tool "$npm_package" "$target/npm"
 # Arch packages these npm dependencies as siblings of npm itself.
 for package in node-gyp nopt semver; do
-  if [[ ! -d "$target/npm/node_modules/$package" ]]; then
+  if [[ ! -d "$target/npm/node_modules/$package" && -d "$(dirname -- "$npm_package")/$package" ]]; then
     copy_tool "$(dirname -- "$npm_package")/$package" "$target/npm/node_modules/$package"
   fi
 done

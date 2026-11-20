@@ -1,0 +1,33 @@
+name: Reader tests
+
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main, dev]
+
+permissions:
+  contents: read
+
+jobs:
+  clean-install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Linux tools and the locked backend
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y poppler-utils util-linux libgl1
+          python3 -m venv "$RUNNER_TEMP/uv-tools"
+          "$RUNNER_TEMP/uv-tools/bin/pip" install uv==0.13.9
+          "$RUNNER_TEMP/uv-tools/bin/uv" sync --locked --python 3.10
+      - name: Check reader and run backend tests
+        env:
+          PYTHONPATH: backend/src
+          TRALENS_STATE_ROOT: ${{ runner.temp }}/tralens-state
+        run: |
+          node --input-type=module --check < frontend/web/reader.js
+          .venv/bin/python -m unittest discover -s tests -q

@@ -14,7 +14,7 @@ Run the commands below from the repository root. Python environments, dependency
 
 ## Web reader
 
-Run the [web reader](frontend/README.md) to import chapters, keep reading progress, compare translated and original pages, and select a translator and inpainting model. The web service serves the library at `/` and the diagnostic viewer at `/developer`. The independent frontend assets live in `frontend/web/`.
+For a fresh Linux install, start with the [self-hosting guide](docs/self-hosted-reader.md#prepare-the-reader). Run the [web reader](frontend/README.md) to import chapters, keep reading progress, compare translated and original pages, and select a translator and inpainting model. The web service serves the library at `/` and the diagnostic viewer at `/developer`. The independent frontend assets live in `frontend/web/`.
 
 Choose a GPT model in reader Settings to connect your own ChatGPT account. Local translation works without signing in. For a single-owner deployment with HTTPS, follow the [self-hosting guide](docs/self-hosted-reader.md).
 
@@ -1321,24 +1321,9 @@ the benchmark adds local weight hashes and checks observed predictor identities.
 Original pixel input, source IDs, raw polygons/text/scores and association repair
 are preserved; profile selection does not alter annotation/grouping semantics.
 
-### Parent-managed environment preparation
+### GPU evaluation environment
 
-`requirements-paddle6.txt` pins `paddleocr==3.7.0` and `paddlex[ocr]==3.7.2`.
-Keep the original `.venv`, `pyproject.toml`, and `uv.lock` intact. The parent can
-copy the existing GPU environment to a **new** `.venv-paddle6` and upgrade only
-that copy (the agent does not run these commands). For a fresh destination:
-
-```sh
-test ! -e .venv-paddle6 && cp -a .venv .venv-paddle6
-.venv-paddle6/bin/python -m pip install -r requirements-paddle6.txt
-```
-
-Use the copied environment's **Python module invocation**, since copied entrypoint
-shebangs may still reference the original environment. If `.venv-paddle6` already
-exists, use the parent's prepared copy. Parent verifies Paddle GPU/package
-compatibility and obtains the six official v6 exports and the v5 server pair
-separately; this code never performs benchmark downloads. No v5 mobile profile
-is introduced. The isolated environment is Git-ignored.
+The default lockfile installs CPU Paddle for the reader. A separately maintained GPU environment can provide Paddle built for its CUDA version alongside the package pair in `requirements-paddle6.txt`. The historical benchmark commands below use such an environment named `.venv-paddle6`. Configure GPU OCR explicitly with `--device gpu:0` after verifying the CUDA runtime and weights.
 
 ### Parent-only serial comparison CLI
 
