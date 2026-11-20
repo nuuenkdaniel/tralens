@@ -37,8 +37,9 @@ public class MainActivity extends BridgeActivity {
         port = prefs.getInt("port", 7871);
         scheme = prefs.getString("scheme", "http");
         config = new CapConfig.Builder(this).setHostname(port == defaultPort() ? host : host + ":" + port)
-            .setAndroidScheme(scheme).create();
+            .setAndroidScheme(scheme).setLoggingEnabled(false).create();
         registerPlugin(ReaderConnection.class);
+        registerPlugin(PhoneSignIn.class);
         super.onCreate(state);
         // Keep the entire reader viewport inside the system bars and camera cutout.
         View content = findViewById(android.R.id.content);

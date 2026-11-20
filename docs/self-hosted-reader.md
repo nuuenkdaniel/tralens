@@ -17,7 +17,7 @@ install -d -m 700 ~/.config/tralens
 
 Start the reader and open **Settings → Translation model**. Local translation works immediately. Choose a GPT model and select **Continue with ChatGPT**. After consent, the reader checks model availability and applies your selection. Closing the dialog keeps your previous model selected.
 
-For a phone or a remote browser, finish consent in the system browser on the server desktop. For a headless server, the reader shows the loopback link and the port to forward over SSH. All readers of this single-owner server share the resulting connection.
+In the Android app, select a GPT model, approve access in the phone’s browser, and tap **Open Tralens**. The server exchanges the one-time code and stores the credentials. Use an owner-protected HTTPS connection for network access. For a remote web browser outside the Android app, finish consent on the server desktop. For a headless server, the reader shows the loopback link and the port to forward over SSH. All readers of this single-owner server share the resulting connection.
 
 The standard backend requirements include OAuth support. For an existing environment, or to connect from the command line:
 

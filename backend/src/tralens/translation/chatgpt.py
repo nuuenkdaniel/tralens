@@ -163,26 +163,32 @@ def callback_handler(state, result):
     return Callback
 
 
+def authorization(old, port, state, *, include_hint):
+    nonce, verifier = (secrets.token_urlsafe(48) for _ in range(2))
+    if 'host' not in old:
+        old['host'] = 'urn:uuid:' + str(uuid.uuid4())
+        save(old)
+    redirect = f'http://127.0.0.1:{port}/auth/callback'
+    params = dict(client_id=old.get('client_id', 'dynamic_agent_client'),
+                  ext_agent_host_id=old['host'], response_type='code', redirect_uri=redirect,
+                  scope='openid profile email offline_access resource.invoke ' + PLAN,
+                  resource=RESOURCE, state=state, nonce=nonce, code_challenge_method='S256',
+                  code_challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('='))
+    if 'client_id' not in old:
+        params['agent_name_hint'] = 'Tralens'
+    elif include_hint and old.get('id_token'):
+        params['id_token_hint'] = old['id_token']
+    return ISSUER + '/api/accounts/authorize?' + urlencode(params), redirect, nonce, verifier
+
+
 def login(*, browser=True, port=0, on_ready=None):
     import jwt
-    state, nonce, verifier = (secrets.token_urlsafe(48) for _ in range(3))
+    state = secrets.token_urlsafe(48)
     result = {}
     with record() as old, HTTPServer(('127.0.0.1', port), callback_handler(state, result)) as server:
-        if 'host' not in old:
-            old['host'] = 'urn:uuid:' + str(uuid.uuid4())
-            save(old)
-        redirect = f'http://127.0.0.1:{server.server_port}/auth/callback'
-        params = dict(client_id=old.get('client_id', 'dynamic_agent_client'),
-                      ext_agent_host_id=old['host'], response_type='code', redirect_uri=redirect,
-                      scope='openid profile email offline_access resource.invoke ' + PLAN,
-                      resource=RESOURCE, state=state, nonce=nonce, code_challenge_method='S256',
-                      code_challenge=base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('='))
-        if 'client_id' not in old:
-            params['agent_name_hint'] = 'Tralens'
-        elif old.get('id_token'):
-            params['id_token_hint'] = old['id_token']
+        url, redirect, nonce, verifier = authorization(old, server.server_port, state, include_hint=True)
         server.finish_login = lambda fields: finish_login(fields, old, redirect, verifier, nonce)
-        server.authorize_url = ISSUER + '/api/accounts/authorize?' + urlencode(params)
+        server.authorize_url = url
         server.start_path = '/connect/' + secrets.token_urlsafe(32)
         start_url = f'http://127.0.0.1:{server.server_port}{server.start_path}'
         if on_ready is not None:

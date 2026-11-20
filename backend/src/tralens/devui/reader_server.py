@@ -115,7 +115,7 @@ class ReaderHandler(Handler):
                 self.server.upload_slot.release()
 
     def _post(self, path):
-        connecting = path == "/api/chatgpt/connect" and self.server.chatgpt
+        connecting = path in ("/api/chatgpt/connect", "/api/chatgpt/phone/start", "/api/chatgpt/phone/finish") and self.server.chatgpt
         if not connecting and not path.startswith("/api/library/"):
             return super().do_POST()
         try:
@@ -139,7 +139,12 @@ class ReaderHandler(Handler):
             if len(data) != length:
                 raise RequestError("Incomplete upload.")
             if connecting:
-                if json.loads(data) != {}:
+                body = json.loads(data)
+                if path == "/api/chatgpt/phone/start" and isinstance(body, dict):
+                    return self.json(200, self.server.chatgpt.select_phone(body.get('port')))
+                if path == "/api/chatgpt/phone/finish":
+                    return self.json(200, self.server.chatgpt.finish_phone(body))
+                if body != {} or path != "/api/chatgpt/connect":
                     raise RequestError("Unexpected sign-in parameters.")
                 self.json(200, self.server.chatgpt.select(remote=bool(self.server.owner)))
             elif adding:

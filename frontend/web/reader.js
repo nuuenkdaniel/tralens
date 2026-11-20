@@ -1071,7 +1071,29 @@ async function selectChatGPT(model) {
   const panel = $("#chatgpt-connect");
   const active = () => sheet.open && panel.isConnected && config;
   try {
-    let result = await api("chatgpt/connect", {});
+    let result;
+    if (window.Capacitor?.isPluginAvailable?.("PhoneSignIn")) {
+      const phone = window.Capacitor.Plugins.PhoneSignIn;
+      const {port} = await phone.prepare();
+      const cancel = () => phone.cancel({port}).catch(() => {});
+      sheet.addEventListener("close", cancel, {once: true});
+      try {
+        if (!active()) return;
+        result = await api("chatgpt/phone/start", {port});
+        if (!active()) return;
+        if (result.state === "authorize") {
+          panel.textContent = "Finish signing in with ChatGPT in your phone’s browser, then return to Tralens.";
+          const fields = await phone.authorize({url: result.url});
+          if (!active()) return;
+          result = await api("chatgpt/phone/finish", fields);
+        }
+      } finally {
+        sheet.removeEventListener("close", cancel);
+        cancel();
+      }
+    } else {
+      result = await api("chatgpt/connect", {});
+    }
     let displayedURL;
     while (active() && result.state === "pending") {
       if (result.url && displayedURL !== result.url) {
