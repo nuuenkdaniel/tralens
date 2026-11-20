@@ -2,7 +2,7 @@ FROM ghcr.io/astral-sh/uv:0.13.9 AS uv
 FROM python:3.10-slim-bookworm
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libgl1 libglib2.0-0 poppler-utils util-linux \
+    && apt-get install -y --no-install-recommends ca-certificates libgl1 libglib2.0-0 libraqm0 poppler-utils util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
