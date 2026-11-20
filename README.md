@@ -1,12 +1,30 @@
 # Tralens
 
-## Minimal development frontend
+Tralens exposes its manga translation pipeline through a Python CLI and a local HTTP API. The reader frontend is a separate client of that API.
+
+| Directory | Purpose |
+|---|---|
+| [backend/src](backend/src/) | Pipeline, CLI, HTTP job service, and its bundled diagnostic viewer |
+| [backend/tools](backend/tools/) | Standalone launchers, evaluation tools, and experiments |
+| [frontend](frontend/) | User-facing reader application workspace and client integration notes |
+| [tests](tests/) | Backend and integration tests |
+| [docs](docs/) | Product handoff, pipeline behavior, and evaluation results |
+
+Run the commands below from the repository root. Python environments, dependency files, and private run data stay at that level. The original `src/` and `tools/` paths are compatibility links for existing commands and saved workflows.
+
+## Web reader
+
+Run the [web reader](frontend/README.md) to import chapters, keep reading progress, compare translated and original pages, and select a translator and inpainting model. The web service serves the library at `/` and the diagnostic viewer at `/developer`. The independent frontend assets live in `frontend/web/`.
+
+Choose a GPT model in reader Settings to connect your own ChatGPT account. Local translation works without signing in. For a single-owner deployment with HTTPS, follow the [self-hosting guide](docs/self-hosted-reader.md).
+
+## Backend development viewer
 
 No frontend framework, npm, build step or new dependencies. Using the existing
 validated runtime and this checkout's saved licensed font manifest:
 
 ```sh
-.venv-paddle6/bin/python tools/dev_frontend.py \
+.venv-paddle6/bin/python backend/tools/dev_frontend.py \
   --fonts test-results/render-parent-input-v1/fonts.json
 ```
 
@@ -48,7 +66,7 @@ and [always show available translations](docs/visible-translations-experiment.md
 For the optional paired OCR rereads, start the viewer with existing local assets:
 
 ```sh
-.venv-paddle6/bin/python tools/dev_frontend.py \
+.venv-paddle6/bin/python backend/tools/dev_frontend.py \
   --fonts PATH/fonts.json --manga-reread-model PATH/existing-manga-ocr-snapshot
 ```
 
@@ -74,7 +92,7 @@ fresh directory with a fresh call budget; it does not resume or overwrite the
 previous run. Choosing a different image switches the button back to Run pipeline.
 
 Under **Advanced → Translation model**, choose the configured local model, GPT-6 Luna,
-GPT-6.1 Terra, or GPT-6.2 Sol. The three frontier options use the signed-in Codex CLI. Visual modes send the current page and the same-manga pages you select to
+GPT-6.1 Terra, or GPT-6.2 Sol. The three frontier options use the server owner’s ChatGPT OAuth connection by default. Visual modes send the current page and the same-manga pages you select to
 OpenAI. Visual full-page runs use one budgeted call to find missed Japanese lettering
 when at least two calls are available. New regions enter the regular grouping,
 translation and replacement stages. The default frontier mode sends numbered crops with the page and rechecks

@@ -1,0 +1,9 @@
+{
+  "appId": "app.tralens.reader",
+  "appName": "Tralens",
+  "webDir": "www",
+  "server": {
+    "hostname": "localhost:7871",
+    "androidScheme": "http"
+  }
+}

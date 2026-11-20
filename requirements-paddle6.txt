@@ -1,3 +1,4 @@
 # Parent-managed isolated runtime; preserve the original GPU Paddle installation.
 paddleocr==3.7.0
 paddlex[ocr]==3.7.2
+-r backend/requirements-chatgpt.txt

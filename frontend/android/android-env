@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+repo=$(cd -- "$(dirname -- "$0")/../.." && pwd -P)
+root="$repo/.android-build"
+[[ -x "$root/java/bin/java" ]] || { echo "Run frontend/android/provision first." >&2; exit 1; }
+cd "$root/work"
+export JAVA_HOME="$root/java" ANDROID_HOME="$root/sdk" ANDROID_SDK_ROOT="$root/sdk"
+export GRADLE_USER_HOME="$root/gradle" ANDROID_USER_HOME="$root/android-user"
+export ANDROID_EMULATOR_HOME="$root/android-user" ANDROID_AVD_HOME="$root/android-user/avd"
+export TMPDIR="$root/tmp" TMP="$root/tmp" TEMP="$root/tmp"
+export XDG_CACHE_HOME="$root/cache" XDG_CONFIG_HOME="$root/home/config" XDG_DATA_HOME="$root/home/data"
+export npm_config_cache="$root/cache/npm" npm_config_prefix="$root/npm-global"
+export npm_config_userconfig="$root/home/.npmrc" npm_config_globalconfig="$root/home/global.npmrc"
+export JAVA_TOOL_OPTIONS="-Duser.home=$root/home -Djava.io.tmpdir=$root/tmp"
+export PATH="$root/bin:$JAVA_HOME/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/build-tools/35.0.0:$ANDROID_HOME/platform-tools:$PATH"
+unset ANDROID_SDK_HOME ANDROID_PREFS_ROOT GRADLE_OPTS JAVA_OPTS
+case "${1:-}" in
+  gradle)
+    shift
+    network=(--offline)
+    if [[ ${1:-} == --online ]]; then network=(); shift; fi
+    set -- "$root/gradle-dist/bin/gradle" "${network[@]}" --no-daemon --project-cache-dir "$root/project-cache" "$@"
+    ;;
+  adb)
+    export ADB_SERVER_SOCKET=tcp:localhost:5059 ANDROID_ADB_SERVER_PORT=5059
+    ;;
+  java|javac|node|npm|aapt2|apksigner|sdkmanager) ;;
+  *) echo 'Usage: android-env {gradle [--online]|java|javac|node|npm|aapt2|apksigner|adb|sdkmanager} [args]' >&2; exit 2 ;;
+esac
+exec env HOME="$root/home" "$@"

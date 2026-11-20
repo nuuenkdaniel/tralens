@@ -18,6 +18,10 @@ class SourceOnlySuiteTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             checkout = Path(directory)/"source-only"
             checkout.mkdir()
+            (checkout/"backend").mkdir()
+            for name in ("src", "tools"):
+                (checkout/"backend"/name).mkdir()
+                (checkout/name).symlink_to(Path("backend")/name, target_is_directory=True)
             for name in ("src","tools","tests"):
                 for path in (source/name).rglob("*.py"):
                     if "__pycache__" in path.parts:
@@ -34,6 +38,10 @@ class SourceOnlySuiteTest(unittest.TestCase):
                     target = checkout/path.relative_to(source)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(path, target)
+            for asset in ("frontend/web/index.html", "src/tralens/translation/signin-result.html"):
+                target = checkout/asset
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source/asset, target)
             for name in ("README.md",".gitignore"):
                 shutil.copyfile(source/name,checkout/name)
             self.assertFalse((checkout/"images").exists())
