@@ -18,7 +18,7 @@ work=$(mktemp -d -- "$(dirname -- "$output")/.sign-apk.XXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 "$run" zipalign -P 16 4 "$input" "$work/aligned.apk"
 "$run" apksigner sign --ks "$keystore" --ks-type PKCS12 --ks-key-alias tralens-release \
-  --ks-pass env:ANDROID_RELEASE_KEYSTORE_PASSWORD --out "$work/signed.apk" "$work/aligned.apk"
+  --out "$work/signed.apk" "$work/aligned.apk" <<< "$ANDROID_RELEASE_KEYSTORE_PASSWORD"
 "$run" zipalign -c -P 16 4 "$work/signed.apk"
 "$run" apksigner verify "$work/signed.apk"
 mv -T -- "$work/signed.apk" "$output"
