@@ -217,10 +217,12 @@ class PaddleProfileTests(unittest.TestCase):
                     text_det_model=SimpleNamespace(device="cpu", model_name=PROFILES[profile][0]),
                     text_rec_model=SimpleNamespace(device="cpu", model_name=PROFILES[profile][1])))
                 constructor = Mock(return_value=engine)
+                paddle_import = Mock(return_value=SimpleNamespace(PaddleOCR=constructor))
                 with self.subTest(profile=profile, threads=threads), patch(
-                        "tralens.ocr.detection.importlib.import_module", return_value=SimpleNamespace(PaddleOCR=constructor)), patch(
+                        "tralens.ocr.detection.importlib", SimpleNamespace(import_module=paddle_import)), patch(
                         "tralens.ocr.paddle_profiles.package_versions", return_value=dict(V6_RUNTIME)):
                     ocr = OCR("unused", model_profile=profile, device="cpu", cpu_threads=threads)
+                paddle_import.assert_called_once_with("paddleocr")
                 constructor.assert_called_once()
                 settings = constructor.call_args.kwargs
                 self.assertIs(settings["enable_mkldnn"], False)
