@@ -27,7 +27,8 @@ On a fresh Linux x86-64 host, check out the commit from the candidate's
 `org.opencontainers.image.revision` label. Set `TRALENS_IMAGE` to
 `ghcr.io/nuuenkdaniel/tralens@sha256:<candidate digest>` in `.env`. Authenticate
 to GHCR with read access to the private candidate, then follow the
-[Compose setup](../README.md#start-the-reader). Record the digest and results.
+[Compose setup](../README.md#start-the-reader), including `docker compose pull reader`.
+Record the digest and results.
 
 - Import a page you have permission to use and complete a translation with
   local Ollama. Check the rendered result and original.
@@ -45,8 +46,8 @@ of a completed job from a stopped backup.
 
 ## Stage and publish the beta
 
-1. Create the beta tag, such as `v0.1.0-beta.1`, on the approved commit from
-   `main`. Run **Stage public beta** from `main` with the tag and exact
+1. Create the beta tag, such as `v0.1.0-beta.1`, on the approved tip of
+   `main`. Run **Stage public beta** from that commit on `main` with the tag and exact
    candidate digest. Confirm that the acceptance checklist is complete and
    approve the environment deployment.
 2. The workflow pulls and tests that digest, then copies it into the separate

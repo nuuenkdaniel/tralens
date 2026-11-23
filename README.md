@@ -35,7 +35,7 @@ install -d -m 700 tralens-data/library tralens-data/config \
   tralens-data/state tralens-data/models tralens-data/assets
 ```
 
-If you downloaded a release bundle, run `docker compose pull reader` first.
+If `TRALENS_IMAGE` points to GHCR, run `docker compose pull reader` first.
 Then download the pinned PaddleOCR models and start the reader.
 
 ```sh

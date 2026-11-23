@@ -44,4 +44,9 @@ jobs:
           # Compose uses the digest-only reference included in the release bundle.
           export TRALENS_IMAGE="ghcr.io/$GITHUB_REPOSITORY-release@$DIGEST"
           docker pull --platform linux/amd64 "$TRALENS_IMAGE"
+          docker image inspect --format '{{json .Config.Labels}}' "$TRALENS_IMAGE" |
+            jq -e --arg revision "$revision" --arg source "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" '
+              .["org.opencontainers.image.revision"] == $revision and
+              .["org.opencontainers.image.source"] == $source
+            ' >/dev/null
           bash deploy/smoke-compose.sh
