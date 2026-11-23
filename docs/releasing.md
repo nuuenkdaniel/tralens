@@ -1,13 +1,66 @@
 # Release Tralens
 
-Open the release-preparation PR against `dev` and wait for **Reader checks** to pass. After merging, its push build publishes `ghcr.io/nuuenkdaniel/tralens-dev:dev` and a commit-specific tag. Test that image with Compose and a fresh data directory. Promote by opening a PR from `dev` into `main`. A successful push build on `main` publishes `:main` and its commit-specific tag.
+Open a PR against `dev` and wait for **Reader checks** to pass. Its merge builds
+`ghcr.io/nuuenkdaniel/tralens-dev:dev`. Promote it through a PR from `dev` into
+`main`. The main push build publishes a candidate to
+`ghcr.io/nuuenkdaniel/tralens:main`. Each run records the pushed image digest
+in its job summary. Use the digest from the successful main run for acceptance
+and release. Keep both candidate packages private.
 
-For the first beta, verify on a clean Linux x86-64 host that Compose can pull and start the candidate. Import a page you can redistribute, translate it with local Ollama, and repeat with an eligible ChatGPT account you control. Verify session login over HTTPS, OAuth disconnect, an upgrade from the previous data layout, and a stopped backup and restore. The workflow covers the locked test suite, actual CPU OCR, model downloads, and owner sign-in in Docker.
+## Configure GitHub
 
-Review the [third-party notices](../THIRD_PARTY_NOTICES.md) and each exact packaged dependency before public image redistribution. Confirm the release commit is publicly accessible and any separately licensed binaries have the required notices and corresponding source available. Keep third-party sample pages, checkpoints without confirmed permission, and private datasets outside the release.
+Require PRs and the Reader checks on `dev` and `main`. Use the actual check
+names from a successful PR, `clean-install` and `container / image`. Restrict
+creation of `v*` tags to release maintainers and block tag updates and deletions.
+Enable private vulnerability reporting in the repository settings.
+[GitHub rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets)
 
-GitHub Packages starts new GHCR packages as private. In the package settings, confirm the package is linked to this repository, the repository has Actions access, and change the production package visibility to Public when cleared for redistribution. Test `docker pull` using a Docker configuration without GitHub credentials. Use [GitHub's package settings guide](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
+Create an Actions environment named `public-beta`. Restrict its deployments to
+`main`, add a required reviewer, and disable administrator bypass of protection
+rules. For a solo maintainer, allow the reviewer to approve their own run.
+The staging workflow verifies that required reviewers are configured before it
+writes to the release registry. [GitHub deployment environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)
 
-Once the release commit is on `main`, create tag `v0.1.0-beta.1` there. Its successful workflow publishes the versioned image used by the quick start. Create the GitHub release from that exact tag and mark it as a **prerelease**. Include the image reference, digest, supported platform, known limitations, and the setup link. Use new version tags for subsequent builds. Retain the source for every distributed image.
+## Approve the exact candidate
 
-Enable private vulnerability reporting in the repository settings. For `dev` and `main`, require PRs and passing Reader checks. Keep workflow publishing permissions limited to the package jobs and restrict release tags to maintainers. [GitHub rulesets guide](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets)
+On a fresh Linux x86-64 host, check out the commit from the candidate's
+`org.opencontainers.image.revision` label. Set `TRALENS_IMAGE` to
+`ghcr.io/nuuenkdaniel/tralens@sha256:<candidate digest>` in `.env`. Authenticate
+to GHCR with read access to the private candidate, then follow the
+[Compose setup](../README.md#start-the-reader). Record the digest and results.
+
+- Import a page you have permission to use and complete a translation with
+  local Ollama. Check the rendered result and original.
+- Sign in through the actual HTTPS endpoint. Connect your eligible ChatGPT
+  account, translate a page, and verify that disconnect works.
+- Stop the reader, back up its data and test restoration. If there is a
+  previous release, exercise upgrade and rollback with a copy of its data.
+- Review the [third-party notices](../THIRD_PARTY_NOTICES.md) against the
+  exact image. Check the Debian source inventory and the installed wheels'
+  notices, including corresponding source for covered bundled binaries.
+  Keep a copy of the review with the candidate digest.
+
+CI exercises fresh Compose startup, the owner key, real CPU OCR, and recovery
+of a completed job from a stopped backup.
+
+## Stage and publish the beta
+
+1. Create the beta tag, such as `v0.1.0-beta.1`, on the approved commit from
+   `main`. Run **Stage public beta** from `main` with the tag and exact
+   candidate digest. Confirm that the acceptance checklist is complete and
+   approve the environment deployment.
+2. The workflow pulls and tests that digest, then copies it into the separate
+   `ghcr.io/nuuenkdaniel/tralens-release` package. It refuses to replace a
+   version that points to different content. It creates a draft prerelease
+   with a digest-pinned Compose bundle and checksum.
+3. After redistribution is cleared, make only the release package public.
+   GitHub treats this change as permanent. Verify that the repository has
+   Actions access to the package. [GitHub package visibility](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility)
+4. Run **Verify public beta image** from `main` with the tag and digest. It
+   tests anonymous pulls of the tag and digest on a fresh runner. Download
+   the draft's Compose bundle and check that its `.env.example` contains
+   the same digest. Publish the draft prerelease after these checks pass.
+
+Use a new version tag for each release and retain the exact source and digest
+for every distributed image. Keep the previous bundle and a stopped backup for
+[rollback](self-hosted-reader.md#data-upgrades-and-recovery).

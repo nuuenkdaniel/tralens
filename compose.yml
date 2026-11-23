@@ -1,5 +1,5 @@
 x-tralens: &tralens
-  image: ${TRALENS_IMAGE:-ghcr.io/nuuenkdaniel/tralens:v0.1.0-beta.1}
+  image: ${TRALENS_IMAGE:-tralens:local}
   platform: linux/amd64
   user: "${TRALENS_UID:-1000}:${TRALENS_GID:-1000}"
   init: true
