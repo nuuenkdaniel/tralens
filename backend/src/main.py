@@ -380,6 +380,11 @@ def crop_reader_refiner(model_path, *, ink_column_groups=False, ink_boundary_gro
         try:
             with Image.open(BytesIO(original)) as source:
                 image=source.convert('RGB')
+                if hasattr(engine,'raw_detections') and hasattr(engine,'ocr'):
+                    from tralens.ocr import handwritten
+                    handwritten.discover(engine,image,reader)
+                    from tralens.ocr import outlined_sounds
+                    outlined_sounds.refine_outlined_kana(engine,image,reader)
                 if reader_presentations and hasattr(engine,'raw_detections') and hasattr(engine,'ocr'):
                     from tralens.ocr import outlined_sounds
                     outlined_sounds.discover(engine,image,reader)
@@ -417,7 +422,7 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
     if (output.exists() or output.is_symlink() or not output.parent.is_dir()
             or any(path.is_symlink() for path in output.parents)):
         raise ValueError('pipeline output must be fresh with an existing parent and no symlinks')
-    from tralens.rendering.automatic import preflight_automatic, run_automatic
+    from tralens.rendering.automatic import preflight_automatic, retained_artwork, run_automatic
     from tralens.translation.workflow import run_preview, _atomic_json
     from tralens.translation.luna import MODELS
     from tralens.translation.coverage import validate_policy
@@ -545,7 +550,11 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
             # preview binding. A source/font change cannot become a new job input.
             if preflight_automatic(**rendering_options) != checked or preview['input'] != checked['source']:
                 raise ValueError('pipeline image/font inputs changed after preflight')
-            if not strict_count and not (coverage_count and (render_policy == 'best-effort' or visibility_policy == 'always-show')):
+            empty_page = (preview['status'] == 'complete' and not records
+                and preview['ocr'].get('raw_detections') == [[]])
+            artwork_only = (preview['status'] == 'complete'
+                            and bool(records) and all(retained_artwork(row) for row in records))
+            if not empty_page and not artwork_only and not strict_count and not (coverage_count and (render_policy == 'best-effort' or visibility_policy == 'always-show')):
                 report['status'] = 'partial'
                 report['rendering'] = {'status': 'skipped', 'reason': 'coverage_requires_best_effort' if coverage_count else 'no_strict_translations',
                     'note': 'No composite was produced; original image and preview evidence remain unchanged.'}
@@ -555,7 +564,7 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                 persist()
                 render_preview = output/'preview/preview.json'
                 render_options = dict(rendering_options)
-                if source_localization:
+                if source_localization and not empty_page:
                     native_options = {**rendering_options, 'cleanup_policy': 'native', 'visibility_policy':'replacement-only',
                         'removal_policy':'preserve','reconstruction_policy':'classical','reconstruction_config':None}
                     started = time.monotonic()
@@ -588,7 +597,7 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                 render_preview_sha256 = fingerprint(render_preview)
                 started = time.monotonic()
                 rendered = run_automatic(preview=render_preview, output=output/'rendering', **render_options)
-                if source_localization:
+                if source_localization and not empty_page:
                     report['source_localization'].update(retry_render_seconds=time.monotonic()-started,
                         predictions_consumed=rendered.get('localized_cleanup_summary', {}).get('retries', 0),
                         rendered_preview=str(render_preview.relative_to(output)),
@@ -603,6 +612,10 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                     'composite': 'rendering/composite.png', 'review': 'rendering/review.html',
                     'coverage': rendered['coverage'], 'background_summary': rendered['background_summary'],
                      'quality_summary': rendered['quality_summary']}
+                if artwork_only:
+                    report['rendering']['outcome'] = 'original_artwork_retained'
+                if empty_page:
+                    report['rendering']['outcome'] = 'no_text_detected'
                 if 'replacement_confidence' in rendered:
                     report['rendering']['replacement_confidence'] = rendered['replacement_confidence']
                 if 'display_summary' in rendered:
@@ -662,8 +675,8 @@ def main(argv=None):
     parser.add_argument('--visibility-policy', choices=('replacement-only','always-show'),default=None,
                         help='render: always-show prioritizes visible translations; opaque patches may cover artwork, then nearby captions')
     parser.add_argument('--removal-policy',choices=('legacy','preserve','aggressive'),default=None)
-    parser.add_argument('--reconstruction-policy',choices=('classical','lama','sdxl'),default='classical')
-    parser.add_argument('--reconstruction-config',type=Path,help='explicit approved local model/runtime JSON; never downloaded')
+    parser.add_argument('--reconstruction-policy',choices=('auto','classical','lama','sdxl'),default='classical')
+    parser.add_argument('--reconstruction-config',type=Path,help='local model/runtime JSON, or for Auto a JSON object mapping lama and sdxl to config paths')
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--keep-alive", type=int, default=60)
     parser.add_argument("--num-predict", type=int, default=1024)

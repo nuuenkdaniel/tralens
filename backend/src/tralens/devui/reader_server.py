@@ -1,7 +1,5 @@
 """Serve the independent web client and its library under the job API's origin."""
 
-from email import policy
-from email.parser import BytesParser
 import json
 import mimetypes
 from pathlib import Path
@@ -12,9 +10,11 @@ import threading
 from urllib.parse import urlsplit
 
 from .library import Library
+from .multipart_upload import MAX_IMPORT_BYTES, read_import
 from .server import Handler, RequestError, STATIC, ThreadingHTTPServer
 
-WEB = Path(__file__).resolve().parents[4] / "frontend/web"
+PROJECT = Path(__file__).resolve().parents[4]
+WEB = PROJECT / "frontend/web"
 ID = "[0-9a-f]{32}"
 
 
@@ -23,13 +23,14 @@ class ReaderHandler(Handler):
         path = urlsplit(self.path).path
         try:
             self.local_request()
+            if path == "/healthz":
+                return self.json(200, {"status": "ok"})
+            if path == "/privacy":
+                return self.respond(200, (PROJECT / "PRIVACY.md").read_bytes(), "text/plain; charset=utf-8")
             if path in (
                 "/",
                 "/reader.js",
                 "/reader.css",
-                "/art-0.webp",
-                "/art-1.webp",
-                "/art-2.webp",
             ):
                 file = WEB / ("index.html" if path == "/" else path[1:])
                 self.respond(200, file.read_bytes(), mimetypes.guess_type(file.name)[0])
@@ -61,13 +62,15 @@ class ReaderHandler(Handler):
                 )
             elif path == "/api/library":
                 self.json(200, self.server.library.catalog())
+            elif match := re.fullmatch(f"/api/library/pages/({ID})/transcript", path):
+                self.json(200, self.server.library.transcript(match[1]))
             elif match := re.fullmatch(
                 f"/api/library/pages/({ID})/(original|translated)", path
             ):
                 mime, data = self.server.library.image(*match.groups())
                 self.respond(200, data, mime)
             elif match := re.fullmatch(
-                f"/api/library/books/({ID})/(original|translated|both)\.zip", path
+                rf"/api/library/books/({ID})/(original|translated|both)\.zip", path
             ):
                 with self.server.library.archive(*match.groups()) as archive:
                     self.send_response(200)
@@ -115,7 +118,10 @@ class ReaderHandler(Handler):
                 self.server.upload_slot.release()
 
     def _post(self, path):
-        connecting = path in ("/api/chatgpt/connect", "/api/chatgpt/phone/start", "/api/chatgpt/phone/finish") and self.server.chatgpt
+        connecting = path in (
+            "/api/chatgpt/connect", "/api/chatgpt/disconnect",
+            "/api/chatgpt/phone/start", "/api/chatgpt/phone/finish",
+        ) and self.server.chatgpt
         if not connecting and not path.startswith("/api/library/"):
             return super().do_POST()
         try:
@@ -133,8 +139,13 @@ class ReaderHandler(Handler):
                 raise RequestError("Content length required.", 411)
             length = int(lengths[0])
             adding = path == "/api/library/add"
-            if not 0 < length <= (128 * 1024**2 if adding else 8192):
-                raise RequestError("Import up to 128 MiB at a time.", 413)
+            if adding:
+                if not 0 < length <= MAX_IMPORT_BYTES:
+                    raise RequestError("Import up to 4 GiB at a time.", 413)
+                with read_import(self.rfile, length, self.headers.get("Content-Type", "")) as (meta, files):
+                    return self.json(201, self.server.library.add(meta, files))
+            if not 0 < length <= 8192:
+                raise RequestError("Request body is too large.", 413)
             data = self.rfile.read(length)
             if len(data) != length:
                 raise RequestError("Incomplete upload.")
@@ -144,34 +155,13 @@ class ReaderHandler(Handler):
                     return self.json(200, self.server.chatgpt.select_phone(body.get('port')))
                 if path == "/api/chatgpt/phone/finish":
                     return self.json(200, self.server.chatgpt.finish_phone(body))
-                if body != {} or path != "/api/chatgpt/connect":
+                if body != {}:
                     raise RequestError("Unexpected sign-in parameters.")
-                self.json(200, self.server.chatgpt.select(remote=bool(self.server.owner)))
-            elif adding:
-                content_type = self.headers.get("Content-Type", "")
-                if not content_type.startswith("multipart/form-data;"):
-                    raise RequestError("Multipart page upload required.")
-                msg = BytesParser(policy=policy.default).parsebytes(
-                    b"Content-Type: "
-                    + content_type.encode("ascii")
-                    + b"\r\n\r\n"
-                    + data
-                )
-                meta = None
-                files = []
-                for part in msg.iter_parts():
-                    name = part.get_param("name", header="content-disposition")
-                    if name == "metadata" and meta is None:
-                        meta = json.loads(part.get_payload(decode=True))
-                    elif name == "page":
-                        files.append(
-                            (part.get_filename(), part.get_payload(decode=True))
-                        )
-                    else:
-                        raise RequestError("Unexpected upload field.")
-                if not isinstance(meta, dict):
-                    raise RequestError("Missing manga details.")
-                self.json(201, self.server.library.add(meta, files))
+                if path == "/api/chatgpt/disconnect":
+                    return self.json(200, self.server.chatgpt.disconnect())
+                if path != "/api/chatgpt/connect":
+                    raise RequestError("Unexpected sign-in parameters.")
+                self.json(200, self.server.chatgpt.select())
             else:
                 body = json.loads(data)
                 if not isinstance(body, dict):

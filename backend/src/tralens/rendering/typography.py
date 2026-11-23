@@ -4,6 +4,8 @@ Comfort margins are a subset of the supplied safe layout. A few size probes shar
 the existing RAQM work limits; scores are presentation heuristics, not linguistic
 judgments, source-font matching or proof of optimal typography.
 """
+import re
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -30,7 +32,9 @@ def line_quality(original, shaped, advances):
             and sum(char.isalnum() for char in lines[-1]) > 2 and advances[-1] < .45*width)
     mean = sum(advances)/len(advances)
     imbalance = sum((value-mean)**2 for value in advances)/(len(advances)*width*width) if width else 0
-    cost = .6*orphan_count + .2*widow_count + .18*imbalance + .025*(len(lines)-1)
+    # Keep independent spoken beats on separate lines when width permits.
+    mixed_beats = sum(bool(re.search(r'[.!?…]\s+\S', line.strip())) for line in lines)
+    cost = .23*mixed_beats + .6*orphan_count + .2*widow_count + .18*imbalance + .025*(len(lines)-1)
     return {'cost': cost, 'short_word_orphans': orphan_count, 'tiny_final_line': widow_count,
         'normalized_line_variance': imbalance, 'line_count': len(lines)}
 
@@ -65,6 +69,22 @@ def layout_dialogue(text, font_data, coverage, mask, style):
     caps = sorted({high, preferred, max(low, round(high*.8)), max(low, round(high*.65))}, reverse=True)
     n.budget_check(len(caps) <= MAX_PROBES, 'typography probe budget')
     work = n.LayoutWork()
+    if style.get('preset')=='thought' and '\n' not in text:
+        offsets = [m.end() for m in re.finditer(r'[!?…]|(?<!\.)\.(?!\.)|\.{3}',text)
+                   if text[m.end():].startswith(' ')]
+        offsets = [i+1 for i in offsets if i+1<len(text) and text[i+1]!=' ']
+        if 1<=len(offsets)<=4:
+            try:
+                layer,proof = n.layout(text,font_data,coverage,content,
+                    {**style,'min_size':max(low,round(high*.70))},work=work,fixed_breaks=offsets)
+            except n.ResourceLimit:
+                raise
+            except ValueError as error:
+                if not str(error).startswith('overflow:'):
+                    raise
+            else:
+                proof['line_break_policy'] = 'thought_sentence_breaks'
+                return layer,proof,content
     probes = []
     best = None
     last_size = high+1
@@ -84,7 +104,7 @@ def layout_dialogue(text, font_data, coverage, mask, style):
             break
         last_size = provenance['size']
         quality = line_quality(text, provenance['draw_text'], provenance['line_fit_advances'])
-        size_cost = 2*((last_size-preferred)/preferred)**2
+        size_cost = 5*((last_size-preferred)/preferred)**2
         score = round(quality['cost']+size_cost, 8)
         probes.append({'max_size': cap, 'status': 'fit', 'size': last_size, 'score': score,
             'line_quality': quality})

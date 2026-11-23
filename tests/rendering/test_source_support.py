@@ -7,6 +7,20 @@ from tralens.rendering import source_support
 
 
 class SourceSupport(unittest.TestCase):
+    def test_painted_stroke_fill_continues_gradient_without_changing_art(self):
+        y,x = np.indices((80,100))
+        original = np.stack((150+x//2,170+x//2,190+x//2), axis=2).astype(np.uint8)
+        mask = (y>25) & (y<32) & (x>10) & (x<85)
+        image = original.copy()
+        image[mask] = 0
+        obstacle = np.zeros_like(mask)
+        obstacle[23:25,45:63] = True
+        image[obstacle] = 20
+        result = source_support.painted_stroke_fill(image,mask,obstacle)
+        self.assertTrue(np.array_equal(result[~mask],image[~mask]))
+        self.assertLess(np.abs(result[mask].astype(float)-original[mask]).mean(), 1.)
+        self.assertIsNone(source_support.painted_stroke_fill(image, (x>10)&(x<70)&(y>10)&(y<60), obstacle))
+
     def fixture(self):
         image=np.full((240,320,3),245,np.uint8)
         # A deliberately oversized detector footprint includes a panel divider

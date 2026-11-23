@@ -2,6 +2,7 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
+import json
 import unittest
 import zipfile
 
@@ -149,6 +150,57 @@ class ReaderLibraryTests(unittest.TestCase):
                 [self.file],
             )
         self.assertFalse(self.library.catalog()["books"])
+
+    def test_phone_transcript_survives_failed_retry(self):
+        runner = self.app.runner
+        def with_reading(config, job):
+            result = runner(config, job)
+            run = job['directory'] / 'run'
+            (run / 'preview').mkdir()
+            raw = dict(source_id=1, polygon=[[1, 2], [8, 2], [8, 9]])
+            (run / 'preview/preview.json').write_text(json.dumps({'ocr': {'raw_detections': [[raw]]}}))
+            unit = dict(binding=dict(text="Hello!", member_ids=[1]), status='automatic_composed',
+                        layout={'size': 20}, display_status='clean')
+            (run / 'rendering/manifest.json').write_text(json.dumps({'units':[unit], 'source':{'size':[1000,1500]}}))
+            return result
+        self.app.runner = with_reading
+        self.library.add(self.meta, [self.file])
+        b = self.finished()
+        p = b['chapters'][0]['pages'][0]
+        self.assertEqual(p['reading_width'], 600)
+        self.assertEqual(self.library.transcript(p['id']), [dict(text='Hello!', box=[1, 2, 8, 9])])
+        self.app.runner = lambda *_: {'status': 'failed', 'error': {'message': 'provider unavailable'}}
+        self.library.change('retry', dict(book=b['id'], page=p['id'], options=self.meta['options']))
+        for _ in range(100):
+            page = self.library.catalog()['books'][0]['chapters'][0]['pages'][0]
+            if page['status'] == 'failed':
+                break
+            time.sleep(.02)
+        self.assertEqual(page['status'], 'failed')
+        self.assertTrue(page['ready'])
+        self.assertEqual(self.library.transcript(p['id'])[0]['text'], 'Hello!')
+
+    def test_fenced_local_page_waits_while_frontier_page_completes(self):
+        from tralens.scheduling import remote_state_path
+        from unittest.mock import patch
+        with patch.dict('os.environ', TRALENS_STATE_ROOT=str(self.app.root / 'state')):
+            # Start a new worker so its provider state is isolated for this test.
+            self.library.close()
+            fence = remote_state_path(self.app.config.endpoint)
+            fence.write_text('{}')
+            self.library = Library(self.app)
+            local = self.library.add({**self.meta, 'options':{'mode':'render'}}, [self.file])
+            self.library.add(self.meta, [self.file])
+            for _ in range(150):
+                pages = [b['chapters'][0]['pages'][0] for b in self.library.catalog()['books']]
+                if [p['status'] for p in pages] == ['waiting','ready']:
+                    break
+                time.sleep(.02)
+            self.assertEqual([p['status'] for p in pages], ['waiting','ready'])
+            self.assertEqual(len(self.calls), 1)
+            self.library.change('skip', dict(book=local['book'], page=pages[0]['id']))
+            self.assertTrue(fence.exists())
+            self.assertEqual(self.library.catalog()['books'][0]['chapters'][0]['pages'][0]['status'], 'skipped')
 
     def test_library_has_one_worker_owner(self):
         with self.assertRaisesRegex(RuntimeError, "already owns"):

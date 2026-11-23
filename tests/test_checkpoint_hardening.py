@@ -190,6 +190,14 @@ class Hardening(unittest.TestCase):
             self.assertIsNone(stranger.poll())
         finally:stranger.kill();stranger.wait()
 
+    def test_connection_refusal_allows_retry_without_acknowledgement(self):
+        endpoint = 'http://127.0.0.1:11434'
+        refused = Mock(side_effect=ConnectionRefusedError)
+        with self.assertRaises(ConnectionRefusedError):
+            scheduling.remote_call(endpoint, refused)
+        self.assertFalse(scheduling.remote_state_path(endpoint).exists())
+        self.assertEqual(scheduling.remote_call(endpoint, lambda: {'done': True}), {'done': True})
+
     def test_remote_timeout_blocks_dispatch_across_runtime_instances(self):
         entered=threading.Event();finish=threading.Event();calls=[]
         class Handler(BaseHTTPRequestHandler):

@@ -100,7 +100,7 @@ def options(value, *, render_enabled):
         raise RequestError('Unknown translation visibility policy.')
     if result['visibility_policy'] != 'replacement-only' and result['mode'] != 'render':
         raise RequestError('Always show available translations requires Final rendering.')
-    if result['removal_policy'] not in ('legacy','preserve','aggressive') or result['reconstruction_policy'] not in ('classical','lama','sdxl'):
+    if result['removal_policy'] not in ('legacy','preserve','aggressive') or result['reconstruction_policy'] not in ('auto','classical','lama','sdxl'):
         raise RequestError('Unknown removal or reconstruction policy.')
     if result['reconstruction_policy']!='classical' and (result['mode']!='render' or result['removal_policy']!='aggressive'):
         raise RequestError('Learned inpainting requires Final rendering and Aggressive removal.')
@@ -168,6 +168,13 @@ def execute_job(config, job):
         if (config.crop_reader_model is not None and settings['translation_policy']=='coverage-first'
                 and not settings.get('quality_reread')):
             kwargs.update(crop_reader_model=config.crop_reader_model, reader_presentations=True)
+        if config.reader_mode:
+            from PIL import Image
+            with Image.open(job['image']) as page:
+                phone_size = min(144, max(16, math.ceil(page.width * 12 / 390)))
+            kwargs.update(min_size=phone_size, max_size=min(144, max(28, math.ceil(phone_size * 1.3))))
+        model_configs = {'lama': config.reconstruction_config, 'sdxl': config.sdxl_config}
+        reconstruction = settings.get('reconstruction_policy', 'classical')
         return run_pipeline(job['image'], job['directory']/'run', fonts=config.fonts,
             font_id=config.font_id, render_policy=settings['render_policy'],
             replacement_policy=settings.get('replacement_policy', 'all'),
@@ -175,8 +182,8 @@ def execute_job(config, job):
             source_localization=settings.get('source_localization', False),
             visibility_policy=settings.get('visibility_policy', 'replacement-only'),
             removal_policy=settings.get('removal_policy','legacy'),
-            reconstruction_policy=settings.get('reconstruction_policy','classical'),
-            reconstruction_config={'lama':config.reconstruction_config,'sdxl':config.sdxl_config}.get(settings.get('reconstruction_policy')),
+            reconstruction_policy=reconstruction,
+            reconstruction_config=model_configs if reconstruction == 'auto' else model_configs.get(reconstruction),
             text_mask_model=config.text_mask_model,
             quality_reread=settings.get('quality_reread', False), reread_model=config.reread_model,
             manga_reread_model=config.manga_reread_model if settings.get('translation_policy','coverage-first')=='coverage-first' and 'crop_reader_model' not in kwargs else None, **kwargs)
@@ -327,9 +334,7 @@ class App:
             from PIL import Image
             from ..rendering.preparation import source_rgb
             try:
-                with Image.open(BytesIO(data)) as opened:
-                    if opened.format not in ('PNG', 'JPEG'):
-                        raise ValueError('Use a PNG or JPEG image.')
+                with Image.open(BytesIO(data), formats=('PNG', 'JPEG')) as opened:
                     extension = 'png' if opened.format == 'PNG' else 'jpg'
                     with source_rgb(opened):
                         size = list(opened.size)

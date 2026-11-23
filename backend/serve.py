@@ -1,4 +1,4 @@
-"""Start the local Tralens HTTP API and its bundled diagnostic viewer."""
+"""Start the Tralens reader and its HTTP API."""
 from tools.dev_frontend import main
 
 

@@ -8,6 +8,7 @@ from dataclasses import asdict,is_dataclass
 from io import BytesIO
 import hashlib
 import json
+import re
 from pathlib import Path
 import unicodedata
 
@@ -120,7 +121,57 @@ def record_views(image, record):
     return native, isolated, padded
 
 
+def clipped_kana_candidate(record):
+    return (not record.get('view_policy') and len(record['polygons']) == 1
+            and record['direction'] in ('vertical', 'unknown') and min(record['scores']) < .92
+            and re.fullmatch(r'[ぁ-ゖァ-ヺー]{2,6}', record['source'])
+            and record['readings'].count(record['source']) >= 2)
+
+
+def clipped_kana_views(image, record):
+    """Read a single stroke crossing the foot of an otherwise agreed kana column."""
+    from . import reader_geometry
+    if not clipped_kana_candidate(record):
+        return None
+    try:
+        mapping = reader_geometry.plan(image.size, record['polygons'][0], view='axial')
+    except ValueError:
+        return None
+    width, height = mapping['seed_size']
+    if height < 1.35 * width:
+        return None
+    px, py = mapping['padding']
+    edge = py + height
+    pixels = np.asarray(reader_geometry.pixels(image, mapping))
+    _, labels, stats, _ = cv2.connectedComponentsWithStats((pixels.max(2) < 145).astype(np.uint8), 8)
+    strokes = [(i, x, y, w, h) for i, (x, y, w, h, area) in enumerate(stats[1:], 1)
+               if px < x and x+w < px+width and y <= edge-2 and edge+4 <= y+h < len(pixels)-2
+               and 5 <= w <= width and 8 <= h <= width and area >= 16]
+    if len(strokes) != 1:
+        return None
+    i, x, y, w, h = strokes[0]
+    support = cv2.dilate((labels == i).astype(np.uint8), np.ones((5, 5), np.uint8)) != 0
+    isolated = np.full_like(pixels, 255)
+    isolated[support] = pixels[support]
+    glyph = Image.fromarray(isolated[max(0,y-3):y+h+3, max(0,x-3):x+w+3].copy())
+    isolated[:edge] = pixels[:edge]
+    column = Image.fromarray(isolated[py:y+h+4, px:px+width])
+    return column, glyph
+
+
+def clipped_kana_text(record):
+    trial = record.get('clipped_kana', {})
+    readings = trial.get('readings', [])
+    if len(readings) == 2 and len(trial.get('view_hashes', [])) == 2 and clipped_kana_candidate(record):
+        column, glyph = readings
+        if isinstance(glyph, str) and re.fullmatch(r'[ぁ-ゖァ-ヺ]', glyph) and column == record['source'] + glyph:
+            return column
+    return None
+
+
 def candidate_text(record):
+    if text := clipped_kana_text(record):
+        return text
     if record.get('view_policy')==outlined_sounds.POLICY:
         return outlined_sounds.confirmed_text(record['readings']) or record['readings'][0]
     trial=record.get('sound_windows')
@@ -130,6 +181,8 @@ def candidate_text(record):
 
 
 def select_record(record):
+    if 'clipped_kana' in record:
+        return clipped_kana_text(record) is not None
     if record.get('view_policy')==sideways_sound.POLICY:
         return sideways_sound.matches(record)
     if record.get('view_policy')==outlined_sounds.POLICY:
@@ -168,6 +221,12 @@ def select_record(record):
                 return all(selection(record['source'],[v]*3,record['scores'],'horizontal')
                     for v in readings)
         return False
+    # A stacked, repeated sound can form a square box with no dominant axis.
+    if (direction == 'unknown' and len(record['polygons']) == 1 and len(record['scores']) == 1
+            and record['scores'][0] < .6 and re.fullmatch(r'[ぁ-ゖァ-ヺ]', record['source'])
+            and record['readings'] and re.fullmatch(r'([ぁ-ゖァ-ヺー]{2,4})\1', record['readings'][0])
+            and record['source'] in record['readings'][0]):
+        return selection(record['source'],record['readings'],record['scores'],'horizontal')
     return selection(record['source'],record['readings'],record['scores'],direction)
 
 
@@ -240,6 +299,11 @@ def refine(engine,image,original,*,reader,model_identity,output,max_regions=MAX_
                     if not sound_readings.matches(record) and sound_readings.shifted_target(record):
                         record['shifted_windows']={'readings':[],'view_hashes':[]}
                         read_views(record['shifted_windows'],sound_readings.shifted_views(windows[0]),'-shifted')
+            if not select_record(record):
+                extra = clipped_kana_views(image, record)
+                if extra is not None:
+                    record['clipped_kana'] = {'readings': [], 'view_hashes': []}
+                    read_views(record['clipped_kana'], extra, '-clipped-kana')
             record['selected']=select_record(record)
             if record['selected']:
                 from . import manga_dialogue,quality_reread
@@ -290,6 +354,18 @@ def validate_candidate(candidate,batch):
         'crop reading candidate evidence drift')
 
 
+def confirms_raw(record, unit, proposal, image):
+    """Three independently presented crops agree with the raw main reading."""
+    if (not record or record.get('error') or record.get('proposal_id') != unit.unit_id
+            or record.get('main_ids') != list(unit.order) or record.get('bounds') != proposal['crop_bounds']
+            or record.get('source') != unit.selected.text or record.get('readings') != [unit.selected.text] * 3):
+        return False
+    evidence = strict_json(unit.selected.evidence_json)
+    if record.get('polygons') != [line['polygon'] for line in evidence]:
+        return False
+    return record.get('view_hashes') == [image_fingerprint(view) for view in record_views(image, record)]
+
+
 def preferred_reading(unit):
     choices=[]
     for reading in unit.readings:
@@ -326,6 +402,10 @@ def validate_pixels(candidate,image):
     require(record['bounds']==candidate['crop']['bounds'] and proof['source_pixels_sha256']==image_fingerprint(image)
         and record['view_hashes']==[image_fingerprint(v) for v in record_views(image,record)],
         'crop reading pixels changed')
+    if 'clipped_kana' in record:
+        extra = clipped_kana_views(image, record)
+        require(extra is not None and record['clipped_kana']['view_hashes']==[image_fingerprint(v) for v in extra],
+                'clipped kana crop pixels changed')
     if 'sound_windows' in record:
         windows=sound_readings.presentations(image,record)
         require(windows is not None and record['sound_windows']['view_hashes']==[image_fingerprint(v) for v in windows],

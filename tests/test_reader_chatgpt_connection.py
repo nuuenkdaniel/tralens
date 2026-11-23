@@ -28,17 +28,23 @@ class ReaderChatGPTTests(unittest.TestCase):
 
             with patch.object(chatgpt, 'login', side_effect=login) as signin, \
                     patch.object(chatgpt, 'models', return_value=[luna.MODEL]) as catalog:
-                self.assertEqual(connection.select(remote=False)['state'], 'pending')
+                self.assertEqual(connection.select()['state'], 'pending')
                 self.assertTrue(ready.wait(2))
-                self.assertEqual(connection.select(remote=False)['url'], 'http://127.0.0.1:12345/connect/test')
+                self.assertEqual(connection.select()['url'], 'http://127.0.0.1:12345/connect/test')
                 signin.assert_called_once()
                 catalog.assert_not_called()
                 consent.set()
                 deadline = time.monotonic() + 3
                 while connection.status()['state'] == 'pending' and time.monotonic() < deadline:
                     time.sleep(.01)
-                self.assertEqual(connection.select(remote=False), dict(state='connected', models=[luna.MODEL]))
+                self.assertEqual(connection.select(), dict(state='connected', models=[luna.MODEL]))
                 signin.assert_called_once()
+
+    def test_disconnect_revokes_the_saved_connection(self):
+        connection = ReaderConnection()
+        with patch.object(chatgpt, 'logout') as logout:
+            self.assertEqual(connection.disconnect(), dict(state='disconnected'))
+        logout.assert_called_once_with()
 
     def test_legacy_transport_is_explicit(self):
         with patch.dict(os.environ, TRALENS_FRONTIER_PROVIDER='codex'):

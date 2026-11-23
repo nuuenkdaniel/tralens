@@ -327,6 +327,13 @@ def line_candidates(text, measure, width, *, budget=None):
                     start = end
                 if start == len(positions)-1 and len(offsets) < 16:
                     options.append((len(offsets), tuple(offsets), cost))
+            beats = [i for i in range(1,len(positions)-1)
+                     if paragraph[:positions[i]].rstrip().endswith(('.', '!', '?', '…'))]
+            if 1 <= len(beats) < 16:
+                ends = [0, *beats, len(positions)-1]
+                widths = [advance(a,b) for a,b in zip(ends,ends[1:])]
+                if max(widths) <= width:
+                    options.append((len(beats),tuple(positions[i] for i in beats),sum(w*w for w in widths)))
             options = sorted(set(options))
         combined = sorted({(n+count, old+tuple(base+p for p in offsets), score+cost)
                            for n, old, score in combined for count, offsets, cost in options
@@ -366,7 +373,7 @@ def validate_text(text, coverage):
     require(all(ord(c) in coverage for c in text if c != "\n"), "missing glyph coverage")
 
 
-def layout(text, font_data, coverage, mask, style, *, work=None, line_rank=None):
+def layout(text, font_data, coverage, mask, style, *, work=None, line_rank=None, fixed_breaks=None):
     budget_check(mask.mode == "L" and mask.width*mask.height <= MAX_PAGE_PIXELS, "layout page pixel budget")
     validate_text(text, coverage)
     require(features.check_feature("raqm"), "RAQM unavailable")
@@ -380,6 +387,15 @@ def layout(text, font_data, coverage, mask, style, *, work=None, line_rank=None)
     work = LayoutWork() if work is None else work
     require(isinstance(work, LayoutWork), "layout work budget required")
     require(line_rank is None or callable(line_rank), "line ranking must be callable")
+    fixed = None
+    if fixed_breaks is not None:
+        positions = break_positions(text)
+        require(0 < len(fixed_breaks) <= 15 and list(fixed_breaks)==sorted(set(fixed_breaks))
+                and all(i in positions[1:-1] for i in fixed_breaks),'invalid fixed line breaks')
+        shaped = text
+        for i in reversed(fixed_breaks):
+            shaped = shaped[:i]+'\n'+shaped[i:]
+        fixed = [(shaped,tuple(fixed_breaks))]
     search_budget = work.search
     for size in range(hi, lo-1, -1):
         font = ImageFont.truetype(BytesIO(font_data), size, layout_engine=ImageFont.Layout.RAQM)
@@ -390,7 +406,7 @@ def layout(text, font_data, coverage, mask, style, *, work=None, line_rank=None)
         # A retained original space before an inserted newline has advance but
         # no ink. Ignore that blank advance for screening, never in drawn text.
         fit_measure = lambda s: measure(s.rstrip(' '))
-        candidates = line_candidates(text, fit_measure, right-left-2*stroke, budget=search_budget)
+        candidates = fixed or line_candidates(text, fit_measure, right-left-2*stroke, budget=search_budget)
         if line_rank is not None:
             ranked = []
             for shaped, offsets in candidates:
@@ -652,6 +668,11 @@ def bind(preview, image_path, rgb, image_bytes, preview_bytes, selection, fonts_
     require(type(selection["units"]) is list and (0 if selection_kind == 'automatic_candidate_only' else 1)
             <= len(selection["units"]) <= 64, "selection unit budget")
     batch = preview["ocr"]["batches"][0]
+    if batch is None:
+        require(selection_kind == 'automatic_candidate_only' and preview['status'] == 'complete'
+                and preview['ocr']['raw_detections'] == [[]] and preview['units'] == selection['units'] == [],
+                'missing OCR batch for nonempty rendering')
+        return BoundSelection(canonical(selection), digest(preview_bytes), digest(image_bytes), digest(fonts_bytes))
     require(batch["page"]["image_sha256"] == source["sha256"] and batch["page"]["pixels_sha256"] == source["pixels_sha256"]
             and batch["page"]["image_path"] == source["path"], "foreign batch page")
     candidates = preview["ocr"].get("automatic_recognition_results", [])

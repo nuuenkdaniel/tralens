@@ -93,7 +93,8 @@ def derive(crop,own,protected,probability):
     contours,_=cv2.findContours(own.astype(np.uint8),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
     # Measure slanted source columns in their own orientation. This changes only
     # a geometry measurement; masks and model inputs keep native page pixels.
-    thickness=min(cv2.minAreaRect(np.concatenate(contours))[1])+1
+    source_rect = cv2.minAreaRect(np.concatenate(contours))
+    thickness=min(source_rect[1])+1
     narrow=thickness<=96
     line_limit=max(12,thickness*2)
     chosen=0;completed=0;weak_completed=[]
@@ -138,7 +139,59 @@ def derive(crop,own,protected,probability):
         'source_polygon_pixels':int(own.sum()),'support_pixels':int(support.sum()),
         'source_extent_discarded':False,'source_removal_verified':False,
         'possible_collateral_art_loss':True,'polarity':'dark_ink' if light else 'light_ink'}
+    # On pale painted gradients, gray<210 includes the background itself.
+    # Prefer isolated high-contrast strokes when a slanted line has clear paper
+    # between the glyphs and the original semantic mask corroborates them.
+    angle = source_rect[2] % 90
+    if (light and 12 < angle < 78 and thickness <= 50 and np.median(gray[own]) >= 155
+            and np.median(np.ptp(crop[own], axis=1)) >= 7):
+        core = gray < min(120, np.median(gray[own]) - 75)
+        _, components, sizes, _ = cv2.connectedComponentsWithStats(core.astype(np.uint8))
+        near_line = p.dilate(own, 3)
+        stroke = np.zeros_like(own)
+        for label in np.unique(components[core & own]):
+            x,y,w,h,area = sizes[label]
+            local = np.s_[y:y+h,x:x+w]
+            part = components[local] == label
+            if (max(w,h) <= 1.6*thickness and (part & own[local]).sum() >= .85*area
+                    and not (part & ~near_line[local]).any()):
+                stroke[local] |= part
+        if ((stroke & ~protected).sum() >= 16 and np.mean(support[stroke & ~protected]) >= .70
+                and stroke.sum() >= .82*(core & own).sum()
+                and not (core & own & ~stroke & ~p.dilate(protected, 9)).any()):
+            refined = p.dilate(stroke,2) & ~protected
+            if refined.sum() < support.sum():
+                support = refined
+                evidence.update(painted_stroke_support=True, support_pixels=int(refined.sum()))
     return support,evidence
+
+
+def painted_stroke_fill(crop, mask, obstacle, *, slanted=False):
+    """Reconstruct thin lettering on softly varying paint from nearby paper colors."""
+    if max(mask.shape) > 512 or mask.sum() < 32:
+        return None
+    radius = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)[mask].max()
+    if radius > 12:
+        return None
+    ring = p.dilate(mask, 8) & ~mask & ~obstacle
+    if not ring.any():
+        return None
+    samples = crop[ring].astype(np.float32)
+    center = np.median(samples, axis=0)
+    distance = np.abs(crop.astype(np.float32) - center).max(axis=2)
+    if (center.min() < 115 or np.percentile(np.ptp(samples, axis=1), 50) < 7
+            or np.mean(distance[ring] < 45) < (.62 if slanted else .72)):
+        return None
+    # Exclude outlying ink from neighboring characters even if OCR missed it.
+    weights = ((~mask & ~obstacle) & (distance < 55)).astype(np.float32)
+    sigma = max(3., float(radius) * .85)
+    support = cv2.GaussianBlur(weights, (0,0), sigma)
+    if support[mask].min() < .06:
+        return None
+    colors = cv2.GaussianBlur(crop * weights[:,:,None], (0,0), sigma)
+    result = crop.copy()
+    result[mask] = np.clip(np.rint(colors[mask] / support[mask,None]), 0, 255).astype(np.uint8)
+    return result
 
 
 def inference_context(commit,probability):

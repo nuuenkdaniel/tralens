@@ -184,12 +184,26 @@ class PipelineTests(unittest.TestCase):
             self.assertFalse((self.root/name/'rendering').exists())
             self.assertTrue((self.root/name/'preview/preview.json').is_file())
 
-    def test_empty_ocr_does_not_call_provider_or_renderer(self):
+    def test_artwork_retention_requires_an_explicit_nontext_decision(self):
+        outcome = {'reasons':['visual_non_text']}
+        row = {'status':'abstained', 'result':{'outcomes':[outcome]}}
+        self.assertTrue(automatic.retained_artwork(row))
+        self.assertFalse(automatic.retained_artwork({**row, 'status':'failed'}))
+        self.assertFalse(automatic.retained_artwork({**row, 'luna_review_error':'provider timeout'}))
+        self.assertFalse(automatic.retained_artwork({**row, 'luna_first_decision':{'category':'unreadable'}}))
+        outcome['reasons'] = ('visual_non_text',)  # Live dataclass before the JSON checkpoint round trip.
+        self.assertTrue(automatic.retained_artwork(row))
+        outcome['reasons'] = ['unreadable']
+        self.assertFalse(automatic.retained_artwork(row))
+
+    def test_empty_ocr_completes_with_pixel_identical_composite(self):
         self.fixture.engine.raw_detections = [[]]
         self.fixture.engine.automatic_unit_proposals = [None]
-        with patch.object(automatic, 'run_automatic', side_effect=AssertionError('empty OCR')):
-            report = self.run_pipeline()
-        self.assertEqual(report['status'], 'partial')
+        report = self.run_pipeline()
+        self.assertEqual(report['status'], 'complete')
+        from PIL import Image
+        with Image.open(self.fixture.image) as source, Image.open(self.root/'job'/report['rendering']['composite']) as composite:
+            self.assertEqual(source.convert('RGB').tobytes(),composite.convert('RGB').tobytes())
         self.assertEqual(report['coverage']['saved_units'], 0)
         self.provider.assert_not_called()
 

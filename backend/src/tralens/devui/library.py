@@ -3,6 +3,8 @@
 from contextlib import contextmanager
 import fcntl
 import json
+import math
+import re
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -12,7 +14,7 @@ import uuid
 import zipfile
 
 from PIL import Image
-from .server import RequestError, options
+from .server import RequestError, checkpoint, options
 from .import_pages import MAX_PAGES, expand, webp_png
 
 
@@ -20,6 +22,45 @@ def label(value):
     if not isinstance(value, str) or not 0 < len(value.strip()) <= 200:
         raise RequestError("Use a name between 1 and 200 characters.")
     return value.strip()
+
+
+def reading_text(manifest, detections):
+    polygons = {d['source_id']: d['polygon'] for d in detections}
+    lines = []
+    minimum = None
+    unsafe = False
+    for row in sorted(manifest['units'], key=lambda item: item.get('reading_order', len(manifest['units']))):
+        binding = row.get('binding')
+        if not binding or row.get('reason_code') in ('uncorroborated_source', 'replacement_unchanged_text'):
+            continue
+        points = [pt for member in binding['member_ids'] for pt in polygons[member]]
+        xs, ys = zip(*points)
+        lines.append(dict(text=binding['text'], box=[min(xs), min(ys), max(xs), max(ys)]))
+        if row.get('display_status') == 'unchanged':
+            continue
+        size = (row.get('layout') or {}).get('size')
+        if size and size > 0:
+            minimum = min(size, minimum or size)
+        if (not size or row['status'] != 'automatic_composed' or row.get('removal_fallback')
+                or row.get('display_status') in ('patch', 'caption', 'aggressive', 'learned')):
+            unsafe = True
+    # CSS pixels at fit-to-page scale. A negative width requests original art at any scale.
+    width = manifest['source']['size'][0]
+    return lines, -1 if unsafe else math.ceil(12 * width / minimum) if minimum else 0
+
+
+def saved_reading(directory):
+    notices = []
+    manifest = checkpoint(directory / 'run/rendering/manifest.json', notices)
+    if manifest is None:
+        if notices:
+            raise ValueError(notices[0])
+        return None, None
+    preview = checkpoint(directory / 'run/preview/preview.json', notices)
+    if not preview:
+        raise ValueError("The saved OCR page could not be read.")
+    lines, width = reading_text(manifest, preview['ocr']['raw_detections'][0])
+    return json.dumps(lines, ensure_ascii=False), width
 
 
 class Library:
@@ -48,6 +89,10 @@ class Library:
             for dimension in ("width", "height"):
                 if dimension not in columns:
                     db.execute(f"ALTER TABLE pages ADD COLUMN {dimension} INTEGER")
+            if 'reading' not in columns:
+                db.execute("ALTER TABLE pages ADD COLUMN reading TEXT")
+            if 'reading_width' not in columns:
+                db.execute("ALTER TABLE pages ADD COLUMN reading_width INTEGER")
             if "position" not in {
                 r["name"] for r in db.execute("PRAGMA table_info(chapters)")
             }:
@@ -55,10 +100,32 @@ class Library:
             db.execute(
                 "UPDATE pages SET status='failed',error='Translation was interrupted. Try again.' WHERE status='running'"
             )
+        if "reading" not in columns:
+            self.restore_reading()
         self.thread = threading.Thread(
             target=self.work, name="reader-library", daemon=True
         )
         self.thread.start()
+
+    def restore_reading(self):
+        """Attach legacy evidence only to the exact composite it produced."""
+        with self.db() as db:
+            rows = db.execute("SELECT id,job FROM pages WHERE final IS NOT NULL AND job IS NOT NULL").fetchall()
+            for row in rows:
+                try:
+                    if not re.fullmatch('[0-9a-f]{32}', row['job']):
+                        continue
+                    directory = self.app.root / row['job']
+                    composite = directory / 'run/rendering/composite.png'
+                    if (any(p.is_symlink() for p in (composite, *composite.parents))
+                            or not composite.is_file() or composite.stat().st_size > 64 * 1024**2):
+                        continue
+                    reading, width = saved_reading(directory)
+                    if reading is not None:
+                        db.execute("UPDATE pages SET reading=?,reading_width=? WHERE id=? AND final=?",
+                                   (reading, width, row['id'], composite.read_bytes()))
+                except (RequestError, OSError, ValueError, KeyError, TypeError):
+                    continue
 
     def close(self):
         self.stopped.set()
@@ -89,7 +156,7 @@ class Library:
                 chap = chapters[r["id"]] = dict(r, pages=[])
                 books[r["book"]]["chapters"].append(chap)
             for r in db.execute(
-                "SELECT id,chapter,name,width,height,status,CASE WHEN status='failed' THEN error END AS error,updated,final IS NOT NULL AS ready FROM pages ORDER BY rowid"
+                "SELECT id,chapter,name,width,height,status,error,reading_width,reading IS NOT NULL AND reading != '[]' AS has_text,updated,final IS NOT NULL AS ready FROM pages ORDER BY rowid"
             ):
                 chapters[r["chapter"]]["pages"].append(dict(r))
             used = db.execute(
@@ -191,6 +258,17 @@ class Library:
                         "UPDATE chapters SET position=? WHERE id=(SELECT chapter FROM pages WHERE id=?)",
                         (page, page),
                     )
+            elif action == "skip":
+                db.execute("BEGIN IMMEDIATE")
+                target = db.execute("SELECT status,job FROM pages WHERE id=? AND chapter IN "
+                    "(SELECT id FROM chapters WHERE book=?)", (body.get("page"), book)).fetchone()
+                if not target or target["status"] not in ("queued", "waiting", "running"):
+                    raise RequestError("This page has already finished.", 409)
+                if target["status"] == "running":
+                    if not target["job"]:
+                        raise RequestError("Page is starting. Try skipping again in a moment.", 409)
+                    self.app.cancel(target["job"])
+                updated = db.execute("UPDATE pages SET status='skipped',error=NULL WHERE id=?", (body["page"],))
             elif action == "retry":
                 settings = self.settings(body.get("options"))
                 updated = db.execute(
@@ -204,6 +282,13 @@ class Library:
                 raise RequestError("Item is missing or already processing.", 409)
         self.wake.set()
         return {}
+
+    def transcript(self, page):
+        with self.db() as db:
+            row = db.execute("SELECT reading FROM pages WHERE id=?", (page,)).fetchone()
+        if not row or row["reading"] is None:
+            raise RequestError("Page text unavailable.", 404)
+        return json.loads(row["reading"])
 
     def image(self, page, variant):
         with self.db() as db:
@@ -250,15 +335,25 @@ class Library:
             raise
 
     def work(self):
+        from ..scheduling import remote_state_path
+        from ..translation.runtime import local_endpoint
+        fence = remote_state_path(local_endpoint(self.app.config.endpoint))
         while not self.stopped.is_set():
             with self.db() as db:
                 db.execute("BEGIN IMMEDIATE")
+                if fence.exists():
+                    db.execute("UPDATE pages SET status='waiting',error=? WHERE status='queued' AND "
+                               "(coalesce(json_extract(options,'$.translation_model'),'local')='local' "
+                               "OR json_extract(options,'$.quality_reread')=1)",
+                               ("Local translator is waiting for the server operator to confirm the previous request finished.",))
+                else:
+                    db.execute("UPDATE pages SET status='queued',error=NULL WHERE status='waiting'")
                 row = db.execute(
                     "SELECT id,source,mime,options FROM pages WHERE status='queued' ORDER BY rowid LIMIT 1"
                 ).fetchone()
                 if row:
                     db.execute(
-                        "UPDATE pages SET status='running' WHERE id=?", (row["id"],)
+                        "UPDATE pages SET status='running',job=NULL WHERE id=?", (row["id"],)
                     )
             if not row:
                 self.wake.wait(2)
@@ -310,13 +405,19 @@ class Library:
                     raise ValueError(
                         "No translated image was produced. Check the translator or try again."
                     ) from exc
-                self.finish(row["id"], final, None)
+                reading, width = saved_reading(record["directory"])
+                self.finish(row["id"], final, None, reading, width)
             except Exception as exc:
-                self.finish(row["id"], None, str(exc))
+                message = str(exc)
+                settings = json.loads(row['options'])
+                if fence.exists() and (settings.get('translation_model', 'local') == 'local' or settings['quality_reread']):
+                    message = "The local translator stopped responding. Check the previous request on the model server before retrying."
+                self.finish(row["id"], None, message)
 
-    def finish(self, page, final, error):
+    def finish(self, page, final, error, reading=None, width=None):
         with self.db() as db:
             db.execute(
-                "UPDATE pages SET status=?,error=?,final=coalesce(?,final),updated=updated+1 WHERE id=?",
-                ("ready" if final else "failed", error, final, page),
+                "UPDATE pages SET status=?,error=?,final=coalesce(?,final),reading=CASE WHEN ? THEN ? ELSE reading END, "
+                "reading_width=CASE WHEN ? THEN ? ELSE reading_width END,updated=updated+1 WHERE id=? AND status='running'",
+                ("ready" if final else "failed", error, final, final is not None, reading, final is not None, width, page),
             )

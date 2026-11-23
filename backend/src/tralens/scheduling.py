@@ -70,7 +70,12 @@ def remote_call(endpoint,call):
         intent={'endpoint':endpoint,'request_id':uuid.uuid4().hex,'pid':os.getpid(),'started_unix':time.time(),
             'status':'pending_or_remote_completion_unknown','cancellation_confirmed':False}
         atomic_bytes(path,(json.dumps(intent)+'\n').encode())
-        response=call()
+        try:
+            response=call()
+        except ConnectionRefusedError:
+            # The connection was refused before an inference request was sent.
+            path.unlink();sync_directory(path.parent)
+            raise
         if type(response) is dict and response.get('done') is True:
             path.unlink();sync_directory(path.parent)
         else:

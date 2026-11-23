@@ -14,10 +14,11 @@ from ..rendering.preparation import source_rgb
 from .server import MAX_UPLOAD, RequestError
 
 MAX_PAGES = 256
+MAX_ZIP_DIRECTORY_BYTES = 16 * 1024**2
 
 
 def webp_png(data):
-    with Image.open(BytesIO(data)) as im:
+    with Image.open(BytesIO(data), formats=("WEBP",)) as im:
         if im.format != "WEBP" or getattr(im, "n_frames", 1) != 1:
             raise ValueError("Choose a still WebP image.")
         if im.width * im.height > 4_000_000 or max(im.size) > 4096:
@@ -49,9 +50,16 @@ def poppler(command):
 
 def expand(name, data, directory, remaining):
     """Yield name, MIME, source bytes and size in document order."""
-    if data.startswith(b"%PDF-") or name.lower().endswith(".pdf"):
-        document = directory / "source.pdf"
-        document.write_bytes(data)
+    path = data if isinstance(data, Path) else None
+    if path:
+        with path.open('rb') as stream:
+            signature = stream.read(5)
+    else:
+        signature = data[:5]
+    if signature == b"%PDF-" or name.lower().endswith(".pdf"):
+        document = path or directory / "source.pdf"
+        if path is None:
+            document.write_bytes(data)
         info = poppler(["pdfinfo", str(document)])
         match = re.search(rb"^Pages:\s+(\d+)\s*$", info, re.M)
         if not match or not 0 < int(match[1]) <= remaining:
@@ -62,12 +70,15 @@ def expand(name, data, directory, remaining):
             poppler(["pdftoppm", "-f", str(page), "-l", str(page), "-singlefile",
                      "-cropbox", "-scale-to", "2000", "-png", str(document), str(prefix)])
             image = prefix.with_suffix(".png").read_bytes()
-            with Image.open(BytesIO(image)) as im:
+            with Image.open(BytesIO(image), formats=("PNG",)) as im:
                 yield f"{Path(name).stem[:180]}-{page:03}.png", "image/png", image, im.size
         return
     if Path(name).suffix.lower() in (".cbz", ".zip"):
         yield from archive_pages(data, remaining)
         return
+    if path:
+        with path.open('rb') as stream:
+            data = stream.read(MAX_UPLOAD + 1)
     yield from image_page(name, data)
 
 
@@ -81,34 +92,44 @@ def path_order(path):
 
 def archive_pages(data, remaining):
     try:
-        with zipfile.ZipFile(BytesIO(data)) as archive:
-            images = []
-            for entry in archive.infolist():
-                name = entry.filename.replace(chr(92), "/")
-                parts = name.split("/")
-                if (entry.is_dir() or stat.S_ISLNK(entry.external_attr >> 16)
-                        or any(not p or p.startswith(".") or p == "__MACOSX" for p in parts)
-                        or Path(name).suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp")):
-                    continue
-                images.append((name, entry))
-                if len(images) > remaining:
-                    raise ValueError(f"An import can contain at most {MAX_PAGES} pages.")
-                if entry.file_size > MAX_UPLOAD:
-                    raise ValueError(f"{name}: each image must be 32 MiB or smaller.")
-            if not images:
-                raise ValueError("Archive contains no PNG, JPEG, or WebP pages.")
-            for name, entry in sorted(images, key=lambda item: path_order(item[0])):
-                with archive.open(entry) as stream:
-                    content = stream.read(MAX_UPLOAD + 1)
-                yield from image_page(name.rsplit("/", 1)[-1], content)
+        with (data.open('rb') if isinstance(data, Path) else BytesIO(data)) as stream:
+            # CPython's ZIP reader loads the entire central directory at open.
+            # Bound that metadata separately from the streamed archive body.
+            directory = zipfile._EndRecData(stream)
+            if not directory or directory[zipfile._ECD_SIZE] > MAX_ZIP_DIRECTORY_BYTES:
+                raise ValueError("Invalid archive or archive directory exceeds 16 MiB.")
+            yield from zip_image_pages(stream, remaining)
     except (zipfile.BadZipFile, RuntimeError, EOFError, zlib.error) as exc:
         raise ValueError("Cannot read this archive. Check for damage, unsupported compression or encryption.") from exc
+
+
+def zip_image_pages(stream, remaining):
+    with zipfile.ZipFile(stream) as archive:
+        images = []
+        for entry in archive.infolist():
+            name = entry.filename.replace(chr(92), "/")
+            parts = name.split("/")
+            if (entry.is_dir() or stat.S_ISLNK(entry.external_attr >> 16)
+                    or any(not p or p.startswith(".") or p == "__MACOSX" for p in parts)
+                    or Path(name).suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp")):
+                continue
+            images.append((name, entry))
+            if len(images) > remaining:
+                raise ValueError(f"An import can contain at most {MAX_PAGES} pages.")
+            if entry.file_size > MAX_UPLOAD:
+                raise ValueError(f"{name}: each image must be 32 MiB or smaller.")
+        if not images:
+            raise ValueError("Archive contains no PNG, JPEG, or WebP pages.")
+        for name, entry in sorted(images, key=lambda item: path_order(item[0])):
+            with archive.open(entry) as stream:
+                content = stream.read(MAX_UPLOAD + 1)
+            yield from image_page(name.rsplit("/", 1)[-1], content)
 
 
 def image_page(name, data):
     if len(data) > MAX_UPLOAD:
         raise ValueError("Each image must be 32 MiB or smaller.")
-    with Image.open(BytesIO(data)) as im:
+    with Image.open(BytesIO(data), formats=("PNG", "JPEG", "WEBP")) as im:
         if im.format == "WEBP":
             _, size = webp_png(data)
             yield name, "image/webp", data, size

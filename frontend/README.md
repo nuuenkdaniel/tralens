@@ -4,6 +4,8 @@ The browser application in `web/` serves a manga library and reader. The browser
 
 ## Run the web app
 
+Use the [Docker Compose setup](../README.md#quick-start) for self-hosting. The commands below use the local development runtimes.
+
 From this checkout, with the installed evaluation runtimes:
 
 ```sh
@@ -17,7 +19,9 @@ From this checkout, with the installed evaluation runtimes:
 
 Open [the reader](http://localhost:7871/) or [the diagnostic viewer](http://localhost:7871/developer). On a fresh checkout, supply your licensed fonts and available model paths. The font manifest is required for translated output. Both learned-reconstruction flags are optional. Local translation uses the configured Ollama service. Selecting a GPT model in Settings starts ChatGPT sign-in the first time. In the Android app, approve access in the phone’s browser and tap **Open Tralens** to finish. Local translation needs no account. Codex CLI is an explicit server override. For HTTPS, owner sign-in, and direct account setup, follow the [single-owner deployment guide](../docs/self-hosted-reader.md).
 
-**Settings → Translation** selects Local, GPT-6 Luna, GPT-6.1 Terra, or GPT-6.2 Sol. **Inpainting model** selects Classical, LaMa or SDXL. The backend advertises the configured options. Model selections apply to new imports and explicit retries. Keep the artwork uses classical cleanup. Replace it anyway uses the selected model for eligible textured regions. Uniform fills, mask checks, time budgets and classical fallbacks still apply.
+**Settings → Translation** selects Local, GPT-6 Luna, GPT-6.1 Terra, or GPT-6.2 Sol. **Inpainting model** selects Auto, Classical, LaMa or SDXL. The backend advertises the configured options. Model selections apply to new imports and explicit retries. Keep the artwork uses classical cleanup. Replace it anyway uses the selected model for eligible textured regions. Uniform fills, mask checks, time budgets and classical fallbacks still apply.
+
+In the reader, **Auto · per region** uses classical cleanup for flat areas, prefers LaMa for linework and screen tones, and can use SDXL for broader gaps in painted color. Auto can retry an SDXL region with LaMa when lettering leaves an outline or a straight line breaks across the repair. It compares linework on both sides of the gap. When a better-connected line has stronger contrast, Auto checks whether that contrast follows the erased lettering or also appears in the surrounding paint. The retry uses the existing render budget. Auto uses the configured models and works with classical cleanup alone. Its SDXL runtime also needs OpenCV for the initial fill. Manual selections remain available.
 
 For SDXL, pass an operator-owned JSON file to `--sdxl-config`:
 
@@ -33,7 +37,7 @@ The worker expects the fp16 safetensors layout of `diffusers/stable-diffusion-xl
 
 ## Using the reader
 
-- Import PNG, JPEG, still WebP, multipage PDFs, or CBZ/ZIP chapter archives, arrange their reading order, and create a manga or append a chapter. Imports are atomic. The current image limits are 32 MiB and 4 megapixels per opaque page, 4096 pixels per side, and 128 MiB per import (up to 256 expanded pages). Archive images (PNG, JPEG, still WebP) are read in natural folder and filename order, so page 2 precedes page 10. Metadata and hidden files are skipped. PDFs use server-side Poppler (pdfinfo and pdftoppm) and util-linux prlimit. Each PDF page becomes a PNG with a 2000-pixel long edge, in document order. Original downloads for PDFs are these rendered pages. WebP originals retain their uploaded bytes; transparency is flattened onto white for translation.
+- Import PNG, JPEG, still WebP, multipage PDFs, or CBZ/ZIP chapter archives, arrange their reading order, and create a manga or append a chapter. Imports are atomic. The current image limits are 32 MiB and 4 megapixels per opaque page, 4096 pixels per side, and 4 GiB per import (up to 256 expanded pages). Archive images (PNG, JPEG, still WebP) are read in natural folder and filename order, so page 2 precedes page 10. Metadata and hidden files are skipped. PDFs use server-side Poppler (pdfinfo and pdftoppm) and util-linux prlimit. Each PDF page becomes a PNG with a 2000-pixel long edge, in document order. Original downloads for PDFs are these rendered pages. WebP originals retain their uploaded bytes; transparency is flattened onto white for translation.
 - Open a chapter while translation is running. The reader shows the original until a translated image becomes available. The queue processes one page at a time on the server and continues when the browser closes.
 - Choose single page, two-page spread, or continuous scroll. Use a swipe, the arrow keys, the edge controls, or the page slider to navigate. Tap the page to toggle reader controls. Compare offers a draggable divider and side-by-side originals.
 - Use the manga actions to rename, translate again, download a ZIP, or delete a title. The page menu offers individual downloads and retries. A failed retry retains the last available translation.

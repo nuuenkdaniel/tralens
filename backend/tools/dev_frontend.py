@@ -34,7 +34,7 @@ def main(argv=None, *, reader=False):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host', default='127.0.0.1',
                         help='IPv4 bind address; use 0.0.0.0 only on trusted networks (no user authentication)')
-    parser.add_argument('--port', type=int, default=7860)
+    parser.add_argument('--port', type=int, default=os.environ.get('TRALENS_PORT', '7871') if reader else 7860)
     parser.add_argument('--output-root', type=Path, default=BACKEND.parent/'test-results'/('web-reader' if reader else 'dev-frontend'))
     parser.add_argument('--model-root', type=Path, default=Path.home()/'.cache/tralens/paddle-v6-models',
                         help='existing v6 medium exports (default: ~/.cache/tralens/paddle-v6-models); never downloaded')
@@ -53,31 +53,54 @@ def main(argv=None, *, reader=False):
                         help='existing Hayai snapshot for source-bound crop readings in coverage-first renders')
     parser.add_argument('--text-mask-model',type=Path,help='existing pinned CTD checkpoint for source-bound cleanup; no downloads')
     if reader:
-        parser.add_argument('--owner-key-file', type=Path)
-        parser.add_argument('--public-origin', help='Public HTTPS origin served by a local reverse proxy')
-        parser.add_argument('--frontier-provider', choices=('codex', 'chatgpt'), default='chatgpt')
+        origin = os.environ.get('TRALENS_ORIGIN') or None
+        default_key = os.environ.get('TRALENS_OWNER_KEY_FILE') if origin else None
+        parser.add_argument('--owner-key-file', type=Path, default=default_key)
+        parser.add_argument('--public-origin', default=origin, help='Public HTTPS origin served by a local reverse proxy')
+        parser.add_argument('--frontier-provider', choices=('codex', 'chatgpt', 'disabled'),
+                            default=os.environ.get('TRALENS_FRONTIER_PROVIDER', 'chatgpt'))
+        parser.add_argument('--check-assets', action='store_true', help='Validate model exports and the selected font before serving')
     args = parser.parse_args(argv)
     reader_options = {}
     provider = 'chatgpt' if args.host == '127.0.0.1' else 'disabled'
     if reader:
+        if args.host != '127.0.0.1':
+            parser.error('The reader binds to loopback. Use a tunnel or an HTTPS reverse proxy.')
         if bool(args.public_origin) != bool(args.owner_key_file):
             parser.error('--owner-key-file and --public-origin must be supplied together')
         if args.public_origin:
             from tralens.devui.owner import Owner
-            if args.host != '127.0.0.1':
-                parser.error('Use loopback binding behind the HTTPS reverse proxy.')
             try:
                 reader_options['owner'] = Owner(args.public_origin, args.owner_key_file)
             except (OSError, ValueError) as error:
                 parser.error(str(error))
         provider = args.frontier_provider
-        if provider == 'chatgpt' and not args.public_origin and args.host != '127.0.0.1':
-            provider = 'disabled'
+        if provider not in ('codex', 'chatgpt', 'disabled'):
+            parser.error('TRALENS_FRONTIER_PROVIDER must be codex, chatgpt, or disabled.')
     if not 1 <= args.port <= 65535:
         parser.error('port must be 1–65535')
     try:
         host = str(ipaddress.IPv4Address(args.host))
         endpoint = configured_endpoint(args.endpoint)
+        if reader and args.check_assets:
+            from tralens.ocr.paddle_profiles import resolve_profile
+            from tralens.rendering.font_faces import ApprovedFaces
+            import json
+
+            try:
+                resolve_profile(device=args.device, model_root=args.model_root)
+            except (OSError, ValueError) as error:
+                parser.error(f'OCR model exports unavailable at {args.model_root}. Run the Compose setup service. {error}')
+            try:
+                manifest = json.loads(args.fonts.read_text())
+                font_id = args.font_id
+                if font_id is None and len(manifest['fonts']) == 1:
+                    font_id = manifest['fonts'][0]['id']
+                ApprovedFaces(manifest, font_id)
+            except (AttributeError, KeyError, OSError, TypeError, ValueError) as error:
+                parser.error(f'Check the font manifest and font ID. {error}')
+            if os.environ.get('TMPDIR'):
+                Path(os.environ['TMPDIR']).mkdir(mode=0o700, parents=True, exist_ok=True)
         if args.crop_reader_model is not None:
             from tralens.ocr.hayai_adapter import verify_snapshot
             verify_snapshot(args.crop_reader_model)
@@ -97,7 +120,7 @@ def main(argv=None, *, reader=False):
         reread_model=args.reread_model,reconstruction_config=args.reconstruction_config,
         crop_reader_model=args.crop_reader_model.expanduser().absolute() if args.crop_reader_model else None,
         text_mask_model=args.text_mask_model.expanduser().absolute() if args.text_mask_model else None,isolated_workers=True,
-        sdxl_config=args.sdxl_config,reader_mode=reader,frontier_provider=provider))
+        job_seconds=300 if reader else 1800, sdxl_config=args.sdxl_config,reader_mode=reader,frontier_provider=provider))
     with create_server(app, args.port, host=host, **reader_options) as server:
         print(f'{"Tralens reader" if reader else "Pipeline viewer"}: http://{host}:{args.port}', flush=True)
         if host != '127.0.0.1':

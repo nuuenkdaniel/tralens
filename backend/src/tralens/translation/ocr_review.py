@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import time
 
+from ..ocr.recognition_units import image_fingerprint
 from .contracts import (Utterance, Reading, Style, TranslationRequest, FragmentRequest,
                         UnitOutcome, canonical, strict_json, revision, fragment_plan)
 from .runtime import (Generation, GenerationOptions, OllamaRuntime, GENERALIST,
@@ -184,7 +185,7 @@ def prepare_input(unit, image, image_bytes, raw_detections, model):
     """Independent current geometry, not proposal crop_safe or crop ownership proof."""
     from PIL import ImageDraw
     page = strict_json(unit.page_json)
-    pixels = hashlib.sha256(f"RGB:{image.width}:{image.height}:".encode()+image.tobytes()).hexdigest()
+    pixels = image_fingerprint(image)
     if hashlib.sha256(image_bytes).hexdigest() != page["image_sha256"] or pixels != page["pixels_sha256"]:
         raise ReviewBindingError("review original file/pixel hash mismatch")
     evidence = strict_json(unit.selected.evidence_json)
@@ -219,7 +220,7 @@ def prepare_input(unit, image, image_bytes, raw_detections, model):
             neighbors.append(raw["source_id"])
     with image.crop(context) as view:
         original_png = _png(view)
-        original_pixels = hashlib.sha256(f"RGB:{view.width}:{view.height}:".encode()+view.tobytes()).hexdigest()
+        original_pixels = image_fingerprint(view)
         localized = [(p[0]-context[0],p[1]-context[1]) for p in target["polygon"]]
         overlay = view.copy()
         try:
@@ -227,7 +228,7 @@ def prepare_input(unit, image, image_bytes, raw_detections, model):
             draw.line(localized+[localized[0]],fill="blue",width=2)
             draw.text((0,0),"TARGET (blue polygon)",fill="blue",stroke_width=1,stroke_fill="white")
             overlay_png = _png(overlay)
-            overlay_pixels = hashlib.sha256(f"RGB:{overlay.width}:{overlay.height}:".encode()+overlay.tobytes()).hexdigest()
+            overlay_pixels = image_fingerprint(overlay)
         finally:
             overlay.close()
     views = (original_png,overlay_png)
@@ -263,7 +264,7 @@ def review_payload(request, views):
         with Image.open(BytesIO(raw)) as image:
             if image.format != "PNG" or image.mode != "RGB" or image.size != (bounds[2]-bounds[0],bounds[3]-bounds[1]):
                 raise ReviewBindingError("review presentation format/size mismatch")
-            pixels = hashlib.sha256(f"RGB:{image.width}:{image.height}:".encode()+image.tobytes()).hexdigest()
+            pixels = image_fingerprint(image)
             if pixels != binding["view_pixels_sha256"][index]:
                 raise ReviewBindingError("review presentation pixel hash mismatch")
     content = {"target_id":request.original.unit_id,"source_ids":request.original.member_ids,

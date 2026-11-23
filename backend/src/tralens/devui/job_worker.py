@@ -18,7 +18,9 @@ def main(request):
 
     resource.setrlimit(resource.RLIMIT_FSIZE,(512*1024**2,512*1024**2))
     doc=json.loads(request.read_bytes())
-    if doc['job']['options'].get('reconstruction_policy') != 'sdxl':
+    policy = doc['job']['options'].get('reconstruction_policy')
+    gpu_enabled = policy == 'sdxl' or (policy == 'auto' and doc['config'].get('sdxl_config'))
+    if not gpu_enabled:
         resource.setrlimit(resource.RLIMIT_AS,(12*1024**3,12*1024**3))
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
     from tralens.devui.server import Config,execute_job

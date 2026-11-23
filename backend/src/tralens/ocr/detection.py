@@ -109,6 +109,94 @@ class OCR(GroupingMixin, ReviewMixin):
             images_text_box.append(text_boxes)
         return images_text_box
 
+    def _short_reading_alternates(self, image, boxes):
+        """Retain two agreeing local reads for a short, low-confidence vertical line."""
+        import re
+        if image is None or not getattr(self, 'ocr', None):
+            return
+        h,w = image.shape[:2]
+        trials = 0
+        for box in tuple(boxes):
+            x,y,r,b = box.bbox
+            if (trials >= 8 or box.confidence >= .6 or not re.fullmatch(r'[ぁ-ゖァ-ヺー]{2,6}',box.text)
+                    or b-y < 1.5*(r-x) or not 5 <= r-x <= 128 or b-y > 256):
+                continue
+            trials += 1
+            reads = []
+            for pad in (0,6):
+                view = image[max(0,y-pad):min(h,b+pad+1),max(0,x-pad):min(w,r+pad+1)]
+                try:
+                    page, = self.ocr.predict(view)
+                    text, = page['rec_texts']
+                    score, = page['rec_scores']
+                except (ValueError, KeyError, TypeError, RuntimeError):
+                    break
+                if score <= box.confidence or not re.fullmatch(r'[ぁ-ゖァ-ヺー]{2,6}',text):
+                    break
+                reads.append(text)
+            if len(reads)==2 and reads[0]==reads[1] and reads[0]!=box.text:
+                box.ocr_metadata['corroborated_short_reading'] = reads[0]
+                self._adjacent_short_column(image, boxes, box)
+
+    def _adjacent_short_column(self, image, boxes, anchor):
+        """Verify an adjacent OCR digit that may be a misread Japanese character."""
+        import re
+        import numpy as np
+        x,y,r,b = anchor.bbox
+        width,height = r-x,b-y
+        left,top = max(0,x-round(1.6*width)),max(0,y-round(height/3))
+        right,bottom = min(image.shape[1],r+width+1),min(image.shape[0],b+round(height/3)+1)
+        neighbors = [other for other in boxes if len(other.text)==1 and other.text.isascii()
+            and other.text.isdigit() and other.confidence < .85 and abs(other.bbox[2]-x) <= .45*width
+            and abs(other.bbox[1]-y) <= .5*width]
+        if len(neighbors)!=1:
+            return
+        neighbor, = neighbors
+        view = image[top:bottom,left:right]
+        white = view.min(axis=2) >= 239
+        _, labels = cv2.connectedComponents(white.astype(np.uint8),connectivity=4)
+        def paper(bounds):
+            a,t,c,d = bounds
+            votes = labels[t-top:d-top+1,a-left:c-left+1].ravel()
+            if not len(votes):
+                return 0
+            counts = np.bincount(votes)
+            counts[0] = 0
+            winner = counts.argmax()
+            return winner if counts[winner] >= .55*len(votes) else 0
+        owner = paper(anchor.bbox)
+        if not owner:
+            return
+        candidates = []
+        for scale in (1,2):
+            try:
+                tile = view if scale==1 else cv2.resize(view,None,fx=2,fy=2)
+                page, = self.ocr.predict(tile)
+                matches = []
+                for word,score,poly in zip(page['rec_texts'],page['rec_scores'],page['rec_polys']):
+                    if score < .82 or not re.fullmatch(r'[一-鿿]',word):
+                        continue
+                    points = np.asarray(poly,dtype=float)/scale + [left,top]
+                    a,t = np.floor(points.min(axis=0)).astype(int)
+                    c,d = np.ceil(points.max(axis=0)).astype(int)
+                    overlap = max(0,min(c,neighbor.bbox[2])-max(a,neighbor.bbox[0]))*max(
+                        0,min(d,neighbor.bbox[3])-max(t,neighbor.bbox[1]))
+                    neighbor_area = (neighbor.bbox[2]-neighbor.bbox[0])*(neighbor.bbox[3]-neighbor.bbox[1])
+                    if (not (left <= a < c < right and top <= t < d < bottom)
+                            or overlap < .65*max(neighbor_area,(c-a)*(d-t)) or paper((a,t,c,d)) != owner
+                            or abs(t-y) > .5*width or c > x+.4*width):
+                        continue
+                    matches.append((word,(a,t,c,d)))
+                match, = matches
+                candidates.append(match)
+            except (ValueError, KeyError, TypeError, RuntimeError):
+                return
+        first,second = candidates
+        if first[0]!=second[0] or max(abs(a-b) for a,b in zip(first[1],second[1])) > max(3,width*.18):
+            return
+        neighbor.ocr_metadata['corroborated_short_reading'] = first[0]
+        neighbor.ocr_metadata['short_column_anchor'] = anchor.box_id
+
     def process_images(self, *, media_type=None, propose_units=False,
                        complementary_ownership=False, regroup_companions=False):
         if type(propose_units) is not bool:
@@ -137,6 +225,8 @@ class OCR(GroupingMixin, ReviewMixin):
         for text_boxes in images_text_boxes:
             image = cv2.imread(self.image_path) if text_boxes else None
             self.review_boxes(text_boxes, image, media_type=media)
+            if propose_units and identity.get("profile") == "v6_medium":
+                self._short_reading_alternates(image,text_boxes)
             grouping = (self._group_boxes_manga if media == MediaType.MANGA
                         else self._group_boxes_proximity)
             images_text_groups.append(grouping(text_boxes))

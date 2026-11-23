@@ -54,6 +54,40 @@ class _CountedRuntime:
         return self.provider.generate(**kwargs)
 
 
+def _translation_crop(image, image_hash, detections, unit):
+    """A bounded view around the original target. Neighboring lettering is context only."""
+    from PIL import Image
+    content = _read_image(image)
+    if hashlib.sha256(content).hexdigest() != image_hash:
+        raise SourceChanged('translation context source changed')
+    polygons = {row['source_id']:row['polygon'] for row in detections}
+    points = [point for member in unit.member_ids for point in polygons[member]]
+    xs, ys = zip(*points)
+    punctuation = ''
+    for row in detections:
+        # A separate punctuation column immediately left of a vertical line
+        # carries tone even when the OCR unit omits it. Do not import dialogue.
+        mark = row['text'].strip()
+        if (not mark or len(mark) > 8 or any(ch not in '…!?！？.' for ch in mark)
+                or not any(ch in '!?！？' for ch in mark)):
+            continue
+        px, py = zip(*row['polygon'])
+        gap = min(xs) - max(px)
+        overlap = min(max(ys),max(py)) - max(min(ys),min(py))
+        if 0 <= gap <= max(3, (max(px)-min(px))*.5) and overlap > .6*(max(py)-min(py)):
+            punctuation = mark
+            break
+    with Image.open(BytesIO(content)) as page:
+        pad = min(320, max(72, round(min(page.size)*.15)))
+        bounds = (max(0, int(min(xs))-pad), max(0, int(min(ys))-pad),
+                  min(page.width, int(max(xs))+pad+1), min(page.height, int(max(ys))+pad+1))
+        view = page.crop(bounds).convert('RGB')
+        view.thumbnail((768,768), Image.Resampling.LANCZOS)
+        stream = BytesIO()
+        view.save(stream, format='PNG')
+        return stream.getvalue(), bounds, punctuation
+
+
 def _read_image(path):
     if not path.is_file():
         raise ValueError("image must be an existing regular file")
@@ -395,7 +429,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 preferred_dialogue=crop_reading(unit)
             if unit.disposition == "preview" and preferred_dialogue is None:
                 state["strict_eligible_units"] += 1
-            elif translation_policy == 'coverage-first' and (preferred_dialogue is not None or not coverage.rejection_reasons(unit)):
+            elif translation_policy == 'coverage-first' and (not coverage.rejection_reasons(unit)
+                    or (preferred_dialogue is not None and unit.disposition == 'preview')):
                 reading_revision = preferred_dialogue.revision if preferred_dialogue else None
                 if ocr_refine is not None:
                     from ..ocr.quality_reread import preferred_reading
@@ -514,7 +549,9 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                         counted = _CountedRuntime(provider, state, max_attempts)
                         state["settings"]["provider"] = type(provider).__name__
                         translator = PreviewTranslator(counted, model=model, profile=capability,
-                            max_attempts=1, timeout=timeout, generation_options=options,single_rendition=True,terminology_units=units)
+                            max_attempts=1, timeout=timeout, generation_options=options,single_rendition=True,terminology_units=units,
+                            page_context=translation_context == "sound-effects",
+                            context_crop=lambda unit: _translation_crop(image,image_hash,state["ocr"]["raw_detections"][0],unit))
                     counted.record = record
                     def observe(event):
                         record["generation_evidence"].append(_retain_event(output,prefix,event))

@@ -1,5 +1,6 @@
 import unittest
 
+import cv2
 import numpy as np
 
 from tralens.rendering.aggressive import adjacent_ellipsis, light_dialogue_frame
@@ -29,6 +30,35 @@ class DialogueEdgeTests(unittest.TestCase):
         self.assertIsNotNone(light_dialogue_frame(crop,own,allowed))
         crop[12:14] = 0
         self.assertIsNone(light_dialogue_frame(crop,own,allowed))
+
+    def test_divider_next_to_round_balloon_does_not_claim_the_panel(self):
+        crop = np.full((120, 160, 3), 255, np.uint8)
+        cv2.ellipse(crop, (80, 62), (43, 44), 0, 0, 360, (0, 0, 0), 2)
+        crop[108:110] = 0
+        own = np.zeros(crop.shape[:2], bool)
+        own[79:94, 68:92] = True
+        allowed = np.ones_like(own)
+        frame = light_dialogue_frame(crop, own, allowed, enclosed=True)
+        self.assertTrue(frame[62, 80])
+        self.assertFalse(frame[108, 80] or frame[62, 12])
+        crop.fill(255)
+        cv2.rectangle(crop, (30, 17), (130, 106), (0, 0, 0), 2)
+        self.assertIsNone(light_dialogue_frame(crop, own, allowed, enclosed=True))
+
+    def test_enclosed_retry_uses_paper_around_source_and_respects_obstacles(self):
+        crop = np.zeros((90, 150, 3), np.uint8)
+        crop[10:80, 10:140] = 255
+        own = np.zeros(crop.shape[:2], bool)
+        own[35:55, 55:95] = True
+        allowed = np.ones_like(own)
+        crop[24, 35:37] = 238
+        allowed[24, 36] = False
+        crop[30, 35] = 0
+        frame = light_dialogue_frame(crop, own, allowed, enclosed=True)
+        self.assertTrue(frame[24, 35])
+        self.assertFalse(frame[24, 36] or frame[30, 35] or frame[8, 60])
+        crop[:10, 60] = 255
+        self.assertIsNone(light_dialogue_frame(crop, own, allowed, enclosed=True))
 
     def test_math_sign_requires_real_font_coverage(self):
         from tralens.rendering.natural import validate_text

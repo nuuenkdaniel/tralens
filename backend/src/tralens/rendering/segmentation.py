@@ -1,7 +1,7 @@
 """Opt-in source-bound learned masks and phase-locked repair. No acquisition.
 
-CTD probabilities are evidence, never an erasure rectangle. All selected native
-components are retained whole; unselected source/art remains a layout obstacle.
+CTD probabilities guide association with whole native components. Auto can also
+separate a terminal sign glyph at a measured rule during flat native cleanup.
 The model is explicit and digest-pinned. No upstream Python is imported. Native
 association/repair are independently implemented; checkpoint rights remain a
 separate deployment question. Without the model option, routing is unchanged.
@@ -139,7 +139,7 @@ def periodic_surface(pixels, known):
 
 
 def derive(rgb, detections, member_ids, probability, *, surface='flat', source_fraction=.75,
-           semantic_fraction=.5, allow_tight_source_seed=False):
+           semantic_fraction=.5, allow_tight_source_seed=False, sign_text=None):
     """Build an experimental automatic plan from whole original residual strokes."""
     n.require(rgb.mode == 'RGB' and isinstance(probability, np.ndarray)
         and probability.shape == (rgb.height, rgb.width) and probability.dtype == np.uint8,
@@ -320,6 +320,16 @@ def derive(rgb, detections, member_ids, probability, *, surface='flat', source_f
             derivation = dict(method='original_connected_free_space', rectangle_pixels=old_pixels,
                               connected_pixels=int(free.sum()), original_derivation=derivation,
                               window_unchanged=True, source_clearance_discarded=0)
+    extra = None
+    if surface == 'flat' and sign_text and rejected:
+        from .sign_cleanup import attached_ink
+        extra = attached_ink(pixels, foreground, member, dilate(nonmember, 2), color, sign_text)
+        if extra is not None:
+            # Keep placement on its already checked layout. Only the extra
+            # glyph pixels gain erase permission, up to the border's inner edge.
+            full_fg[top:bottom, left:right] |= extra
+            full_erase[top:bottom, left:right] |= extra
+            obstacles[top:bottom, left:right] &= ~extra
     evidence = dict(policy=POLICY, surface=background, source_fraction=source_fraction,
         background_rgb_at_center=np.median(predicted[member], axis=0).tolist(),
         semantic_fraction=semantic_fraction, selected_components=len(chosen), faint_components=len(faint),
@@ -329,6 +339,10 @@ def derive(rgb, detections, member_ids, probability, *, surface='flat', source_f
         layout_bounds=bounds, layout_derivation=derivation, layout_expansion_tests=steps,
         local_bounds=[left, top, right, bottom], native_mask='whole residual components, no rectangle erasure',
         uncertainty='machine source-local hypothesis; not semantic certification or recovery of unique hidden art')
+    if extra is not None:
+        evidence.update(border_attached_ink_pixels=int(extra.sum()),
+                        foreground_pixels=int(full_fg.sum()), erase_pixels=int(full_erase.sum()),
+                        native_mask='source components plus terminal strokes separated at a straight rule')
     return a.AutomaticPlan(full_fg, full_erase, layout, obstacles,
         background.get('background_rgb'), evidence,
         restored_pixels=predicted[erase].copy() if surface == 'periodic' else None)

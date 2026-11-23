@@ -35,6 +35,14 @@ class AutomaticSkip(ValueError):
         super().__init__(message)
 
 
+def retained_artwork(record):
+    outcomes = (record.get('result') or {}).get('outcomes') or []
+    return (record['status'] == 'abstained' and not record.get('luna_review_error')
+            and record.get('luna_first_decision', {}).get('category', 'artwork') == 'artwork'
+            and len(outcomes) == 1
+            and outcomes[0].get('reasons') in (['visual_non_text'], ('visual_non_text',)))
+
+
 def check(condition, code, message, evidence=None):
     if not condition:
         raise AutomaticSkip(code, message, evidence)
@@ -338,7 +346,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent.resolve()/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'font_faces.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'source_support.py', 'source_extents.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'outlined_sound_cleanup.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/crop_readings.py', '../ocr/upright_latin.py', '../ocr/sound_readings.py', '../ocr/outlined_sounds.py', '../ocr/sideways_sound.py', '../ocr/display_readings.py', '../ocr/ink_groups.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
+                       for name in ('automatic.py', 'natural.py', 'font_faces.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'source_support.py', 'source_extents.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'printed_contours.py', 'outlined_sound_cleanup.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/crop_readings.py', '../ocr/upright_latin.py', '../ocr/sound_readings.py', '../ocr/outlined_sounds.py', '../ocr/handwritten.py', '../ocr/sideways_sound.py', '../ocr/display_readings.py', '../ocr/ink_groups.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
 
 
 def _report_html(report):
@@ -404,17 +412,6 @@ def _report_html(report):
     return (head+''.join(rows)+'</html>').encode()
 
 
-def _options(min_size, max_size, max_units, background_method, render_policy='best-effort',
-             replacement_policy='all', min_ocr_confidence=None):
-    n.integer(min_size, 8, 144)
-    n.integer(max_size, min_size, 144)
-    if max_units is not None:
-        n.integer(max_units, 1, MAX_SLOTS)
-    n.require(type(background_method) is str and background_method in ('auto', 'flat'), 'unknown background method')
-    n.require(type(render_policy) is str and render_policy in ('best-effort', 'conservative'), 'unknown rendering policy')
-    return rc.settings(replacement_policy, min_ocr_confidence)
-
-
 def _font(fonts_doc, font_id):
     available = n.load_fonts(fonts_doc)
     if font_id is None:
@@ -437,14 +434,16 @@ def cleanup_settings(policy, render_policy, confidence_settings):
               'localized cleanup requires best-effort rendering and confidence-gated replacement')
 
 
-def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical', reconstruction_config=None):
-    """Check rendering prerequisites before upstream inference, without a preview.
-
-    This is not erase permission: run_automatic still validates the complete saved
-    preview, source bindings, geometry, typography and actual output pixels.
-    """
-    confidence_settings = _options(min_size, max_size, max_units, background_method, render_policy,
-                                   replacement_policy, min_ocr_confidence)
+def _render_policies(min_size, max_size, max_units, background_method, render_policy, replacement_policy,
+                     min_ocr_confidence, layout_policy, cleanup_policy, visibility_policy, removal_policy,
+                     reconstruction_policy, reconstruction_config):
+    n.integer(min_size, 8, 144)
+    n.integer(max_size, min_size, 144)
+    if max_units is not None:
+        n.integer(max_units, 1, MAX_SLOTS)
+    n.require(type(background_method) is str and background_method in ('auto', 'flat'), 'unknown background method')
+    n.require(type(render_policy) is str and render_policy in ('best-effort', 'conservative'), 'unknown rendering policy')
+    confidence_settings = rc.settings(replacement_policy, min_ocr_confidence)
     layout_settings(layout_policy, render_policy, confidence_settings)
     cleanup_settings(cleanup_policy, render_policy, confidence_settings)
     from .visible_translations import settings as visibility_settings
@@ -452,6 +451,19 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
     from . import aggressive, reconstruction
     aggressive.settings(removal_policy,reconstruction_policy,reconstruction_config)
     reconstruction_spec = reconstruction.configuration(reconstruction_config,reconstruction_policy) if reconstruction_policy!='classical' else None
+    return confidence_settings, reconstruction_spec
+
+
+def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical', reconstruction_config=None):
+    """Check rendering prerequisites before upstream inference, without a preview.
+
+    This is not erase permission: run_automatic still validates the complete saved
+    preview, source bindings, geometry, typography and actual output pixels.
+    """
+    confidence_settings, reconstruction_spec = _render_policies(
+        min_size, max_size, max_units, background_method, render_policy, replacement_policy,
+        min_ocr_confidence, layout_policy, cleanup_policy, visibility_policy, removal_policy,
+        reconstruction_policy, reconstruction_config)
     image, fonts = Path(image).absolute(), Path(fonts).absolute()
     content = n.read_explicit(image, 32*1024*1024)
     font_manifest = n.read_explicit(fonts, 256*1024)
@@ -485,15 +497,11 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
 
 def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', plan_localization=False, visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical', reconstruction_config=None):
     """All current strict translated candidates, with explicit machine skip states."""
-    confidence_settings = _options(min_size, max_size, max_units, background_method, render_policy,
-                                   replacement_policy, min_ocr_confidence)
-    layout_settings(layout_policy, render_policy, confidence_settings)
-    cleanup_settings(cleanup_policy, render_policy, confidence_settings)
-    from . import visible_translations
-    visible_translations.settings(visibility_policy)
-    from . import aggressive, reconstruction
-    aggressive.settings(removal_policy,reconstruction_policy,reconstruction_config)
-    reconstruction_spec = reconstruction.configuration(reconstruction_config,reconstruction_policy) if reconstruction_policy!='classical' else None
+    from . import aggressive, reconstruction, visible_translations
+    confidence_settings, reconstruction_spec = _render_policies(
+        min_size, max_size, max_units, background_method, render_policy, replacement_policy,
+        min_ocr_confidence, layout_policy, cleanup_policy, visibility_policy, removal_policy,
+        reconstruction_policy, reconstruction_config)
     n.require(type(plan_localization) is bool, 'localization planning needs explicit boolean enablement')
     if plan_localization:
         cleanup_settings('localized', render_policy, confidence_settings)
@@ -508,7 +516,9 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
               not any(path.is_symlink() for path in (output, *output.parents)), 'automatic output must be fresh without symlinks')
     paths, contents, preview_doc, fonts_doc, rgb, source = p._sources(preview, image, fonts)
     raw = preview_doc['ocr']['raw_detections'][0]
-    n.require(type(raw) is list and 1 <= len(raw) <= 512, 'automatic raw detection budget')
+    n.require(type(raw) is list and len(raw) <= 512 and (len(raw)>0 or not preview_doc['units']), 'automatic raw detection budget')
+    outlines = {d['source_id']:d.get('ocr_metadata',{}).get('outline_reading',{})
+                for d in raw if d.get('reason')=='corroborated_outline_reading'}
     pixels = rgb.width*rgb.height
     n.budget_check(pixels*len(raw) <= MAX_WORK, 'automatic binding raster work budget')
     # Explicit machine binding contract; there is no geometry_intent, reviewed
@@ -521,11 +531,14 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     faces = ApprovedFaces(fonts_doc, font_id)
     style = {'min_size': min_size, 'max_size': max_size, 'outline': 0}
     candidates = preview_doc['ocr'].get('automatic_recognition_results', [])
-    units = n.automatic_units(preview_doc['ocr']['batches'][0], candidates[0] if candidates else ())
+    units = n.automatic_units(preview_doc['ocr']['batches'][0], candidates[0] if candidates else ()) if raw else ()
+    from ..ocr.crop_readings import confirms_raw
+    crop_records = {item['proposal_id']: item for item in preview_doc['ocr'].get('crop_readings', {}).get('records', [])}
+    proposals = {p['proposal_id']: p for p in preview_doc['ocr']['batches'][0]['proposals']} if raw else {}
     from ..translation.context import saved_requests
-    contextual = saved_requests(preview_doc, units)
+    contextual = saved_requests(preview_doc, units) if units else {}
     localized = {};extent_records={};extents={}
-    if cleanup_policy != 'native':
+    if raw and cleanup_policy != 'native':
         from . import localized_strokes
         localized = localized_strokes.saved_records(preview_doc, rgb, raw, units)
         extent_records={uid:row for uid,row in localized.items() if row.get('crop_kind')=='extent'}
@@ -633,6 +646,13 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                    'structural_reasons': list(unit.structural_reasons), 'lexical_reasons': list(unit.lexical_reasons),
                    'blocked_reasons': list(unit.blocked_reasons),
                    'translation_review_needed': review_needed if type(review_needed) is bool else None}}
+        if (record['status'] == 'abstained' and unit.selected.origin=='raw_main_reading'
+                and unit.selected.text.isascii() and any(c.isalnum() for c in unit.selected.text)):
+            row['original_label_retained'] = True
+        if retained_artwork(record):
+            row['original_artwork_retained'] = True
+        if type(record.get('luna_page_order')) is int:
+            row['reading_order'] = record['luna_page_order']
         row['input_kind'] = record.get('input_kind', 'strict_utterance')
         report['units'][index] = row
         is_coverage = row['input_kind'] == tc.KIND
@@ -652,6 +672,20 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 binding = n.strict_result_binding(record, unit, request=contextual.get(unit.unit_id))
                 eligible += 1
             row.update(machine_selected=True, binding=binding)
+            if (is_coverage and removal_policy == 'aggressive' and not binding.get('reread_selected_revision')
+                    and not (preview_doc['settings'].get('profile') in ('page', 'panel', 'atlas', 'reviewed')
+                        and (record.get('luna_decision') or {}).get('category') == 'translation'
+                        and record['luna_decision'].get('source', '').strip())
+                    and unit.selected.origin == 'raw_main_reading'):
+                assessment = rc.assess_source(unit, binding['text'], rc.DEFAULT_MINIMUM)
+                if (assessment['reason_code'] in ('replacement_low_ocr_confidence', 'replacement_confidence_unavailable')
+                        and not confirms_raw(crop_records.get(unit.unit_id), unit, proposals[unit.unit_id], rgb)):
+                    row['replacement_confidence'] = assessment
+                    raise AutomaticSkip('uncorroborated_source', 'Weak OCR without a corroborated reading. Preserve the artwork.')
+            if len(unit.member_ids)==1 and unit.member_ids[0] in outlines:
+                angle = float(outlines[unit.member_ids[0]].get('angle',0))
+                if np.isfinite(angle) and abs(angle)<=15:
+                    row['effect_style'] = {'rotation':angle,'fill':[255]*3,'outline_fill':[0]*3,'outline':2}
             if visibility_policy == 'always-show' and binding['text'] == unit.selected.text:
                 raise AutomaticSkip('replacement_unchanged_text', 'Target exactly matches source; intentionally keep original text.')
             if ((confidence_settings is not None or visibility_policy == 'always-show')
@@ -718,7 +752,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 unit_style = {**style, 'fill': fill, 'outline': 1, 'outline_fill': outline}
                 row['text_contrast'] = {'fill': fill, 'outline_fill': outline, 'background_luminance_estimate': luminance}
             layer, provenance, content = typography.layout_dialogue(binding['text'], font_data, coverage,
-                Image.fromarray(plan.layout.astype(np.uint8)*255), unit_style)
+                Image.fromarray(plan.layout.astype(np.uint8)*255), {**unit_style,**row.get('effect_style',{})})
             if confidence_settings is not None:
                 reason = rc.layout_rejection(provenance, min_size)
                 check(reason is None, 'replacement_layout_confidence', reason)
@@ -825,9 +859,16 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                         extra_work = pixels*len(row['binding']['member_ids'])
                         n.budget_check(work+extra_work <= MAX_WORK, 'best-effort native raster budget')
                         work += extra_work
-                        plan = best_effort.native_plan(rgb, raw, row['binding']['member_ids'],
-                            reserved=None if confidence_settings is not None else reserved,
-                            allow_tight_source_seed=confidence_settings is not None)
+                        plan = None
+                        if (reconstruction_policy == 'auto' and
+                                'punctuated_horizontal_heading' in row['source_uncertainty']['structural_reasons']):
+                            from .banner import flat_plan
+                            plan = flat_plan(rgb, raw, row['binding']['member_ids'])
+                        if plan is None:
+                            plan = best_effort.native_plan(rgb, raw, row['binding']['member_ids'],
+                                reserved=None if confidence_settings is not None else reserved,
+                                allow_tight_source_seed=confidence_settings is not None,
+                                recover_sign=reconstruction_policy == 'auto')
                         if confidence_settings is not None:
                             plan = reserve_layout(plan, reserved)
                         method = plan.evidence['cleanup_method']
@@ -861,7 +902,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     n.require(background is not None, 'best-effort contrast estimate unavailable')
                     light = float(np.dot(background, [.2126, .7152, .0722])) < 128
                     fill = [255, 255, 255] if light else [0, 0, 0]
-                    fallback_style = {**style, 'fill': fill, 'outline_fill': [255-v for v in fill], 'outline': 1}
+                    fallback_style = {**style, 'fill': fill, 'outline_fill': [255-v for v in fill], 'outline': 1, **row.get('effect_style',{})}
                     if layout_policy == 'enclosed-retry' and plan.restored_pixels is None and plan.background is not None:
                         layout_retry_plans[i] = PackedPlan(plan)
                     try:
@@ -1165,7 +1206,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         report['units'],clean,text,composite,erase_union,layout_union,final_artifacts,report['removal_summary'] = replacement.finish(
             rgb,raw,report['units'],clean,text,erase_union,layout_union,*faces.primary,style,font_resolver=faces.resolve,
             probability=text_mask.raw if text_mask is not None else None,source=source,backend=backend,
-            budget=reconstruction.Budget(maximum_calls=4,maximum_seconds=240 if reconstruction_policy=="sdxl" else 40),extents=extents)
+            budget=reconstruction.Budget(maximum_calls=4,maximum_seconds=240 if reconstruction_policy in ("auto", "sdxl") else 40),extents=extents)
         recovery_artifacts.update(final_artifacts)
         from . import outlined_sound_cleanup
         clean, text, joint_repairs = outlined_sound_cleanup.finish(rgb,clean,text,layout_union,erase_union,raw,units,

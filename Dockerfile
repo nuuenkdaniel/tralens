@@ -1,8 +1,9 @@
+# syntax=docker/dockerfile:1
 FROM ghcr.io/astral-sh/uv:0.13.9 AS uv
 FROM python:3.10-slim-bookworm
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libgl1 libglib2.0-0 libgomp1 libraqm0 poppler-utils util-linux \
+    && apt-get install -y --no-install-recommends ca-certificates libgl1 fonts-dejavu-core libglib2.0-0 libgomp1 libraqm0 poppler-utils util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -13,10 +14,13 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 
-COPY --from=uv /uv /bin/uv
-COPY pyproject.toml uv.lock README.md LICENSE ./
-RUN uv sync --locked --no-dev --group inpainting --python /usr/local/bin/python
+COPY pyproject.toml uv.lock README.md LICENSE THIRD_PARTY_NOTICES.md PRIVACY.md ./
+RUN --mount=type=bind,from=uv,source=/uv,target=/bin/uv \
+    uv sync --locked --no-dev --group inpainting --python /usr/local/bin/python
 RUN python -c "import paddle; from PIL import features; assert features.check_feature('raqm')"
+COPY deploy/ deploy/
+RUN python deploy/font-manifest.py \
+    && dpkg-query -W -f='${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n' > /app/debian-sources.tsv
 COPY backend/ backend/
 COPY frontend/web/ frontend/web/
 

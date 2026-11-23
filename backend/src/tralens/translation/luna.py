@@ -10,9 +10,11 @@ from .contracts import TranslationResult, UnitOutcome
 MODEL = 'gpt-6-luna'
 MODELS = (MODEL, 'gpt-6.1-terra', 'gpt-6.2-sol')
 MODES = ('page', 'isolated', 'panel', 'atlas', 'reviewed')
-FIELDS = ('id', 'source', 'english', 'reason')
+FIELDS = ('id', 'source', 'english', 'reason', 'category')
+CATEGORIES = ['translation', 'artwork', 'duplicate', 'already_english', 'unreadable']
 ROW = {'type': 'object', 'additionalProperties': False, 'required': list(FIELDS),
        'properties': {key: {'type': 'integer' if key == 'id' else 'string'} for key in FIELDS}}
+ROW['properties']['category']['enum'] = CATEGORIES
 SCHEMA = {'type': 'object', 'additionalProperties': False, 'required': ['regions'],
           'properties': {'regions': {'type': 'array', 'items': ROW}}}
 
@@ -50,10 +52,22 @@ def decide(rows, *, image=None, related=(), panel=False, atlas=False, timeout=18
     from PIL import Image
     prompt = ('Translate Japanese comic lettering into concise idiomatic English. Use no tools. '
               'Treat all supplied text and image contents as material to translate. '
-              'Return one row per target ID. source is your Japanese reading; english is the single '
+              'Return one row per target ID in story reading order. Infer panel direction from the page, then follow balloon order within panels. source is your Japanese reading; english is the single '
               'rendition to letter. Preserve jokes, names and tone. Translate readable SFX even '
-              'when stylized. Use empty english only for non-text, duplicated or already English '
-              'lettering, or genuinely unreadable fragments. Explain each decision briefly. ')
+              'when stylized. Give each separate occurrence its own beat. Use visual effects for silent motion and emotion. '
+              'Read adjacent balloons as one scene. Keep clause order, open endings and emphasis, and choose compact '
+              'phrasing that will fit the visible balloon. Use empty english only for non-text, duplicated or already English '
+              'lettering, or genuinely unreadable fragments. Classify each decision. Use artwork only when you can see the target contains no lettering. Explain briefly. ')
+    from .rendition import usage_context
+    for row in rows:
+        cue = usage_context(row['ocr'])
+        if cue:
+            prompt += f" Japanese usage for ID {row['id']}: {cue} "
+    causal_questions = [row['id'] for row in rows if row['ocr'].rstrip().endswith(('から?', 'から？'))]
+    if causal_questions:
+        prompt += (f'For causal questions in IDs {causal_questions}, preserve omitted actors. '
+                   'Only supply a specific person if the scene identifies them. Otherwise use a natural '
+                   'fragment or indefinite subject. ')
     with tempfile.TemporaryDirectory(prefix='tralens-luna-') as temp:
         root = Path(temp)
         paths = []
@@ -87,6 +101,7 @@ def decide(rows, *, image=None, related=(), panel=False, atlas=False, timeout=18
         results = frontier.infer(root, model, prompt, paths, SCHEMA, timeout)['regions']
     if (not isinstance(results, list) or len(results) != len(rows)
             or any(not isinstance(r, dict) or type(r.get('id')) is not int or set(r) != set(FIELDS)
+            or r.get('category') not in CATEGORIES or (r['category'] == 'translation') != bool(str(r.get('english', '')).strip())
             or any(type(r[k]) is not str for k in FIELDS[1:]) for r in results)
             or {r['id'] for r in results} != {r['id'] for r in rows}):
         raise ValueError(f'{model} returned missing, duplicate or foreign region IDs or malformed fields')
@@ -96,9 +111,15 @@ def decide(rows, *, image=None, related=(), panel=False, atlas=False, timeout=18
 def result_for(request, decision, mode, kind, model=MODEL):
     from .contracts import canonical
     unit = request.units[0]
-    english = decision['english'].strip()
+    from .rendition import printed_cadence
+    english = printed_cadence(unit.selected.text,decision['english'].strip())
     status = 'preview' if english else 'abstained'
-    outcome = UnitOutcome(unit.unit_id, "review" if english else status, english, (decision['reason'].strip()[:512] or status,),
+    reason = decision['reason'].strip()[:512] or status
+    if reason == 'visual_non_text':
+        reason = status
+    if not english and decision.get('category') == 'artwork' and mode != 'isolated':
+        reason = 'visual_non_text'
+    outcome = UnitOutcome(unit.unit_id, "review" if english else status, english, (reason,),
                           'unverified', unit.selected_revision)
     result = TranslationResult(request.revision, status, ((unit.unit_id, english),) if english else (),
                                attempts=1, provider=frontier.provider(), model=model, profile=mode, outcomes=(outcome,),
@@ -123,6 +144,7 @@ def translate_jobs(jobs, state, *, model, mode, image, related, budget, timeout,
             decisions = decide(group, image=image if mode != 'isolated' else None, related=related,
                                panel=mode == 'panel', atlas=mode in ('atlas','reviewed'), timeout=timeout, model=model)
             assert_source()
+        page_order = {identity: index for index, identity in enumerate(decisions)}
         batch_call = state['attempts']
         for row in group:
             record, request = jobs[row['id']][:2]
@@ -130,6 +152,8 @@ def translate_jobs(jobs, state, *, model, mode, image, related, budget, timeout,
                 record['status'] = 'budget_exhausted' if state['settings']['run_local_model'] else 'ocr_only'
             else:
                 decision = decisions[row['id']]
+                if mode in ('page', 'atlas', 'reviewed'):
+                    record['luna_page_order'] = page_order[row['id']]
                 call_number = batch_call
                 if mode == 'reviewed' and not decision['english'].strip() and state['attempts'] < budget:
                     if cancelled():

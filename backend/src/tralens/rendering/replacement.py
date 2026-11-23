@@ -243,13 +243,13 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
     protected=erase | (np.asarray(text.getchannel('A'))!=0)
     clearance=p.dilate(protected,2)
     initial=protected.copy();before_text=np.asarray(text).copy();before_plate=plate.copy()
-    geometry=aggressive.Geometry(raw,rgb.size)
+    geometry=aggressive.Geometry(raw,rgb.size,original)
     members={aggressive_key(m) for row in rows if row['status']=='automatic_composed'
         for m in row.get('binding',{}).get('member_ids',[])}
     summary={'policy':POLICY,'protection_policy':aggressive.PROTECTION_POLICY,'attempted':0,'removed':0,'placed':0,'unresolved':0,'work_pixels':0,
         'layout_work_pixels':0}
     cleaned_here=set()
-    artifacts={};budget=budget or rec.Budget();backend_error=None;extents=extents or {}
+    artifacts={};budget=budget or rec.Budget();backend_errors={};extents=extents or {}
     summary.update(learned_calls=0,learned_failures=0,learned_seconds=0.,selected_learned=0,
         limits={'learned_calls':budget.maximum_calls,'learned_seconds':budget.maximum_seconds})
     for i,row in enumerate(rows):
@@ -272,46 +272,70 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
             x,y,r,b=bounds;crop=original[y:b,x:r]
             n.budget_check(summary['work_pixels']+own.size<=MAX_WORK,'removal fallback work budget')
             summary['work_pixels']+=own.size
+            from ..ocr.handwritten import stroke_masks
+            handwriting = (stroke_masks(original,bounds,geometry.raw[next(iter(ids))],own,obstacle)
+                           if len(ids)==1 else None)
             mask=extent(crop,own,obstacle)
             prefix=f'recovery-final-{i:03d}'
-            if probability is not None:
+            if handwriting is not None:
+                core,halo = handwriting
+                mask = halo if backend is not None else core
+                entry['support_evidence'] = {'policy':'outlined_handwriting'}
+            elif probability is not None:
                 try:
                     mask,entry['support_evidence']=source_support.derive(crop,own,obstacle,probability[y:b,x:r])
                 except ValueError as error:
                     entry['support_failure']=str(error)
-            if refinement:
+            if refinement and handwriting is None:
                 mask=source_extents.apply(mask,refinement,bounds,obstacle)
                 entry['cleanup_extent']=refinement
             n.require(mask.any(),'source fully overlaps protected output')
             candidate,method=aggressive.cheap(crop,mask,obstacle)
-            if (method=='classical_telea_unverified' and ('support_evidence' in entry or refinement is not None)
-                    and source is not None and backend is not None and backend_error is None
+            if handwriting is not None:
+                candidate = crop.copy()
+                candidate[core] = 255
+                method = 'outlined_handwriting_fill'
+            if ((backend is None or backend.config.get('backend')=='auto') and method=='classical_telea_unverified'
+                    and entry.get('support_evidence',{}).get('painted_stroke_support')):
+                painted = source_support.painted_stroke_fill(crop,mask,obstacle,slanted=True)
+                if painted is not None:
+                    candidate,method = painted,'local_painted_strokes'
+            selected = rec.region_backend(backend,crop,mask)
+            if (method in ('classical_telea_unverified','outlined_handwriting_fill') and ('support_evidence' in entry or refinement is not None)
+                    and source is not None and selected is not None and selected.config.get('backend') not in backend_errors
                     and max(crop.shape[:2])<=512 and budget.available()):
                 # Fresh inference on the CURRENT support, after earlier edits have
                 # been protected. Do not recycle rejected broad-mask candidates.
                 inference=mask
-                if probability is not None:
+                if probability is not None and handwriting is None:
                     inference,entry['inference_context']=source_support.inference_context(mask,probability[y:b,x:r])
                 request=rec.request(source,row['binding'],bounds,crop,inference,mask,obstacle,
-                    attempt=0,model=rec.model_identity(backend.config))
+                    attempt=0,model=rec.model_identity(selected.config))
                 artifacts[prefix+'-request.json']=rec.canonical(request).encode()
                 artifacts[prefix+'-inference-mask.png']=Image.fromarray(inference.astype(np.uint8)*255)
                 artifacts[prefix+'-protected-mask.png']=Image.fromarray(obstacle.astype(np.uint8)*255)
-                budget.calls+=1;summary['learned_calls']+=1;clock=time.monotonic()
+                previous_calls=budget.calls;budget.calls+=1;clock=time.monotonic()
                 try:
-                    result=backend.reconstruct(request,crop,inference,mask,obstacle,
+                    result=selected.reconstruct(request,crop,inference,mask,obstacle,
                         timeout=min(request['limits']['seconds'],max(.1,budget.maximum_seconds-budget.seconds)))
+                    request,inference,result = rec.review_outline(backend,request,result,crop,inference,mask,obstacle,
+                        budget,clock + budget.maximum_seconds - budget.seconds)
+                    if result.get('outline_review', {}).get('selected') == 'lama-onnx-512':
+                        artifacts[prefix+'-request.json']=rec.canonical(request).encode()
+                        artifacts[prefix+'-inference-mask.png']=Image.fromarray(inference.astype(np.uint8)*255)
                     candidate=rec.compose(request,crop,inference,mask,obstacle,result)
                     artifacts[prefix+'-backend.png']=Image.fromarray(result['pixels'])
                     entry['backend_result']={k:v for k,v in result.items() if k!='pixels'}
                     entry['request_revision']=request['revision']
-                    method='source_supported_sdxl' if backend.config.get('backend')=='sdxl-inpaint' else 'source_supported_lama'
+                    method='source_supported_sdxl' if request['model'].get('backend')=='sdxl-inpaint' else 'source_supported_lama'
                     summary['selected_learned']+=1
                 except rec.BindingError:raise
                 except Exception as error:
                     backend_error=type(error).__name__+': '+str(error)[:1000]
+                    backend_errors[selected.config.get('backend')]=backend_error
                     entry['learned_failure']=backend_error;summary['learned_failures']+=1
                 finally:
+                    summary['learned_calls']+=budget.calls-previous_calls
                     seconds=time.monotonic()-clock;budget.seconds+=seconds;summary['learned_seconds']+=seconds
             if method=='classical_telea_unverified' and refinement is None:
                 outlined_source=outlined_ink(crop,mask)
@@ -326,11 +350,15 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
                     completion=complete_color_ink(crop,own,mask,obstacle)
                     if completion is not None:
                         mask,entry['color_ink_completion']=completion
-                ring=p.dilate(mask,4)&~mask&~obstacle
-                samples=crop[ring] if ring.any() else crop[own]
-                color=np.median(samples,axis=0).astype(np.uint8)
-                candidate=crop.copy();candidate[mask]=color
-                method='local_surface_occlusion'
+                painted = source_support.painted_stroke_fill(crop,mask,obstacle) if 'support_evidence' in entry else None
+                if painted is not None:
+                    candidate,method = painted,'local_painted_strokes'
+                else:
+                    ring=p.dilate(mask,4)&~mask&~obstacle
+                    samples=crop[ring] if ring.any() else crop[own]
+                    color=np.median(samples,axis=0).astype(np.uint8)
+                    candidate=crop.copy();candidate[mask]=color
+                    method='local_surface_occlusion'
             # Do not adopt discarded learned cleanplates merely because their
             # bindings are valid. Visual trials showed copied/hallucinated type;
             # candidate artifacts remain available without becoming an oracle.
@@ -355,7 +383,20 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
             frame=(x+sx-ax,y+sy-ay,x+sx+sw-ax,y+sy+sh-ay)
             colored = np.mean(np.ptp(crop,axis=2)>24) >= .2
             outlined = False
-            if colored:
+            if entry.get('support_evidence',{}).get('painted_stroke_support') and not style.get('rotation'):
+                try:
+                    local = blocked[y-ay:b-ay,x-ax:r-ax]
+                    tile,proof,_ = aggressive.slanted_layout(row['binding']['text'],font_data,coverage,own,local,style)
+                    box = tile.getchannel('A').getbbox()
+                    layer = tile.crop(box)
+                    xy = (x-ax+box[0],y-ay+box[1])
+                    outlined = True
+                    entry['placement_frame'] = 'original_slanted_lettering'
+                except n.ResourceLimit:
+                    raise
+                except ValueError:
+                    pass
+            if colored and not outlined:
                 try:
                     layer,xy,proof=patch_layout(row['binding']['text'],font_data,coverage,
                         frame,blocked,{**style,'fill':[255-surface]*3,'outline_fill':[surface]*3},outline=2)
@@ -396,6 +437,23 @@ def finish(rgb, raw, rows, clean, text, erase, layout, font_data, coverage, styl
             px,py=xy;px+=ax;py+=ay;h,w=layer.height,layer.width
             # The source commit above always survives. On painted backgrounds
             # a contrasting outline leaves the space between English glyphs visible.
+            if not outlined:
+                landing = plate[py:py+h, px:px+w]
+                different = landing.min(2) < 240 if surface else landing.max(2) > 15
+                # Keep a solid backing for multiline captions on busy artwork.
+                # Lines showing through the leading can read as strike-through.
+                gray = cv2.cvtColor(landing, cv2.COLOR_RGB2GRAY)
+                busy_caption = '\n' in proof['draw_text'] and int(gray.max()) - int(gray.min()) > 64
+                if not busy_caption and different.mean() > .05:
+                    # Keep the successful tight fit. Its six-pixel padding leaves
+                    # room for a contrasting rim without moving any glyph.
+                    alpha = np.asarray(layer.getchannel('A'))
+                    rim = cv2.dilate(alpha, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+                    edged = Image.new('RGBA', layer.size, (surface, surface, surface))
+                    edged.putalpha(Image.fromarray(rim))
+                    edged.alpha_composite(layer)
+                    layer = edged
+                    outlined = True
             if not outlined:
                 plate[py:py+h,px:px+w]=surface;erase[py:py+h,px:px+w]=True
             text.alpha_composite(layer,dest=(px,py));layout[py:py+h,px:px+w]=True
