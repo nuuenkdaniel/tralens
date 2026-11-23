@@ -25,6 +25,38 @@ class RemovalFirst(unittest.TestCase):
         return replacement.finish(self.image,self.raw,rows or self.rows,self.image.copy(),
             Image.new('RGBA',self.image.size),mask,mask,self.font,self.coverage,self.style)
 
+    def test_short_effect_shifts_clear_of_neighbor_without_losing_ink(self):
+        polygon = Image.new('L',(160,100))
+        ImageDraw.Draw(polygon).polygon([(20,60),(124,22),(137,50),(33,88)],fill=255)
+        own = np.asarray(polygon) != 0
+        blocked = np.zeros_like(own)
+        style = {**self.style,'max_size':16}
+        def place():
+            return aggressive.slanted_layout('Coo!',self.font,self.coverage,own,blocked,style)
+        first,_,_ = place()
+        ys,xs = np.nonzero(np.asarray(first.getchannel('A')))
+        outer = xs.argmin()
+        blocked[ys[outer],xs[outer]] = True
+        layer,proof,content = place()
+        alpha = np.asarray(layer.getchannel('A')) != 0
+        self.assertIn('placement_adjustment',proof)
+        self.assertEqual(alpha.sum(),len(xs))
+        self.assertFalse((alpha & blocked).any())
+        self.assertFalse((alpha & (np.asarray(content)==0)).any())
+
+    def test_handwriting_placement_avoids_rule_on_clean_plate(self):
+        mask = Image.new('L',(200,120),255)
+        style = {**self.style,'max_size':18}
+        layer,proof = n.layout('Hello',self.font,self.coverage,mask,style)
+        plate = np.full((120,200,3),255,np.uint8)
+        plate[:,99:102] = 0
+        allowed = np.ones((120,200),bool)
+        moved,metrics = aggressive.place_on_clean_paper(layer,proof,plate,allowed,self.font,self.coverage,style)
+        self.assertEqual(metrics['original_text'],'Hello')
+        self.assertGreaterEqual(metrics['size'],style['min_size'])
+        alpha = np.asarray(moved.getchannel('A')) != 0
+        self.assertFalse(alpha[:,99:102].any())
+
     def test_narrow_column_is_removed_and_exact_english_is_widened(self):
         rows,clean,text,composite,erase,layout,_,summary=self.finish()
         self.assertEqual(summary['placed'],1)
@@ -90,6 +122,17 @@ class RemovalFirst(unittest.TestCase):
         self.assertIsNotNone(text.getbbox())
         self.assertFalse((np.array(clean)[95:168,199:204]==0).all(axis=2).any())
         self.assertTrue(np.array_equal(np.array(clean)[~erase],np.array(painted)[~erase]))
+
+    def test_single_line_preserves_gray_paper_behind_english(self):
+        self.image = Image.new('RGB', self.image.size, (185, 185, 185))
+        ImageDraw.Draw(self.image).rectangle((198, 94, 204, 168), fill='black')
+        self.rows[0]['binding']['text'] = 'Look!'
+        rows, clean, text, _, erase, _, _, summary = self.finish()
+        self.assertEqual(summary['placed'], 1)
+        x, y, r, b = rows[0]['removal_fallback']['outlined_tile_bounds']
+        self.assertTrue((~erase[y:b, x:r]).any())
+        self.assertTrue(np.array_equal(np.asarray(clean)[~erase], np.asarray(self.image)[~erase]))
+        self.assertIsNotNone(text.getbbox())
 
     def test_placement_failure_cannot_cancel_cleanup(self):
         with patch.object(replacement,'patch_layout',side_effect=ValueError('no room')):

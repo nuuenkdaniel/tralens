@@ -9,6 +9,35 @@ from tralens.rendering import outlined_sound_cleanup, replacement
 
 
 class OutlinedSoundTests(unittest.TestCase):
+    def test_blank_effect_requires_matching_kana_across_all_views(self):
+        from PIL import Image, ImageDraw
+        page = Image.new('RGB',(150,150),'white')
+        box = Text_Box(7,0,[(10,10),(95,10),(95,82),(10,82)],'')
+        self.assertIsNone(outlined_sounds.blank_sound(page,box,lambda view:self.fail('blank crop')))
+        ImageDraw.Draw(page).line((30,25,65,50),fill='black',width=4)
+        for words,expected in [(['サッ']*3,'サッ'), (['サッ','ザッ','サッ'],None), (['11']*3,None)]:
+            reads = iter(words)
+            self.assertEqual(outlined_sounds.blank_sound(page,box,lambda view:next(reads)),expected)
+
+    def test_framed_mask_leaves_a_white_symbol_and_rules_intact(self):
+        from tralens.rendering.printed_contours import framed_outline_mask
+        image = np.full((120,240,3),185,np.uint8)
+        cv2.rectangle(image,(10,15),(225,100),(0,0,0),3)
+        cv2.circle(image,(148,56),18,(255,255,255),-1)
+        for x in (38,61,87):
+            cv2.line(image,(x+16,24),(x,92),(255,255,255),13)
+            cv2.line(image,(x+16,24),(x,92),(0,0,0),5)
+        own = np.zeros(image.shape[:2],bool)
+        own[16:101,12:161] = True
+        mask = framed_outline_mask(image,own,np.zeros_like(own))
+        self.assertIsNotNone(mask)
+        self.assertTrue(mask[90,38])
+        self.assertFalse(mask[:,128:].any())
+        self.assertFalse(mask[15].any())
+        self.assertFalse(mask[100].any())
+        image[10:20] = 185
+        self.assertIsNone(framed_outline_mask(image,own,np.zeros_like(own)))
+
     def test_repetition_must_come_from_whole_views(self):
         beat = 'パチ'
         readings = [beat*4,beat*3,beat*5,beat*2,beat*2]
@@ -31,6 +60,19 @@ class OutlinedSoundTests(unittest.TestCase):
         self.assertFalse(mask[:20].any())
         self.assertFalse(outlined_sound_cleanup.joint_mask(rgb,owned & False,protected,(0,0,220,100)).any())
 
+    def test_classical_joint_repair_preserves_gutter_and_unmasked_art(self):
+        rgb = np.full((100,160,3), (202,146,72), np.uint8)
+        rgb[60:75] = 255
+        rgb[75:] = (45,90,145)
+        mask = np.zeros(rgb.shape[:2], bool)
+        mask[41:82,60:97] = True
+        rgb[mask] = 0
+        result = outlined_sound_cleanup.classical_repair(rgb, mask)
+        self.assertTrue(np.array_equal(result[~mask], rgb[~mask]))
+        self.assertTrue((result[60:75] == 255).all())
+        self.assertTrue(np.allclose(result[54,78], (202,146,72), atol=1))
+        self.assertTrue(np.allclose(result[79,78], (45,90,145), atol=1))
+
     def test_sideways_reading_requires_independent_visible_suffix(self):
         def agrees(*readings):
             return sideways_sound.matches({'readings':readings})
@@ -52,6 +94,11 @@ class OutlinedSoundTests(unittest.TestCase):
         self.assertEqual(join(),groups)
         pixels[47] = 255
         groups[1].group[0].text = 'どうして？'
+        self.assertEqual(join(),groups)
+        groups[0].group[0].text = 'お茶を'
+        groups[1].group[0].text = 'いただきます'
+        self.assertEqual(len(join()),1)
+        pixels[47] = 0
         self.assertEqual(join(),groups)
 
     def test_gutter_removes_only_connected_and_unprotected_ink(self):

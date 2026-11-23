@@ -3,7 +3,6 @@ import json
 import secrets
 import time
 import threading
-import webbrowser
 
 from ..translation import chatgpt
 from ..translation.luna import MODELS
@@ -34,6 +33,18 @@ class ReaderConnection:
             if self.error:
                 return dict(state='failed', error=self.error)
         return dict(state='connected' if self.connected() else 'disconnected')
+
+    def disconnect(self):
+        with self.lock:
+            if self.pending:
+                raise RequestError('Finish the current sign-in before disconnecting.', 409)
+            self.mobile = None
+            try:
+                chatgpt.logout()
+            except (ValueError, OSError, RuntimeError) as error:
+                raise RequestError('Could not disconnect ChatGPT. Retry or revoke access in ChatGPT Settings.', 503) from error
+            self.error = None
+        return dict(state='disconnected')
 
     def available(self):
         if self.connected():
@@ -84,7 +95,7 @@ class ReaderConnection:
                 raise RequestError('ChatGPT sign-in did not complete. Select the model to try again.') from exc
         return self.available() or dict(state='disconnected')
 
-    def select(self, *, remote):
+    def select(self):
         with self.lock:
             if self.pending:
                 return dict(state='pending', url=self.url)
@@ -95,15 +106,13 @@ class ReaderConnection:
             if not self.pending:
                 self.mobile = None
                 self.pending, self.error, self.url = True, None, None
-                threading.Thread(target=self._login, args=(remote,), daemon=True).start()
+                threading.Thread(target=self._login, daemon=True).start()
             return dict(state='pending', url=self.url)
 
-    def _login(self, remote):
+    def _login(self):
         def ready(url):
             with self.lock:
                 self.url = url
-            if remote:
-                webbrowser.open(url)
         error = None
         try:
             chatgpt.login(on_ready=ready)

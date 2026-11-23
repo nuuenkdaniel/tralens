@@ -26,7 +26,7 @@ INFORMATIONAL_STRUCTURE = frozenset({'automatic_not_human_reviewed', 'complement
     'automatic_terminal_row_hypothesis', 'automatic_vertical_continuation_hypothesis',
     'original_light_lettering_on_dark_surface', 'different_original_lettering_polarity',
     'relative_side_extent_alignment_and_scale', 'missing_kana_and_main_kanji_corroboration',
-    'original_glyph_support_inconclusive', 'horizontal_clause_with_case_particle'})
+    'original_glyph_support_inconclusive', 'horizontal_clause_with_case_particle', 'punctuated_horizontal_heading'})
 
 
 def validate_policy(policy):

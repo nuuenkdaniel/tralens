@@ -5,10 +5,11 @@ description = "Tool to extract, translate, and replace text in an image"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]
-requires-python = "==3.10.*"
+requires-python = "==3.12.*"
 dependencies = [
+    "Pillow>=13.0.0,<14",
     "PyJWT[crypto]>=2.10.1,<3",
-    "ollama>=0.6.1",
+    "python-multipart>=0.0.22,<1",
     "paddleocr==3.7.0",
     "paddlex[ocr]==3.7.2",
     "paddlepaddle==3.3.1",
@@ -18,3 +19,7 @@ dependencies = [
 
 [dependency-groups]
 inpainting = ["onnxruntime==1.23.2"]
+
+[tool.uv]
+# 0.3.9 is the first release with a published redistribution license.
+constraint-dependencies = ["aistudio-sdk>=0.3.9"]

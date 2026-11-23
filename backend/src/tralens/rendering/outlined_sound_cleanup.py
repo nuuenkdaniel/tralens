@@ -6,11 +6,11 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from ..ocr import outlined_sounds, sound_readings
+from ..ocr import crop_readings, outlined_sounds, sound_readings
 from . import reconstruction as rec
 
 
-def joint_mask(rgb, owned, protected, zone):
+def joint_mask(rgb, owned, protected, zone, *, extend=False):
     x, y, right, bottom = zone
     roi = np.s_[y:bottom, x:right]
     pixels, support, other = rgb[roi], owned[roi], protected[roi]
@@ -38,18 +38,33 @@ def joint_mask(rgb, owned, protected, zone):
     if len(seeds) < 8:
         return np.zeros_like(support)
     core = np.zeros(support.shape, np.uint8)
+    matches = []
     for xx, yy, w, h, glyph, inside, shape in items:
-        if inside or any(abs(xx-sx)<150 and abs(yy-sy)<95 and .52<h/sh<1.9
-                         and .65<(w/h)/(sw/sh)<1.55
-                         and np.minimum(shape, exemplar).sum() > .66*np.maximum(shape, exemplar).sum()
-                         for sx, sy, sw, sh, _, _, exemplar in seeds):
+        if inside:
             core[yy:yy+h, xx:xx+w] |= glyph
+        elif any((extend or (abs(xx-sx)<150 and abs(yy-sy)<95)) and .52<h/sh<1.9
+                 and .65<(w/h)/(sw/sh)<1.55
+                 and np.minimum(shape, exemplar).sum() > .66*np.maximum(shape, exemplar).sum()
+                 for sx, sy, sw, sh, _, _, exemplar in seeds):
+            matches.append((xx, yy, w, h, glyph))
+    # Without supplemental boxes, bridge adjacent copies only. Every shape
+    # must still match an original seed, including on the second hop.
+    for _ in range(2 if extend else 1):
+        reach = cv2.dilate(core, np.ones((189, 299), np.uint8)) if extend else None
+        for xx, yy, w, h, glyph in matches:
+            if reach is None or reach[yy, xx]:
+                core[yy:yy+h, xx:xx+w] |= glyph
     nearby = cv2.dilate(core, cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(19,19))) != 0
     dark = (gray < 90).astype(np.uint8)
     _, components, stats, _ = cv2.connectedComponentsWithStats(dark, 8)
     nearby &= dark != 0
     hits = np.bincount(components[nearby], minlength=len(stats))
     keep = (hits > .70*stats[:,-1]) & (stats[:,-1] < 6000) & (hits >= 6)
+    if extend:
+        # Touching outlines can form one large dark component. Complete a
+        # small leftover tip only when the detected strokes explain almost all
+        # of that component; a long panel line stays outside this allowance.
+        keep |= (hits >= .90 * stats[:, -1]) & (stats[:, -1] - hits <= 512) & (stats[:, 2:4].max(1) <= 220)
     keep[0] = False
     ink = (core != 0) | nearby | keep[components]
     return (cv2.dilate(ink.astype(np.uint8), np.ones((5,5),np.uint8)) != 0) & ~other
@@ -81,7 +96,47 @@ def repair_gutter(pixels, plate, mask, protected):
     return tails
 
 
-def tile_repair(rgb, zone, mask, protected, source, binding, backend, deadline, calls):
+def classical_repair(pixels, mask):
+    """Diffuse the available colors through a cluster without borrowing gutter white."""
+    inference = cv2.dilate(mask.astype(np.uint8), np.ones((7, 7), np.uint8))
+    known = inference == 0
+    paper = (pixels.min(2) >= 247) & (np.ptp(pixels, axis=2) < 8)
+    donors = known.sum(1)
+    bands = (donors >= 24) & ((paper & known).sum(1) >= .93 * donors)
+    bands = cv2.morphologyEx(bands.astype(np.uint8)[:, None], cv2.MORPH_OPEN,
+                             np.ones((5, 1), np.uint8))[:, 0]
+    edges = np.r_[0, np.flatnonzero(np.diff(bands)) + 1, len(bands)]
+    restored = pixels.copy()
+    for top, bottom in zip(edges, edges[1:]):
+        commit = mask[top:bottom]
+        if not commit.any():
+            continue
+        crop = pixels[top:bottom]
+        available = known[top:bottom]
+        if bands[top]:
+            restored[top:bottom][commit] = np.median(crop[available & paper[top:bottom]], axis=0)
+            continue
+        if not available.any():
+            # At least one sampled row exists in every detected paper band.
+            # Preserve the previous cleanup if this isolated strip has no donor.
+            raise ValueError('outlined sound strip has no visible background')
+        weights = available.astype(np.float32)
+        colors = crop * weights[:, :, None]
+        # Coarse levels carry color across wide strokes. At every level
+        # the original visible pixels constrain the estimate again.
+        estimate = np.median(crop[available], axis=0).astype(np.float32).reshape(1, 1, 3)
+        for factor in (16, 8, 4, 2, 1):
+            size = max(1, crop.shape[1] // factor), max(1, crop.shape[0] // factor)
+            fixed = cv2.resize(colors, size, interpolation=cv2.INTER_AREA)
+            free = 1 - cv2.resize(weights, size, interpolation=cv2.INTER_AREA)[:, :, None]
+            estimate = cv2.resize(estimate, size)
+            for _ in range(20):
+                estimate = fixed + free * cv2.blur(estimate, (3, 3))
+        restored[top:bottom][commit] = estimate[commit].round().clip(0, 255).astype(np.uint8)
+    return restored
+
+
+def tile_repair(rgb, zone, mask, protected, source, binding, backend, deadline, budget, router):
     x, y, right, bottom = zone
     page_mask = np.zeros(rgb.shape[:2], np.uint8)
     page_mask[y:bottom,x:right] = mask
@@ -101,15 +156,18 @@ def tile_repair(rgb, zone, mask, protected, source, binding, backend, deadline, 
             commit[center] = page_mask[yy:ey,xx:ex]
             crop, inference, obstacle = rgb[tile], infer[tile], protected[tile]
             remaining = deadline-time.monotonic()
-            if remaining <= 0 or calls[0] >= 16:
+            if remaining <= 0 or not budget.available():
                 raise TimeoutError('joint reconstruction budget exhausted')
-            calls[0] += 1
+            budget.calls += 1
             req = rec.request(source,binding,[l,t,r,b],crop,inference,commit,obstacle,
                               attempt=0,model=rec.model_identity(backend.config))
             answer = backend.reconstruct(req,crop,inference,commit,obstacle,timeout=min(req['limits']['seconds'],remaining))
+            req,inference,answer = rec.review_outline(router,req,answer,crop,inference,commit,obstacle,budget,deadline)
             result = rec.compose(req,crop,inference,commit,obstacle,answer)
             restored[yy-y:ey-y,xx-x:ex-x][commit[center]] = result[center][commit[center]]
             requests.append(dict(request=req, output_pixels_sha256=rec.pixels_hash(result)))
+            if 'outline_review' in answer:
+                requests[-1]['outline_review'] = answer['outline_review']
     return restored, requests
 
 
@@ -178,35 +236,45 @@ def plan_lettering(original, text, layout, raw, active, rows, artifacts, zone, p
 def finish(rgb, clean, text, layout, erase, raw, units, rows, source, backend, artifacts, font_resolver, style):
     extra = {d['source_id']: d for d in raw if d.get('reason') == 'supplemental_rotated_sound_region'
              and d.get('ocr_metadata',{}).get(outlined_sounds.POLICY)}
-    if not extra or backend is None:
+    candidates = []
+    corroborated = set()
+    for i, (unit, row) in enumerate(zip(units, rows)):
+        if row['status'] != 'automatic_composed':
+            continue
+        binding = row['binding']
+        selected = binding.get('reread_selected_revision') or unit.selected_revision
+        reading = next((r for r in unit.readings if r.revision == selected), None)
+        if reading is None:
+            continue
+        motif = sound_readings.repeat(reading.text) or sound_readings.clipped_motif(reading.text)
+        if motif:
+            ids = set(binding['member_ids'])
+            centers = [np.mean(d['polygon'], axis=0) for d in raw if d['source_id'] in ids]
+            if centers:
+                candidates.append(((i, binding, motif, ids), centers))
+                if reading.origin == crop_readings.ENGINE and len(ids) == 1:
+                    corroborated.update(ids)
+    if not extra and len(corroborated) < 2:
         return clean, text, []
     original = np.asarray(rgb)
     plate = np.asarray(clean).copy()
     zones = outlined_sounds.zones(original,[d['polygon'] for d in raw if d['source_id'] not in extra])
     reports = []
-    deadline, calls = time.monotonic()+180, [0]
+    deadline, budget = time.monotonic()+180, rec.Budget(maximum_calls=16)
     for index, bounds in enumerate(zones):
-        active = []
-        for i,(unit,row) in enumerate(zip(units,rows)):
-            if row['status'] != 'automatic_composed':
-                continue
-            binding = row['binding']
-            selected = binding.get('reread_selected_revision') or unit.selected_revision
-            reading = next((r.text for r in unit.readings if r.revision == selected), '')
-            motif = sound_readings.repeat(reading) or sound_readings.clipped_motif(reading)
-            ids = set(binding['member_ids'])
-            members = [d for d in raw if d['source_id'] in ids]
-            centers = [np.mean(d['polygon'],axis=0) for d in members]
-            if motif and centers and all(bounds[0]<=x<bounds[2] and bounds[1]<=y<bounds[3] for x,y in centers):
-                active.append((i,binding,motif,ids))
+        active = [item for item, centers in candidates
+                  if all(bounds[0]<=x<bounds[2] and bounds[1]<=y<bounds[3] for x,y in centers)]
         all_ids = set().union(*(item[3] for item in active))
-        if (not all_ids.intersection(extra) or not all_ids.difference(extra)
-                or len({item[2] for item in active}) != 1):
+        if not all_ids.difference(extra) or len({item[2] for item in active}) != 1:
             continue
         motif = active[0][2]
-        if not any(any(a[0] in all_ids.difference(extra) for a in extra[k]['ocr_metadata'][outlined_sounds.POLICY]['anchors'])
-                   and sound_readings.repeat(outlined_sounds.confirmed_text(extra[k]['ocr_metadata'][outlined_sounds.POLICY]['readings']) or '') == motif
-                   for k in all_ids.intersection(extra)):
+        added = all_ids.intersection(extra)
+        if added:
+            if not any(any(a[0] in all_ids.difference(extra) for a in extra[k]['ocr_metadata'][outlined_sounds.POLICY]['anchors'])
+                       and sound_readings.repeat(outlined_sounds.confirmed_text(extra[k]['ocr_metadata'][outlined_sounds.POLICY]['readings']) or '') == motif
+                       for k in added):
+                continue
+        elif len(all_ids & corroborated) < 2:
             continue
         owned = np.zeros(erase.shape,np.uint8)
         protected = np.zeros_like(owned)
@@ -245,22 +313,38 @@ def finish(rgb, clean, text, layout, erase, raw, units, rows, source, backend, a
             if backing:
                 l,t,r,b = backing
                 obstacle[t:b,l:r] |= ~backings[t:b,l:r]
-        mask = joint_mask(original,owned!=0,obstacle,zone)
+        mask = joint_mask(original,owned!=0,obstacle,zone,extend=not added)
         if not mask.any():
             continue
         wide = cv2.dilate(mask.astype(np.uint8),cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(31,31))) != 0
         old = eligible[roi] & erase[roi] & wide & ~obstacle[roi]
         pixels = original[roi]
-        mask |= old & ((pixels.max(2)<110) | ((pixels.min(2)>155) & (np.ptp(pixels,axis=2)<55)))
-        known = old & ~mask
+        selected = rec.region_backend(backend,pixels,mask)
+        if selected is None:
+            # The coarse earlier pass often removed midtone wall and bird
+            # detail between the characters. Keep their original paint.
+            near = cv2.dilate(mask.astype(np.uint8), np.ones((9, 9), np.uint8)) != 0
+            black = pixels.max(2) < 65
+            white = (pixels.min(2) > 200) & (np.ptp(pixels, axis=2) < 32)
+            mask |= old & near & (black | white)
+            known = eligible[roi] & erase[roi] & ~obstacle[roi] & ~(black | white) & ~mask
+            known |= old & ~mask
+        else:
+            mask |= old & ((pixels.max(2)<110) | ((pixels.min(2)>155) & (np.ptp(pixels,axis=2)<55)))
+            known = old & ~mask
         binding = dict(active[0][1], related_bindings=[item[1] for item in active[1:]])
         report = dict(bounds=zone,source_ids=sorted(all_ids))
         reports.append(report)
         try:
-            restored, requests = tile_repair(original,zone,mask,obstacle,source,binding,backend,deadline,calls)
+            if selected is None:
+                restored = classical_repair(pixels, mask)
+                requests = []
+                report['method'] = 'classical_diffusion'
+            else:
+                restored, requests = tile_repair(original,zone,mask,obstacle,source,binding,selected,deadline,budget,backend)
         except rec.BindingError:
             raise
-        except (ValueError,OSError,MemoryError,subprocess.SubprocessError,cv2.error) as error:
+        except (ValueError,OSError,MemoryError,RuntimeError,subprocess.SubprocessError,cv2.error) as error:
             report.update(status='previous_cleanup_preserved',reason=str(error)[:500])
             continue
         if lettering is not None:

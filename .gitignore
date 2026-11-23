@@ -21,3 +21,8 @@ test.py
 
 # Disposable Android SDK, build tools, dependencies, keys and outputs.
 /.android-build/
+
+# Default Compose data, credentials, and local-only demo sources.
+/tralens-data/
+/frontend/demo/
+/tralens-first-beta.bundle

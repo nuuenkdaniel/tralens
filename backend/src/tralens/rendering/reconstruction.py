@@ -37,7 +37,10 @@ def pixels_hash(array):
 
 
 def model_identity(config):
-    return {key:config.get(key) for key in ('backend','sha256','config_revision')}
+    identity = {key:config.get(key) for key in ('backend','sha256','config_revision')}
+    if config.get('prefill'):
+        identity['prefill'] = config['prefill']
+    return identity
 
 
 @lru_cache(maxsize=128)
@@ -52,6 +55,21 @@ def _file_digest(path, size, modified):
 
 def configuration(path, policy=None):
     """Validate explicit operator config and bytes before any upstream inference."""
+    if policy == 'auto':
+        # Reader jobs supply configured paths directly. CLI manifests resolve
+        # model config paths relative to the manifest, just like SDXL assets.
+        entries = {} if path is None else path
+        if not isinstance(entries, dict):
+            manifest = Path(entries).expanduser().absolute()
+            require(manifest.is_file() and manifest.stat().st_size <= 16384, 'invalid Auto manifest')
+            entries = json.loads(manifest.read_bytes())
+            require(isinstance(entries, dict), 'Auto manifest must contain model config paths')
+            require(all(isinstance(value, str) and value for value in entries.values()),
+                    'Auto manifest values must be local config paths')
+            entries = {key: manifest.parent/value for key, value in entries.items()}
+        require(entries.keys() <= {'lama', 'sdxl'}, 'unknown Auto model')
+        return dict(backend='auto', models={key: configuration(value, key)
+                    for key, value in entries.items() if value})
     path=Path(path).expanduser().absolute()
     require(path.is_file() and path.stat().st_size<=16384,'explicit reconstruction configuration required')
     config=json.loads(path.read_bytes())
@@ -175,6 +193,179 @@ class LocalReconstruction:
                 and meta.get('output_pixels_sha256')==pixels_hash(output),
                 'worker output binding changed')
             return {**meta,'pixels':output,'wall_seconds':time.monotonic()-start}
+
+
+def outline_strength(crop, repaired, commit, *, relative=False):
+    """Measure stroke-aligned contrast, optionally subtracting adjacent paint contrast."""
+    import cv2
+
+    def gradient(image):
+        rgb = image.astype(np.float32)
+        return np.stack((cv2.Sobel(rgb, -1, 1, 0, scale=.125),
+                         cv2.Sobel(rgb, -1, 0, 1, scale=.125)), axis=-1)
+
+    ink = gradient(crop)
+    channel_strength = np.linalg.norm(ink, axis=-1)
+    channel = channel_strength.argmax(axis=2)
+    y, x = np.indices(commit.shape)
+    normal = ink[y, x, channel]
+    magnitude = channel_strength.max(axis=2)
+    binary = commit.astype(np.uint8)
+    band = cv2.dilate(binary, np.ones((3, 3), np.uint8)) != 0
+    edges = band & (magnitude >= 15)
+    if edges.sum() < 32:
+        return None if relative else 0.
+    # A highlight or panel line passing through a stroke can dominate its
+    # residual. Prefer stroke edges next to observable, low-texture artwork.
+    known = (cv2.dilate(binary, np.ones((5, 5), np.uint8)) == 0).astype(np.float32)
+    coverage = cv2.blur(known, (21, 21))
+    surrounding = cv2.blur(magnitude * known, (21, 21))
+    quiet = edges & (coverage > .12) & (surrounding < 3 * coverage)
+    if quiet.sum() >= 32:
+        edges = quiet
+    grad = gradient(repaired)
+    if not relative:
+        projected = (grad[edges] * normal[edges, None, :]).sum(axis=-1)
+        response = np.abs(projected).max(axis=1) / magnitude[edges]
+        return float(np.minimum(response, 25).mean())
+    y, x = np.nonzero(edges)
+    direction = normal[edges] / magnitude[edges, None]
+
+    def contrast(y, x):
+        projected = (grad[y, x] * direction[:, None, :]).sum(axis=-1)
+        return np.minimum(np.abs(projected).max(axis=1), 25)
+
+    center = contrast(y, x)
+    # Raw contrast can increase when LaMa restores paint texture. A ghost
+    # concentrates that contrast on the old glyph rather than on its flanks.
+    dx, dy = np.rint(3 * direction).astype(int).T
+    h, w = commit.shape
+    left, right = (x-dx).clip(0, w-1), (x+dx).clip(0, w-1)
+    top, bottom = (y-dy).clip(0, h-1), (y+dy).clip(0, h-1)
+    valid = (commit[y, x] & commit[top, left] & commit[bottom, right]
+             & (x >= abs(dx)) & (x < w-abs(dx)) & (y >= abs(dy)) & (y < h-abs(dy)))
+    if valid.sum() < 32:
+        return None
+    flanks = .5 * (contrast(top, left) + contrast(bottom, right))
+    return float((center - flanks)[valid].mean())
+
+
+def review_outline(router, req, result, crop, inference, commit, protected, budget, deadline):
+    """Compare a suspect SDXL repair with one budgeted LaMa alternative."""
+    if (not router or router.config.get('backend') != 'auto'
+            or (req.get('model') or {}).get('backend') != 'sdxl-inpaint'
+            or 'lama' not in router.config['models']):
+        return req, inference, result
+    initial = compose(req, crop, inference, commit, protected, result)
+    strength = outline_strength(crop, initial, commit)
+    audit = dict(sdxl_request_revision=req['revision'], sdxl_outline=strength,
+                 selected='sdxl-inpaint', status='below_threshold')
+    result = {**result, 'outline_review': audit}
+    from . import line_continuity
+    bridges = line_continuity.bridges(crop, inference | protected, commit)
+    initial_line_error = line_continuity.error(initial, bridges) if bridges else 0.
+    if bridges:
+        audit.update(line_crossings=len(bridges), sdxl_line_error=initial_line_error)
+    if strength < 1.5 and initial_line_error < 4:
+        return req, inference, result
+    if not budget.available() or deadline <= time.monotonic():
+        audit['status'] = 'budget_exhausted'
+        return req, inference, result
+
+    import cv2
+    # Hide the antialiased fringe from LaMa. Only original commit pixels
+    # can reach the output, including when this region was a tile.
+    context = inference
+    binary = commit.astype(np.uint8)
+    neighborhood = np.ones((3, 3), np.uint8)
+    boundary = commit & (cv2.erode(binary, neighborhood) == 0)
+    gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+    contrast = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, neighborhood)
+    # Tight, high-contrast cutouts already end at the ink edge. A wider
+    # inference hole would also hide the art that should continue through it.
+    if boundary.any() and np.mean(contrast[boundary] >= 24) < .75:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        expanded = cv2.dilate(binary, kernel) != 0
+        context = inference | (expanded & ~protected)
+    lama = LocalReconstruction(router.config['models']['lama'])
+    retry = request(req['source'], req['binding'], req['bounds'], crop, context, commit, protected,
+                    attempt=req['attempt'], model=model_identity(lama.config))
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        audit['status'] = 'budget_exhausted'
+        return req, inference, result
+    budget.calls += 1
+    audit['lama_request_revision'] = retry['revision']
+    try:
+        answer = lama.reconstruct(retry, crop, context, commit, protected, timeout=remaining)
+        alternate = compose(retry, crop, context, commit, protected, answer)
+    except BindingError:
+        raise
+    except (RuntimeError, OSError, MemoryError, subprocess.SubprocessError) as error:
+        audit.update(status='retry_failed', error=str(error)[:500])
+        return req, inference, result
+    alternative = outline_strength(crop, alternate, commit)
+    audit.update(status='compared', lama_outline=alternative)
+    reason = None
+    if strength - alternative >= max(.35, .2 * strength):
+        reason = 'weaker_outline'
+    if bridges:
+        other_line_error = line_continuity.error(alternate, bridges)
+        audit['lama_line_error'] = other_line_error
+        if reason is None and initial_line_error - other_line_error >= max(2., .2 * initial_line_error):
+            if alternative <= max(1.5, strength + .35):
+                reason = 'line_continuity'
+            else:
+                excess = outline_strength(crop, alternate, commit, relative=True)
+                audit['lama_outline_above_surroundings'] = excess
+                if excess is not None and excess <= 0:
+                    reason = 'line_continuity'
+    if reason:
+        audit['reason'] = reason
+        audit['selected'] = 'lama-onnx-512'
+        return retry, context, {**answer, 'outline_review': audit}
+    if bridges and initial_line_error >= 4:
+        from . import stroke_repair
+        refined = stroke_repair.refine(crop, commit, inference | protected, initial)
+        if refined is not None:
+            refined_error = line_continuity.error(refined, bridges)
+            if initial_line_error - refined_error >= max(2., .2 * initial_line_error):
+                audit.update(reason='preserved_paint', refined_line_error=refined_error,
+                             sdxl_output_pixels_sha256=pixels_hash(result['pixels']))
+                result = {**result, 'pixels': refined, 'output_pixels_sha256': pixels_hash(refined)}
+    return req, inference, result
+
+
+def region_backend(backend, crop, mask):
+    """Choose using only surviving pixels immediately around the lettering."""
+    if backend is None or backend.config.get('backend') != 'auto':
+        return backend
+    import cv2
+
+    models = backend.config['models']
+    if not models or not mask.any():
+        return None
+    binary = mask.astype(np.uint8)
+    outer = cv2.dilate(binary, np.ones((25, 25), np.uint8))
+    inner = cv2.dilate(binary, np.ones((7, 7), np.uint8))
+    ring = outer > inner
+    choice = 'lama'
+    if ring.sum() >= 32:
+        pixels = crop[ring].astype(np.float32)
+        spread = (np.percentile(pixels, 90, axis=0) - np.percentile(pixels, 10, axis=0)).max()
+        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
+        edge_fraction = np.mean(cv2.Canny(gray, 45, 110)[ring] != 0)
+        if spread <= 12 and edge_fraction < 0.012:
+            return None
+        # Prefer structure completion for ink and screen tones. Diffusion is
+        # reserved for broad holes amid varied paint without strong contours.
+        width = cv2.distanceTransform(binary, cv2.DIST_L2, 3).max()
+        if (width >= 5 and np.median(np.ptp(pixels, axis=1)) >= 20
+                and spread >= 32 and edge_fraction < 0.10 and 'sdxl' in models):
+            choice = 'sdxl'
+    if choice == 'sdxl':
+        return LocalReconstruction({**models[choice], 'prefill': 'classical_context'})
+    return LocalReconstruction(models[choice]) if choice in models else None
 
 
 # Existing callers may inject the LaMa worker by its original name.

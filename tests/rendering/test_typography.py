@@ -27,6 +27,13 @@ class TypographyTests(unittest.TestCase):
             Image.new('L', (180, 160), 255) if mask is None else mask,
             self.style if style is None else style)
 
+    def test_thought_keeps_three_beats_and_exact_characters(self):
+        source = 'Oh! Too late. They know...'
+        _, proof, _ = self.layout(source,Image.new('L',(320,140),255),{**self.style,'preset':'thought'})
+        self.assertEqual(proof['draw_text'],'Oh! \nToo late. \nThey know...')
+        self.assertEqual(proof['draw_text'].replace('\n',''),source)
+        self.assertGreaterEqual(proof['size'],20)
+
     def test_comfortable_fit_is_inset_and_does_not_always_maximize_font(self):
         mask = Image.new('L', (180, 160), 255)
         layer, meta, content = self.layout('Hello there!', mask)

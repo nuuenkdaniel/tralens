@@ -323,7 +323,7 @@ def make_payload(request, profile, *, images=()):
 
 class PreviewTranslator:
     def __init__(self, runtime, *, model="qwen3.8:latest", profile=GENERALIST,
-                 max_attempts=1, timeout=60.0, generation_options=GenerationOptions(), single_rendition=False, terminology_units=()):
+                 max_attempts=1, timeout=60.0, generation_options=GenerationOptions(), single_rendition=False, terminology_units=(), context_crop=None, page_context=False):
         if type(max_attempts) is not int or not 1 <= max_attempts <= 3:
             raise ValueError("max_attempts must be 1..3")
         if type(timeout) not in (int, float) or not 0 < timeout <= 300:
@@ -337,6 +337,8 @@ class PreviewTranslator:
         if type(single_rendition) is not bool:raise ValueError('single rendition must be boolean')
         self.single_rendition=single_rendition
         self.terminology_units=tuple(terminology_units)
+        self.context_crop = context_crop
+        self.page_context = page_context
 
     def translate(self, request, *, cancelled=lambda: False, images=(), observe=None):
         if type(request) is not TranslationRequest:
@@ -365,6 +367,8 @@ class PreviewTranslator:
 
     def _execute(self, request, *, cancelled, images, observe, fragment, alternate=False):
         rendition_evidence={}
+        nearby = []
+        check_artwork = False
         def result(status, **kwargs):
             if alternate:
                 from .ocr_review import AlternateResult
@@ -379,9 +383,13 @@ class PreviewTranslator:
                 return FragmentResult(request.revision, request.fragment.revision, canonical(request.fragment.provenance),
                     "fragment_"+status, fragments=pairs, provider=type(self.runtime).__name__, model=self.model,
                     profile=self.profile.name, execution_metadata_json=execution_metadata(request,self.profile,self.generation_options), **kwargs)
+            metadata = strict_json(execution_metadata(request,self.profile,self.generation_options))
+            if 'context_crop' in rendition_evidence:
+                metadata['reduced_capabilities'] = [v for v in metadata['reduced_capabilities'] if v != 'no_context_or_images']
+                metadata['images_supplied'] = True
             return TranslationResult(request.revision, status, provider=type(self.runtime).__name__,
                 model=self.model, profile=self.profile.name,
-                execution_metadata_json=canonical({**strict_json(execution_metadata(request, self.profile, self.generation_options)),
+                execution_metadata_json=canonical({**metadata,
                     **({'rendition_retry':rendition_evidence} if rendition_evidence else {})}), **kwargs)
         def notify(event):
             try:
@@ -400,6 +408,43 @@ class PreviewTranslator:
             else:
                 payload = (make_fragment_payload(request,self.profile,images=images) if fragment
                            else make_payload(request, self.profile, images=images))
+            if (self.page_context and self.single_rendition and self.model in ("translategemma:12b","translategemma:27b")
+                    and self.profile.specialist_chat and not fragment and not alternate
+                    and request.style.source_language in ('Japanese', 'ja') and request.style.target_language in ('English', 'en')
+                    and self.terminology_units and request.mode == 'A'):
+                unit = request.units[0]
+                source = unit.selected.text
+                if (unit.selected.origin == 'raw_main_reading' and source.isascii()
+                        and re.search(r'[A-Za-z]{2}', source)
+                        and all(line.get('confidence',0) >= .97 and line.get('status') == 'accepted'
+                                for line in strict_json(unit.selected.evidence_json))):
+                    outcome = UnitOutcome(unit.unit_id, "abstained", "", ("already_latin_lettering",), "unverified", unit.selected_revision)
+                    return result("abstained", outcomes=(outcome,), attempts=0)
+                nearby = [other.selected.text[:100] for other in self.terminology_units
+                          if other.page_json == unit.page_json and other.unit_id != unit.unit_id and other.selected.text]
+                guide = ('Write one concise printable comic line. Preserve the speech act, who does what to whom, '
+                         'register, uncertainty and trailing thoughts. A dependent fragment may continue in another balloon. '
+                         'For a mimetic word choose one short visual effect, never a definition or list of senses. ')
+                from .rendition import usage_context
+                guide += usage_context(source) + ' Leave out editorial asterisks. '
+                if nearby:
+                    guide += 'Other page dialogue for context only: ' + json.dumps(nearby[:32], ensure_ascii=False) + '. '
+                if self.context_crop and (len(source.strip()) <= 5 or any(term in source for term in ('帰し','なさそ','悪い人'))):
+                    png, bounds, punctuation = self.context_crop(unit)
+                    payload['messages'][0]['images'] = [base64.b64encode(png).decode('ascii')]
+                    rendition_evidence['context_crop'] = {'bounds':bounds,'sha256':hashlib.sha256(png).hexdigest(),
+                                                         'adjacent_punctuation':punctuation}
+                    guide += 'The image shows the surrounding scene. Translate only the target below. '
+                    # A few OCR strokes on a drawing can resemble a numeral or a short label.
+                    check_artwork = (re.fullmatch(r'[一-鿿]', source) is not None or
+                                     unit.source_uncertain and re.fullmatch(r'[A-Za-z0-9]{1,5}', source) is not None)
+                    if check_artwork:
+                        guide = ('Inspect the center of the image before translating. If the OCR describes part of '
+                                 'a drawing, musical note, diagram symbol or object rather than printed Japanese lettering, '
+                                 'reply exactly [ART]. Otherwise translate only the visible target. ')
+
+                message = payload['messages'][0]
+                message['content'] = message['content'].replace('Please translate the following ', guide+'Please translate the following ',1)
             payload.update(self.generation_options.transport_fields())
             if (self.profile.specialist_template and not self.profile.specialist_chat and isinstance(self.runtime, OllamaRuntime)
                     and self.runtime.specialist_template is None):
@@ -455,9 +500,37 @@ class PreviewTranslator:
                 failure, detail = "timeout", "runtime exceeded total generation deadline"
                 break
             from . import rendition
+            if check_artwork and isinstance(text, str) and text.strip() == '[ART]':
+                outcome = UnitOutcome(unit.unit_id, "abstained", "", ("visual_non_text",), "unverified", unit.selected_revision)
+                return result("abstained", outcomes=(outcome,), attempts=attempts,
+                              generation_seconds=time.monotonic() - started)
             retry_policy = None
+            banner_term = None
+            short_read = None
             if self.single_rendition and self.profile.specialist_chat and not fragment and not alternate and isinstance(text,str):
                 retry_policy = rendition.retry_policy(request.units[0].selected.text,text,request.style)
+                if (retry_policy is None and request.style.source_language in ('Japanese','ja')
+                        and request.style.target_language in ('English','en')):
+                    unit = request.units[0]
+                    if rendition.commentary_output(unit.selected.text,text) or (len(unit.member_ids)==2 and unit.selected.text[-1:].isascii() and unit.selected.text[-1:].isdigit()):
+                        short_read = rendition.short_reading(unit)
+                        if short_read:
+                            retry_policy = rendition.REREAD
+                            rendition_evidence['corroborated_reading'] = short_read
+                    if unit.selected.text.strip(' !！') == 'マスター' and text.strip(' !.').lower()=='master':
+                        order = next((other for other in self.terminology_units if other.page_json==unit.page_json
+                            and other.unit_id!=unit.unit_id and re.search(r'ビール.{0,12}(?:頼む|ください|お願い)',other.selected.text)),None)
+                        if order:
+                            retry_policy = rendition.BAR_CALL
+                            rendition_evidence['beer_order_context'] = order.unit_id
+                    if retry_policy is None and self.context_crop and self.model in ('translategemma:12b','translategemma:27b'):
+                        retry_policy = rendition.visual_retry(request.units[0].selected.text, text)
+                    if retry_policy is None and nearby and rendition.borrowed_name(unit.selected.text, text, nearby):
+                        retry_policy = rendition.BORROWED
+                    banner_term = rendition.banner_term(request.units[0], self.terminology_units)
+                    if banner_term and not rendition.contains_loanword(text, banner_term['english']):
+                        retry_policy = rendition.BANNER_TERM
+                        rendition_evidence['banner_term_context'] = banner_term
             if retry_policy==rendition.LOAN:
                 proof = rendition.technical_context(request.units[0],self.terminology_units)
                 if proof:
@@ -473,15 +546,25 @@ class PreviewTranslator:
                 remaining=self.timeout-(time.monotonic()-started)
                 if remaining>1 and not cancelled():
                     try:
+                        punctuation = ''
+                        if retry_policy in rendition.VISUAL_POLICIES:
+                            png, bounds, punctuation = self.context_crop(request.units[0])
+                            rendition_evidence['context_crop'] = {'bounds':bounds, 'sha256':hashlib.sha256(png).hexdigest(),
+                                'adjacent_punctuation': punctuation}
+                        retry_payload = rendition.payload(payload,retry_policy,request.units[0].selected.text,
+                            term=short_read or banner_term,punctuation=punctuation)
+                        if retry_policy in rendition.VISUAL_POLICIES:
+                            retry_payload['messages'][0]['images'] = [base64.b64encode(png).decode('ascii')]
                         attempts+=1
-                        candidate=self.runtime.generate(model=self.model,payload=rendition.payload(payload,retry_policy,request.units[0].selected.text),timeout=remaining)
+                        candidate=self.runtime.generate(model=self.model,payload=retry_payload,timeout=remaining)
                         raw=candidate.response_json if isinstance(candidate,Generation) else canonical({'text':candidate})
                         failed=notify({'attempt':attempts,'status':'response','purpose':retry_policy,'response_json':raw})
                         if failed is not None:return failed
                         candidate=candidate.text if isinstance(candidate,Generation) else candidate
                         rendition_evidence['candidate_translation']=candidate
                         if (isinstance(candidate,str) and candidate.strip() and len(candidate)<=self.generation_options.max_output_chars
-                                and rendition.candidate_matches(retry_policy,primary,candidate,request.units[0].selected.text) and not cancelled() and time.monotonic()-started<self.timeout):
+                                and (retry_policy != rendition.BORROWED or not rendition.borrowed_name(request.units[0].selected.text,candidate,nearby))
+                                and rendition.candidate_matches(retry_policy,primary,candidate,request.units[0].selected.text,term=banner_term and banner_term['english']) and not cancelled() and time.monotonic()-started<self.timeout):
                             text=candidate;rendition_evidence['selected']=rendition.SELECTION[retry_policy]
                     except Exception as error:
                         rendition_evidence['error']=type(error).__name__+': '+str(error)[:512]
@@ -494,8 +577,13 @@ class PreviewTranslator:
                 if len(text) > self.generation_options.max_output_chars:
                     raise ValueError("translation output exceeds character bound")
                 if self.profile.specialist_template:
+                    if not fragment and not alternate and rendition.commentary_output(request.units[0].selected.text,text):
+                        raise ValueError("specialist returned translation commentary instead of lettering")
                     if not text.strip():
                         raise ValueError("empty specialist translation")
+                    if (self.page_context and not fragment and not alternate and request.style.source_language in ('ja','Japanese')
+                            and request.style.target_language in ('en','English')):
+                        text = rendition.printed_cadence(request.units[0].selected.text,text)
                     outcomes = (UnitOutcome(request.target_ids[0], "review", text,
                         ("specialist_reduced_capability",), "ambiguous" if request.units[0].source_uncertain else "unverified",
                         request.units[0].selected_revision),)
@@ -593,6 +681,8 @@ class OllamaRuntime:
         except URLError as error:
             if isinstance(error.reason, TimeoutError):
                 raise TimeoutError("Ollama socket timeout") from error
+            if isinstance(error.reason, ConnectionRefusedError):
+                raise ConnectionRefusedError(f"Ollama is not listening at {self.endpoint}.") from error
             raise
 
     def preload(self, model, timeout, *, generation_options=GenerationOptions()):

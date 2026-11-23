@@ -68,9 +68,10 @@ class CleanupClearance(unittest.TestCase):
         rows=self.check_cleanup(self.run_pass('final',placement=False))
         self.assertEqual(rows[0]['status'],'source_removed')
 
-    def test_final_backing_stays_outside_prior_layout_clearance(self):
+    def test_final_tile_stays_outside_prior_layout_clearance(self):
         result=self.run_pass('final');rows=self.check_cleanup(result)
-        x,y,r,b=rows[0]['removal_fallback']['backing_bounds']
+        placement=rows[0]['removal_fallback']
+        x,y,r,b=placement.get('backing_bounds') or placement['outlined_tile_bounds']
         self.assertFalse(p.dilate(self.old|self.alpha,2)[y:b,x:r].any())
 
 

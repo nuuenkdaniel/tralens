@@ -20,6 +20,11 @@ def main(directory):
     h, w = mask.shape
     y, x = (1024 - h) // 2, (1024 - w) // 2
     pad = ((y, 1024 - h - y), (x, 1024 - w - x))
+    if config.get("prefill") == "classical_context":
+        # At partial diffusion strength black glyphs can survive denoising.
+        # Seed the missing pixels with actual nearby paint before refinement.
+        import cv2
+        rgb = cv2.inpaint(rgb, mask.astype(np.uint8), 3, cv2.INPAINT_TELEA)
     image = Image.fromarray(np.pad(rgb, pad + ((0, 0),), mode="symmetric"))
     removal = Image.fromarray(np.pad(mask.astype("uint8") * 255, pad, mode="symmetric"))
     start = time.monotonic()
@@ -51,6 +56,15 @@ def main(directory):
             generator=torch.Generator(device="cuda").manual_seed(req["seed"]),
         ).images[0]
     result = np.asarray(out.convert("RGB"))[y : y + h, x : x + w].copy()
+    if config.get("prefill") == "classical_context":
+        # Retain generated fine detail while matching the surrounding paint.
+        # Diffusion can shift a whole narrow letter-shaped patch in hue.
+        residual = result.astype(np.float32) - rgb
+        weights = mask.astype(np.float32)
+        weight_sum = cv2.GaussianBlur(weights, (0, 0), 3)
+        local_shift = cv2.GaussianBlur(residual * weights[:, :, None], (0, 0), 3)
+        detail = residual - local_shift / np.maximum(weight_sum[:, :, None], 1e-6)
+        result = np.clip(rgb + np.clip(detail, -10, 10), 0, 255).round().astype(np.uint8)
     Image.fromarray(result).save(directory / "output.png")
     (directory / "result.json").write_text(
         json.dumps(

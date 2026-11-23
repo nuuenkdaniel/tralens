@@ -42,6 +42,21 @@ class AutomaticUnitTests(unittest.TestCase):
         parents = [child for p in batch.proposals for child, _ in p.annotation_parents]
         self.assertEqual(len(parents), len(set(parents)))
 
+    def test_terminal_punctuation_respects_clear_seam_and_reading_order(self):
+        import numpy as np
+        from tralens.ocr.types import Text_Group
+        pixels = np.full((120,100,3),255,np.uint8)
+        def col(i,x,word):
+            return Text_Box(i,.9,[(x,25),(x+15,25),(x+15,65),(x,65)],word)
+        phrase = Text_Group([col(0,65,'勝手に'),col(1,45,'投稿して')],direction='vertical')
+        punctuation = Text_Group([col(2,28,'……!?')],direction='vertical')
+        groups = [punctuation,phrase]
+        by_id = {i:(None,None,i) for i in range(3)}
+        joined = a.join_terminal_marks(groups,pixels,[],{},by_id,set())
+        self.assertEqual([[b.box_id for b in group.group] for group in joined],[[0,1,2]])
+        pixels[:,44] = 0
+        self.assertEqual(a.join_terminal_marks(groups,pixels,[],{},by_id,set()),groups)
+
     def test_faint_parallel_table_rules_split_cells_without_splitting_dialogue(self):
         from tralens.ocr import table_rows
         from tralens.ocr.types import Text_Group
@@ -105,6 +120,18 @@ class AutomaticUnitTests(unittest.TestCase):
         fragments = self.propose([box("b", (40,20,65,30), "後"), box("a", (10,20,35,30), "前")])
         self.assertEqual(fragments.proposals[0].main_ids, ("a", "b"))
         self.assert_partition(batch)
+
+    def test_punctuated_heading_above_overlapping_kana_title_is_read_first(self):
+        from tralens.ocr.types import Text_Group
+        # Reproduce the mixed-layout grouper's x-first result on overlapping rows.
+        def mixed(boxes, **kwargs):
+            return [Text_Group(sorted(boxes,key=lambda b:b.bbox[0]),method='mixed',direction='horizontal')]
+        with patch.object(a,'group_manga_boxes',side_effect=mixed):
+            batch = self.propose([box(14,(19,38,148,70),"サマーフェスト！",.75),
+                                  box(13,(20,28,66,47),"ようこそ!",.77)])
+        self.assertEqual(batch.proposals[0].main_ids, (13,14))
+        self.assertFalse(batch.proposals[0].annotation_ids)
+        self.assertIn('punctuated_horizontal_heading',batch.proposals[0].structural_reasons)
 
     def test_adjacent_distinct_original_bubbles_never_merge_by_distance(self):
         image = self.image.copy()

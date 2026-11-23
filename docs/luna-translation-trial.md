@@ -14,7 +14,7 @@ I reused the same saved OCR readings and detector boxes from two color pages of 
 | Whole page and numbered crops, target only | 41 | 4 | 39 | 52 s |
 | Magnified region, whole page and related page | 8 | 8 | 7 | 56 s |
 
-The local baseline returned text for all 41 regions, including a sign already in English and OCR noise. Output count measures coverage. The comparison below uses source-image inspection and translation judgment. Timing includes CLI startup and inference, excludes OCR and rendering, and sums individual durations even when calls overlapped. Each condition used one generation per target or batch. These four pages cannot establish a general accuracy percentage. [All region-by-region English outputs](luna-region-comparison.json)
+The local baseline returned text for all 41 regions, including a sign already in English and OCR noise. Output count measures coverage. The comparison below uses source-image inspection and translation judgment. Timing includes CLI startup and inference, excludes OCR and rendering, and sums individual durations even when calls overlapped. Each condition used one generation per target or batch. These four pages cannot establish a general accuracy percentage.
 
 ## Where the choice mattered
 

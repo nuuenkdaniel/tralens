@@ -176,6 +176,7 @@ function statusText(pages) {
         " processed"
       : "",
     failed ? failed + " failed" : "",
+    pages.some(p => p.status === "waiting") ? "Waiting for local translator" : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -227,9 +228,7 @@ function library() {
   if (!catalog.books.length)
     return (
       header(false) +
-      '<main class="empty"><div class="fan" aria-hidden="true">' +
-      [0, 1, 2].map((i) => '<img alt="" src="/art-' + i + '.webp">').join("") +
-      '</div><h1>Your library is <em>empty</em></h1><p class="meta">Add Japanese manga pages to read them in English, side by side with the originals.</p>' +
+      '<main class="empty"><h1>Your library is <em>empty</em></h1><p class="meta">Add Japanese manga pages to read them in English, side by side with the originals.</p>' +
       btn("add", "Add manga", "primary", "plus") +
       '<p class="hint">PNG, JPEG, WebP, PDF, CBZ or ZIP · Drop files here to get started</p></main>'
     );
@@ -356,6 +355,7 @@ function preferences() {
     '<p class="hint">' +
     esc(privacy()) +
     "</p>" +
+    (config.chatgpt_connected ? btn("disconnect-chatgpt", "Disconnect ChatGPT") : "") +
     field([
       "protection",
       "When text is hard to remove",
@@ -368,6 +368,7 @@ function preferences() {
       "paint",
       "Inpainting model",
       [
+        ["auto", "Auto · per region"],
         ["classical", "Classical"],
         ["lama", "LaMa", !config.reconstruction_available],
         ["sdxl", "SDXL · GPU", !config.sdxl_available],
@@ -465,11 +466,15 @@ function detail(b) {
   );
 }
 function pageImage(p, mode) {
-  const translated = mode !== "original" && p.ready;
+  const columns = prefs.layout === "spread" || (view === "compare" && prefs.comparison === "side") ? 2 : 1;
+  const width = Math.min(innerWidth / columns, prefs.fit === "width" ? Infinity : innerHeight * p.width / p.height, p.width);
+  const reading = mode !== "original" && p.has_text;
+  const preserve = reading && view !== "compare" && (p.reading_width < 0 || width < p.reading_width);
+  const translated = mode !== "original" && p.ready && !preserve;
   return (
     '<div class="imagebox" data-page="' +
     p.id +
-    '"><img class="page-image" ' +
+    '"' + (preserve ? ' data-reading-fallback' : '') + '><img class="page-image" ' +
     (p.width && p.height
       ? 'width="' + p.width + '" height="' + p.height + '" '
       : "") +
@@ -480,6 +485,7 @@ function pageImage(p, mode) {
     " · " +
     (translated ? "translated" : "original") +
     '" loading="lazy">' +
+    (reading ? '<button class="read-english" data-action="transcript" data-id="' + p.id + '">Read English</button>' : "") +
     (mode !== "original" && !p.ready
       ? '<small class="badge">Original</small>'
       : "") +
@@ -513,7 +519,7 @@ function reader(b, c, p) {
   else if (prefs.layout === "continuous" && view !== "compare")
     content = c.pages.map((x) => pageImage(x, view)).join("");
   const pending = ["queued", "running"].includes(p.status),
-    error = p.status === "failed" ? p.error : null;
+    error = p.error || (p.status === "skipped" ? "Translation skipped." : null);
   const banner =
     view !== "original" &&
     (pending || error) &&
@@ -526,8 +532,8 @@ function reader(b, c, p) {
               : "Translating this page…"
             : error,
         ) +
-        (pending
-          ? btn("original", "Show original")
+        (pending || p.status === "waiting"
+          ? btn("skip-page", "Skip page")
           : btn("retry-page", "Try again")) +
         ib("dismiss", "Dismiss", "x") +
         "</div>"
@@ -797,7 +803,7 @@ function drawAdd() {
     draft.book ? "Add chapter" : "Add manga",
     '<form id="import" class="fields"><div class="drop">' +
       icon("upload") +
-      "<b>Drop manga pages here</b><small>PNG, JPEG, WebP, PDF, CBZ or ZIP · Up to 128 MiB per import</small>" +
+      "<b>Drop manga pages here</b><small>PNG, JPEG, WebP, PDF, CBZ or ZIP · Up to 4 GiB per import</small>" +
       btn("choose", "Choose pages") +
       '<input id="files" type="file" accept="image/png,image/jpeg,image/webp,application/pdf,application/zip,application/x-zip-compressed,application/vnd.comicbook+zip,application/x-cbz,.cbz,.zip" multiple hidden></div>' +
       (draft.files.length
@@ -859,7 +865,7 @@ function drawAdd() {
       esc(privacy()) +
       '</p><div class="error" role="alert" id="import-error"></div><button class="primary" ' +
       (!draft.files.length || !config.render_enabled ? "disabled" : "") +
-      ">Add &amp; translate</button>" +
+      (prefs.translator === "local" ? ">Add &amp; translate</button>" : ">Add &amp; translate with ChatGPT</button>") +
       (!config.render_enabled
         ? '<p class="error">Rendering is unavailable. Start the backend with a font manifest.</p>'
         : "") +
@@ -872,6 +878,8 @@ function reorder(i, j) {
   drawAdd();
 }
 async function retry(book, page) {
+  if (prefs.translator !== "local" &&
+      !window.confirm("Translate again with ChatGPT? Tralens will send the selected pages and detected text to OpenAI and process the queue in the background.")) return;
   await api("library/retry", {
     book: book.id,
     page: page?.id,
@@ -967,7 +975,36 @@ function menu(kind) {
         "</div>",
     );
 }
-async function act(action) {
+async function openReading(pageId, point) {
+  const page = pagesOf(current().book).find(p => p.id === pageId);
+  if (!page) return;
+  const locationAtTap = location.hash;
+  const lines = await api("library/pages/" + page.id + "/transcript");
+  if (location.hash !== locationAtTap) return;
+  const index = point ? lines.findIndex(({box: [left, top, right, bottom]}) =>
+    point.x >= left && point.x <= right && point.y >= top && point.y <= bottom) : -1;
+  if (point && index < 0) {
+    if ($(".reader").classList.contains("clean")) showChrome();
+    else $(".reader").classList.add("clean");
+    return;
+  }
+  modal("Page text", '<ol class="reading-text">' + lines.map(({box, text}) => {
+    const [x, y, right, bottom] = box;
+    const width = right - x + 8, height = bottom - y + 8;
+    const region = [x - 4, y - 4, width, height].join(" ");
+    return '<li><svg aria-hidden="true" viewBox="' + esc(region) +
+      '" style="aspect-ratio:' + width + '/' + height + '"><image href="' + url(page, "original") +
+      '" width="' + page.width + '" height="' + page.height + '"/></svg><p>' + esc(text) + '</p></li>';
+  }).join("") + '</ol>');
+  if (index >= 0) sheet.querySelectorAll(".reading-text li")[index].scrollIntoView({block:"center"});
+}
+async function act(action, pageId) {
+  if (action === "transcript") return openReading(pageId);
+  if (action === "skip-page") {
+    const {book, page} = current();
+    await api("library/skip", {book: book.id, page: page.id});
+    return refresh(true);
+  }
   if (action === "owner-logout") {
     const reply = await fetch("/api/owner/logout", {method: "POST"});
     if (reply.ok || reply.status === 401) location.reload();
@@ -1019,6 +1056,17 @@ async function act(action) {
     return turn(action === "next" ? 1 : -1);
   if (action === "next-ch" || action === "prev-ch")
     return turn(action === "next-ch" ? 1 : -1, true);
+  if (action === "disconnect-chatgpt") {
+    if (!window.confirm("Disconnect the ChatGPT account from this server? Queued ChatGPT translations may fail and can be retried with Local.")) return;
+    await api("chatgpt/disconnect", {});
+    config.chatgpt_connected = false;
+    config.chatgpt_models = null;
+    prefs.translator = "local";
+    save();
+    render();
+    toast("ChatGPT disconnected.");
+    return;
+  }
   if (action === "retry-page" || action === "retry-book")
     return retry(book, action === "retry-page" ? page : null);
   if (action === "delete-confirm") {
@@ -1037,7 +1085,7 @@ async function act(action) {
 document.addEventListener("click", (e) => {
   const a = e.target.closest("[data-action]");
   if (a) {
-    act(a.dataset.action).catch((err) => toast(err.message));
+    act(a.dataset.action, a.dataset.id).catch((err) => toast(err.message));
     return;
   }
   const m = e.target.closest("[data-item]");
@@ -1049,6 +1097,15 @@ document.addEventListener("click", (e) => {
       URL.revokeObjectURL(draft.files.splice(i, 1)[0].url);
       drawAdd();
     }
+    return;
+  }
+  const original = e.target.closest("[data-reading-fallback] .page-image");
+  if (original) {
+    const bounds = original.getBoundingClientRect();
+    openReading(original.parentElement.dataset.page, {
+      x: (e.clientX - bounds.left) * original.naturalWidth / bounds.width,
+      y: (e.clientY - bounds.top) * original.naturalHeight / bounds.height,
+    }).catch(err => toast(err.message));
     return;
   }
   if (e.target.closest(".canvas") && !e.target.closest("input,.wipe")) {
@@ -1066,9 +1123,20 @@ document.addEventListener("input", (e) => {
   if (draft && ["title", "chapter"].includes(e.target.id))
     draft[e.target.id] = e.target.value;
 });
-async function selectChatGPT(model) {
-  modal("Connect to ChatGPT", '<div id="chatgpt-connect" role="status">Checking your connection…</div>');
-  const panel = $("#chatgpt-connect");
+function showChatGPTConsent(model) {
+  modal("Connect to ChatGPT",
+    '<p>Use your own ChatGPT plan on a Tralens server you control. The server stores your account ID, email and sign-in tokens. When you choose ChatGPT for an import or retry, Tralens sends the selected page images and detected text to OpenAI and processes the queue in the background.</p>' +
+    '<p>You can disconnect in Tralens Settings. Read the <a href="/privacy" target="_blank" rel="noopener">Tralens privacy notice</a> and the <a href="https://openai.com/policies/privacy-policy/" target="_blank" rel="noopener">OpenAI Privacy Policy</a>.</p>' +
+    '<button id="consent-chatgpt" class="primary" type="button">Agree &amp; continue</button>' +
+    '<div id="chatgpt-connect" role="status"></div>');
+  $("#consent-chatgpt").addEventListener("click", (event) => {
+    event.currentTarget.remove();
+    selectChatGPT(model, $("#chatgpt-connect"));
+  }, {once: true});
+}
+
+async function selectChatGPT(model, panel) {
+  panel.textContent = "Checking your connection…";
   const active = () => sheet.open && panel.isConnected && config;
   try {
     let result;
@@ -1133,7 +1201,7 @@ document.addEventListener("change", (e) => {
     if (el.dataset.pref === "translator" && el.value !== "local" && config.frontier_provider === "chatgpt") {
       const requested = el.value;
       el.value = prefs.translator;
-      selectChatGPT(requested);
+      showChatGPTConsent(requested);
       return;
     }
     prefs[el.dataset.pref] = el.value;
@@ -1255,6 +1323,7 @@ document.addEventListener(
   },
   { passive: true },
 );
+addEventListener("resize", () => { if (config && route()[0] === "read" && !sheet.open) render(); });
 addEventListener("hashchange", () => {
   if (!config) return;
   if (sheet.open) closeSheet();

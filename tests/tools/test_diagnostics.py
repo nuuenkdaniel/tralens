@@ -89,7 +89,8 @@ class DiagnosticsTests(unittest.TestCase):
                 if isinstance(node, ast.ImportFrom):
                     self.assertNotIn("diagnostics", node.module or "")
                 if isinstance(node, ast.If):
-                    self.assertNotIn("__name__", ast.unparse(node.test))
+                    self.assertFalse(any(isinstance(term, ast.Name) and term.id == "__name__"
+                                         for term in ast.walk(node.test)), str(path))
         tree = ast.parse((source / "rendering" / "renderer.py").read_text())
         self.assertEqual([node.name for node in tree.body if isinstance(node, ast.FunctionDef)],
                          ["cover_text", "draw_text"])

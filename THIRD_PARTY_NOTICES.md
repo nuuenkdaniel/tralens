@@ -1,58 +1,31 @@
 # Third-party notices
 
-Tralens is licensed under the GNU General Public License v3.0 or later (see
-[LICENSE](LICENSE)). It depends on, or can optionally use, the third-party software
-and models below. Each keeps its own license; nothing listed here is relicensed
-under the GPL. Versions are the ones in the development environment at the time of
-writing.
+Tralens is distributed under [GPL-3.0-or-later](LICENSE). Dependencies and model weights have their own terms.
 
-## Python packages
+## Container distribution
 
-Installed by `pyproject.toml` (directly or as dependencies):
+A published image carries the Tralens source repository and revision in its OCI labels. The exact corresponding Tralens source, including build instructions and scripts, is available from the revision URL in the image's `org.opencontainers.image.documentation` label.
 
-| Package | Version | License |
-| --- | --- | --- |
-| PaddleOCR (`paddleocr`) | 3.4.0 | Apache-2.0 |
-| PaddlePaddle (`paddlepaddle-gpu`) | 3.4.0 | Apache-2.0 |
-| PaddleX (`paddlex`) | 3.4.2 | Apache-2.0 |
-| Ollama Python client (`ollama`) | 0.6.1 | MIT |
-| scikit-learn | 1.7.2 | BSD-3-Clause |
-| NumPy | 2.2.6 | BSD-3-Clause |
-| Pillow | 10.4.0 | HPND (MIT-CMU) |
-| OpenCV (`opencv-contrib-python`) | 4.10.0.84 | Apache-2.0 |
-| PyYAML | 6.0.2 | MIT |
+The image includes Debian packages from the official Python base image and from the Dockerfile. See `/usr/share/doc/<package>/copyright` and `/usr/share/common-licenses` for package terms. `/app/debian-sources.tsv` lists the installed binary packages and exact Debian source names and versions. Use [Debian Snapshot's source archive](https://snapshot.debian.org/package/) to retrieve those versions. The [official Python image source](https://github.com/docker-library/python) includes its build instructions and [CPython](https://github.com/python/cpython) publishes source and license texts for each version.
 
-Used only by optional features (Manga OCR rereads, Hayai OCR adapter):
+`uv.lock` lists the versions and hashes of Python dependencies, with source archives where upstream publishes them. The image preserves wheel license files and metadata alongside the installed packages under `/app/.venv/lib`. In particular:
 
-| Package | Version | License |
-| --- | --- | --- |
-| Manga OCR (`manga-ocr`) | 0.1.16 | Apache-2.0 |
-| PyTorch (`torch`) | 2.14.1 | BSD-3-Clause, with bundled components under Apache-2.0, MIT and others |
-| Hugging Face Transformers | 4.57.6 | Apache-2.0 |
+| Component | Primary license and source |
+| --- | --- |
+| PaddleOCR 3.7.0, PaddlePaddle 3.3.1 and PaddleX 3.7.2 | Apache-2.0. [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) · [PaddlePaddle](https://github.com/PaddlePaddle/Paddle) · [PaddleX](https://github.com/PaddlePaddle/PaddleX) |
+| AIStudio SDK 0.3.9 | Apache-2.0 per its [release metadata](https://pypi.org/project/aistudio-sdk/0.3.9/). |
+| OpenCV contrib wheel 4.10.0.84 | OpenCV uses Apache-2.0. The Linux wheel includes separately licensed native libraries such as LGPL FFmpeg and Qt. See the wheel's `LICENSE-3RD-PARTY.txt`, its [build sources](https://github.com/opencv/opencv-python/tree/4.10.0.84), and [OpenCV sources](https://github.com/opencv/opencv/tree/4.10.0). |
+| Pillow 13.0.0 | HPND. Its wheels also include separately licensed image and font libraries. [Pillow sources and notices](https://github.com/python-pillow/Pillow) |
+| scikit-learn, NumPy, SciPy | BSD-3-Clause, with additional bundled library notices in the wheels. [scikit-learn](https://github.com/scikit-learn/scikit-learn) · [NumPy](https://github.com/numpy/numpy) · [SciPy](https://github.com/scipy/scipy) |
+| ONNX Runtime 1.23.2 | MIT, with bundled component notices. [ONNX Runtime](https://github.com/microsoft/onnxruntime/tree/v1.23.2) |
+| pypdfium2 4.30.0 | Apache-2.0 or BSD-3-Clause, with PDFium and third-party notices in the wheel. [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) |
+| SentencePiece 0.2.1 and Tokenizers 0.21.4 | Apache-2.0. [SentencePiece](https://github.com/google/sentencepiece/tree/v0.2.1) · [Tokenizers](https://github.com/huggingface/tokenizers/tree/v0.21.4) |
+| DejaVu Sans | The container uses Debian's unmodified `fonts-dejavu-core` package. The package includes Bitstream Vera and Arev license texts. [Debian package and source](https://packages.debian.org/bookworm/fonts-dejavu-core) |
 
-All of these licenses are compatible with GPLv3.
+Optional native Android builds pull Capacitor and Android dependencies separately. Their pinned npm versions are in `frontend/android/package-lock.json`. The beta container does not include Android build tools or APKs.
 
-## Models you supply yourself
+## Model and evaluation assets
 
-Tralens does not include or download any model weights. You install and run these
-yourself, and their own terms apply to you, including any restrictions on
-commercial use or redistribution:
+The container includes no model weights. The setup service retrieves pinned [PaddleOCR detector](https://huggingface.co/PaddlePaddle/PP-OCRv6_medium_det) and [recognizer](https://huggingface.co/PaddlePaddle/PP-OCRv6_medium_rec) weights from the upstream Apache-2.0 model repositories. Ollama models are installed by the operator. TranslateGemma uses the [Gemma Terms of Use](https://ai.google.dev/gemma/terms). Check the terms for every additional OCR, inpainting, or translation model before using or redistributing it.
 
-- **PaddleOCR model exports** (detection/recognition): Apache-2.0.
-- **`translategemma:27b`** via Ollama: Google's Gemma Terms of Use.
-- **`qwen3.8`** vision model via Ollama: the Qwen model license for that release.
-- **Manga OCR model snapshot**: check the license on the model's Hugging Face page.
-- **`comictextdetector.pt.onnx`** (optional `--text-mask-model`): deployment and
-  redistribution rights have not been confirmed. Treat it as local evaluation only.
-
-## Fonts
-
-Tralens ships no fonts. Rendering uses only fonts you list in your own font
-manifest, each with its own license file. Font licenses are your responsibility.
-
-## Test data
-
-Some local evaluation pages come from *Ubunchu!* by Hiroshi Seo (published by ASCII
-MEDIA WORKS Inc.), released under Creative Commons Attribution-NonCommercial 3.0
-(<https://creativecommons.org/licenses/by-nc/3.0/>). These pages are not included in
-this repository. Experiment notes in `docs/` refer to them by page name only.
+Experimental font choices, manga OCR snapshots, LaMa, SDXL, and text-mask checkpoints require operator-supplied assets. Redistribution rights for the experimental Comic Text Detector checkpoint have not been established. Local evaluation pages, translated samples, and demo transcripts are excluded from the release tree and image.
