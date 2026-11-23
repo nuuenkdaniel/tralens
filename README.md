@@ -4,39 +4,51 @@ Tralens is a self-hosted manga reader that translates Japanese pages into Englis
 
 ## Quick start
 
-Docker Compose is the recommended install. The beta image targets **Linux x86-64** with Docker Engine and Docker Compose v2. The reader uses CPU OCR. Ollama can use CPU or a supported GPU on the host. Start with one page to check speed and quality on your hardware.
+Docker Compose is the recommended install on **Linux x86-64** with Docker Engine
+and Docker Compose v2. The reader uses CPU OCR. Ollama can use CPU or a supported GPU.
 
-1. On the Linux host, [install Ollama](https://docs.ollama.com/linux) and pull the default local translation model. The model download is about 3.3 GB.
+Tralens is in preview. Use the source build below today. When a public beta is
+available, download the Compose bundle from [GitHub Releases](https://github.com/nuuenkdaniel/tralens/releases).
+Its `.env.example` pins the image digest used for that release.
 
-   ```sh
-   ollama pull translategemma:4b
-   ```
+### Build the preview
 
-   If you plan to use only ChatGPT, you can skip Ollama and choose a GPT model before importing pages.
+```sh
+git clone https://github.com/nuuenkdaniel/tralens.git
+cd tralens
+docker compose -f compose.yml -f compose.build.yml build reader
+```
 
-2. Download the Compose file and make the persistent directories. Run the commands as the non-root user who will own your library.
+### Start the reader
 
-   ```sh
-   mkdir -p tralens && cd tralens
-   curl -fL https://raw.githubusercontent.com/nuuenkdaniel/tralens/v0.1.0-beta.1/compose.yml -o compose.yml
-   curl -fL https://raw.githubusercontent.com/nuuenkdaniel/tralens/v0.1.0-beta.1/.env.example -o .env.example
-   cp .env.example .env
-   printf 'TRALENS_UID=%s\nTRALENS_GID=%s\n' "$(id -u)" "$(id -g)" >> .env
-   install -d -m 700 tralens-data/library tralens-data/config \
-     tralens-data/state tralens-data/models tralens-data/assets
-   ```
+Run these commands in the checkout or extracted release bundle. Use the non-root
+account that will own the library. To translate locally, [install Ollama](https://docs.ollama.com/linux)
+on the host and run `ollama pull translategemma:4b` (about 3.3 GB). ChatGPT-only
+installs can select a GPT model before importing pages.
 
-3. Pull the image, download the pinned PaddleOCR models, and start the reader.
+```sh
+if [ ! -e .env ]; then
+  cp .env.example .env
+  printf 'TRALENS_UID=%s\nTRALENS_GID=%s\n' "$(id -u)" "$(id -g)" >> .env
+fi
+install -d -m 700 tralens-data/library tralens-data/config \
+  tralens-data/state tralens-data/models tralens-data/assets
+```
 
-   ```sh
-   docker compose pull reader
-   docker compose run --rm setup
-   docker compose up -d --wait
-   ```
+If `TRALENS_IMAGE` points to GHCR, run `docker compose pull reader` first.
+Then download the pinned PaddleOCR models and start the reader.
 
-   Open [http://127.0.0.1:7871](http://127.0.0.1:7871) on the host. From another computer, use an SSH tunnel with `ssh -N -L 7871:127.0.0.1:7871 user@server`, then open that same URL. For HTTPS access, follow the [single-owner deployment guide](docs/self-hosted-reader.md#remote-access-over-https).
+```sh
+docker compose run --rm --pull never setup
+docker compose up -d --wait --pull never
+```
 
-4. Choose a model under **Settings → Translation**, then **Add manga**. Try one page. The reader shows the original while the translation runs.
+Open [http://127.0.0.1:7871](http://127.0.0.1:7871) on the host. From another
+computer, use `ssh -N -L 7871:127.0.0.1:7871 user@server` and open that same URL.
+For HTTPS access, follow the [single-owner deployment guide](docs/self-hosted-reader.md#remote-access-over-https).
+
+Choose a model under **Settings → Translation**, then **Add manga**. Try one page
+to check speed and quality on your hardware.
 
 ## Translation models
 
