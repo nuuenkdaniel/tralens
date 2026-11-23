@@ -2,3 +2,4 @@
 paddleocr==3.7.0
 paddlex[ocr]==3.7.2
 -r backend/requirements-chatgpt.txt
+python-multipart>=0.0.22,<1

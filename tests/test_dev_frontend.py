@@ -701,7 +701,7 @@ const out = [];
 for (const mode of ['render', 'translate', 'ocr'])
   for (const style of ['replace-all', 'protect'])
     for (const reread of [false, true])
-      for (const lama of [false, true]) out.push(runOptions({mode, style, budget: 64, reread: reread && mode === 'render', lama}));
+      for (const reconstruction of ['classical', 'auto', 'lama', 'sdxl']) out.push(runOptions({mode, style, budget: 64, reread: reread && mode === 'render', reconstruction}));
 out.push({styles: [styleOf({visibility_policy: 'always-show'}), styleOf({replacement_policy: 'confidence-gated', visibility_policy: 'replacement-only'}), styleOf({replacement_policy: 'all'})]});
 console.log(JSON.stringify(out));
 '''
@@ -709,6 +709,7 @@ console.log(JSON.stringify(out));
         self.assertEqual(result.returncode, 0, result.stderr)
         *presets, styles = json.loads(result.stdout)
         self.assertEqual(styles['styles'], ['replace-all', 'protect', 'replace-all'])
+        self.assertEqual({p['reconstruction_policy'] for p in presets}, {'classical','auto','lama','sdxl'})
         for preset in presets:
             self.assertEqual(s.options(preset, render_enabled=True), preset)
         replace_all = next(p for p in presets if p['mode'] == 'render' and p['visibility_policy'] == 'always-show')

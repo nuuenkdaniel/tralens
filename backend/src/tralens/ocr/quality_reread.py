@@ -44,10 +44,6 @@ def suspect_latin_mark(text):
     return re.search(r'[A-Za-z]ー[A-Za-z]', unicodedata.normalize('NFKC', text)) is not None
 
 
-def pixels_sha(image):
-    return hashlib.sha256(f'RGB:{image.width}:{image.height}:'.encode() + image.tobytes()).hexdigest()
-
-
 def enclosure_map(image, detections):
     gray = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2GRAY)
     count, labels, stats, _ = cv2.connectedComponentsWithStats((gray >= 245).astype(np.uint8), connectivity=4)
@@ -252,7 +248,7 @@ def refine(engine, image, original_bytes, *, vision, manga, model_identity, outp
                 retain_image(name, transformed)
                 vision_lines.append(transformed)
                 vision_line_evidence.append({'source_id': source_id, 'bounds': line_bounds,
-                    'pixels_sha256': pixels_sha(transformed), 'artifact': name})
+                    'pixels_sha256': image_fingerprint(transformed), 'artifact': name})
             payload, presentation = vision_payload(view, vision_lines)
             retain(prefix+'-presentation.png', presentation)
         except (ValueError, OSError) as error:
@@ -261,7 +257,7 @@ def refine(engine, image, original_bytes, *, vision, manga, model_identity, outp
         stage['vision_calls'] += 1
         result.attempts += 1
         record = {'proposal_id': proposal.proposal_id, 'main_ids': list(ids), 'bounds': list(bounds),
-            'native_pixels_sha256': pixels_sha(crop), 'presentation_pixels_sha256': pixels_sha(view),
+            'native_pixels_sha256': image_fingerprint(crop), 'presentation_pixels_sha256': image_fingerprint(view),
             'scale': 4, 'interpolation': 'Pillow LANCZOS', 'payload_sha256': revision(payload),
             'vision_lines': vision_line_evidence,
             'preferred': False, 'line_evidence': [], 'status': 'in_progress',
@@ -310,7 +306,7 @@ def refine(engine, image, original_bytes, *, vision, manga, model_identity, outp
                             name = prefix+f'-line-{len(record["line_evidence"])-1}-{padding}-{scale}.png'
                             retain_image(name, transformed)
                             item['readings'].append({'bounds': window, 'scale': scale, 'text': text,
-                                                     'pixels_sha256': pixels_sha(transformed), 'artifact': name})
+                                                     'pixels_sha256': image_fingerprint(transformed), 'artifact': name})
                             item['matched'] = normalized(text) == normalized(line)
                             if item['matched']:
                                 break
@@ -440,8 +436,8 @@ def validate_pixels(candidate, image, detections):
             'reread presentation geometry drift')
     require(bounds == expected, 'reread crop is not the exact source-member union')
     native = image.crop(bounds)
-    require(pixels_sha(native) == proof['native_pixels_sha256']
-            and pixels_sha(native.resize((native.width*4, native.height*4), Image.Resampling.LANCZOS)) == proof['presentation_pixels_sha256'],
+    require(image_fingerprint(native) == proof['native_pixels_sha256']
+            and image_fingerprint(native.resize((native.width*4, native.height*4), Image.Resampling.LANCZOS)) == proof['presentation_pixels_sha256'],
             'reread block/presentation source pixels drift')
     require(len(proof['vision_lines']) == len(candidate['crop']['main_ids']), 'visual line input coverage drift')
     for source_id, line in zip(candidate['crop']['main_ids'], proof['vision_lines']):
@@ -453,7 +449,7 @@ def validate_pixels(candidate, image, detections):
         window(line['bounds'], 4)
         require(line['bounds'] == expected_line, 'visual line crop geometry drift')
         native = image.crop(line['bounds'])
-        require(pixels_sha(native.resize((native.width*4, native.height*4), Image.Resampling.LANCZOS)) == line['pixels_sha256'],
+        require(image_fingerprint(native.resize((native.width*4, native.height*4), Image.Resampling.LANCZOS)) == line['pixels_sha256'],
                 'visual line pixels drift')
     for line in proof['line_evidence']:
         source = raw[(type(line['source_id']), line['source_id'])]
@@ -467,4 +463,4 @@ def validate_pixels(candidate, image, detections):
             require(scale in (1, 2) and reading['bounds'] in allowed, 'reread line scale/binding drift')
             native = image.crop(reading['bounds'])
             view = native if scale == 1 else native.resize((native.width*2, native.height*2), Image.Resampling.LANCZOS)
-            require(pixels_sha(view) == reading['pixels_sha256'], 'reread line source pixels drift')
+            require(image_fingerprint(view) == reading['pixels_sha256'], 'reread line source pixels drift')

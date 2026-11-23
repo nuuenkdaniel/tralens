@@ -1,57 +1,32 @@
-# One-owner Tralens server
+# Self-host the Tralens reader
 
-The owner signs into the reader with a server key. Web and Android clients share the library and the server's translation account. The key grants full control of that library and its jobs. The owner can authorize ChatGPT from the desktop reader or Android app.
+Start with the [Docker Compose quick start](../README.md#quick-start) on Linux x86-64. This beta uses Linux host networking to reach the host's Ollama service and bind the reader and OAuth callback to loopback. Keep one reader per library. macOS, Windows, and ARM deployments have not been validated.
 
-## Prepare the reader
+## Local models
 
-From a fresh Linux x86-64 checkout with uv installed, create the pinned Python 3.10 environment. The default runtime uses CPU OCR. Existing GPU deployments can keep their separate GPU environment. LaMa and SDXL use their configured weights and runtimes independently.
-
-```sh
-uv sync --locked --python 3.10
-```
-
-Download the medium Japanese-capable OCR exports once into the model directory. These are the revisions used in the release check.
+Keep Ollama on the same host at `http://127.0.0.1:11434` or set `TRALENS_OLLAMA` to a private IP address you control. Use [Ollama's local-only mode](https://docs.ollama.com/faq) if you want Ollama to avoid cloud features. Verify the service and model before adding pages.
 
 ```sh
-models="$HOME/.cache/tralens/paddle-v6-models"
-.venv/bin/hf download PaddlePaddle/PP-OCRv6_medium_det --revision 8e0f56fb2ef86b461d99cfc7ac5c137738985f61 --local-dir "$models/PP-OCRv6_medium_det"
-.venv/bin/hf download PaddlePaddle/PP-OCRv6_medium_rec --revision e5a92bcbc5cc1b494628e458d267778f0704fd7c --local-dir "$models/PP-OCRv6_medium_rec"
+curl -fsS http://127.0.0.1:11434/api/tags
+ollama list
 ```
 
-Prepare a [licensed font manifest](../README.md#explicit-font-manifest) for lettering. Local translation uses the configured Ollama service and installed model (default `translategemma:27b`). PDF import needs Poppler and util-linux. For a local test, start the reader and visit `http://127.0.0.1:7871`:
+Compose defaults to `translategemma:4b`. For the 12B or 27B model, pull the specific tag and set `TRALENS_MODEL` to match. If you configure a different local model family, use `TRALENS_MODEL_PROFILE=generalist`. Restart with `docker compose up -d --wait`. Choose **Local** in reader Settings. Set `TRALENS_FRONTIER_PROVIDER=disabled` to hide GPT models and disable the ChatGPT integration.
+
+## Remote access over HTTPS
+
+For personal access, an SSH tunnel from your computer can reach the loopback reader as shown in the README. Keep the remote end of the tunnel private. On a shared host, every user who can connect to loopback can reach an unauthenticated reader. Enable owner mode in that case.
+
+For direct access from your own devices, set `TRALENS_ORIGIN=https://manga.example.com` in `.env`. Use the exact browser origin and omit the trailing slash. Generate the owner key once, using the same account that owns the configuration directory.
 
 ```sh
-.venv/bin/python backend/serve.py --port 7871 --fonts /path/to/fonts.json
+(umask 077; set -C; openssl rand -hex 32 > tralens-data/config/owner.key)
+docker compose up -d --wait
 ```
 
-Use one reader process per output directory. Back up the entire output directory while the service is stopped.
+Save the key securely and enter it at the HTTPS reader. Sessions expire after seven days or a restart. Restart after replacing the key to invalidate all sessions. If the upgrade comes from an older Compose config that mounted a separate key file, place that existing key at `owner.key` under the configured `TRALENS_CONFIG` directory with mode 0600.
 
-Generate the owner key once under the Linux user that will run the service. Copy its value into your password manager. Generating a new key and restarting the service invalidates all existing sessions.
-
-```sh
-install -d -m 700 ~/.config/tralens
-(umask 077; set -C; openssl rand -hex 32 > ~/.config/tralens/owner.key)
-```
-
-## Connect ChatGPT directly
-
-Start the reader and open **Settings → Translation model**. Local translation works immediately. Choose a GPT model and select **Continue with ChatGPT**. After consent, the reader checks model availability and applies your selection. Closing the dialog keeps your previous model selected.
-
-In the Android app, select a GPT model, approve access in the phone’s browser, and tap **Open Tralens**. The server exchanges the one-time code and stores the credentials. Use an owner-protected HTTPS connection for network access. For a remote web browser outside the Android app, finish consent on the server desktop. For a headless server, the reader shows the loopback link and the port to forward over SSH. All readers of this single-owner server share the resulting connection.
-
-The standard backend requirements include OAuth support. For an existing environment, or to connect from the command line:
-
-```sh
-uv pip install --python .venv/bin/python -r backend/requirements-chatgpt.txt
-.venv/bin/python backend/chatgpt.py login
-.venv/bin/python backend/chatgpt.py models
-```
-
-Your system browser opens OpenAI's consent screen and returns to a temporary loopback listener. The server stores renewable credentials in its private configuration directory under `~/.config/tralens/chatgpt` (or `$XDG_CONFIG_HOME/tralens/chatgpt`). Use `backend/chatgpt.py status` to check the connection and `backend/chatgpt.py logout` to revoke it. For a headless server, connect from your desktop with `ssh -L 1455:127.0.0.1:1455 user@server`. In that SSH session run `backend/chatgpt.py login --no-browser --port 1455` with the backend Python interpreter. Open the printed private loopback link on the desktop and leave the SSH session connected through sign-in. Usage and limits are available in [ChatGPT settings](https://chatgpt.com/settings/usage).
-
-## Serve over HTTPS
-
-Point your DNS name at a TLS reverse proxy on the server. Configure its certificate for that name and forward the original Host header. For example, this Caddyfile serves the reader on standard HTTPS.
+Set up a local reverse proxy that preserves the original Host header. For example, configure DNS and use Caddy.
 
 ```caddyfile
 manga.example.com {
@@ -59,20 +34,69 @@ manga.example.com {
 }
 ```
 
-Stop any existing reader using the same library before switching deployments. Start the backend with the same model, font and output paths as your existing service. Substitute your domain and actual paths below.
+Keep the HTTP listener and Ollama private. If your proxy enforces upload limits, choose an appropriate cap and timeout. The reader caps a batch at 256 pages and a multipart request at 4 GiB. Individual images are limited to 32 MiB, 4 megapixels, and a 4096-pixel side. PDF rasterization and uploads need temporary disk space under `state/tmp`.
+
+## Connect ChatGPT with OAuth
+
+Review the [privacy notice](../PRIVACY.md), then choose a GPT model in **Settings → Translation** and accept the data-use notice. If your browser runs on the server or reaches the reader over SSH, the OAuth callback still needs a loopback connection to the machine running Tralens. For a browser on the host, follow the link the reader shows. For a remote host, use a fixed callback port through SSH.
+
+From your computer, open a dedicated SSH session and run the login command on the server.
 
 ```sh
-.venv/bin/python backend/serve.py \
-  --host 127.0.0.1 --port 7871 \
-  --public-origin https://manga.example.com \
-  --owner-key-file ~/.config/tralens/owner.key \
-  --output-root /path/to/library-and-jobs \
-  --model-root /path/to/ocr-models --fonts /path/to/fonts.json \
-  --frontier-provider chatgpt
+ssh -L 1455:127.0.0.1:1455 user@server
+cd /path/to/tralens
+docker compose exec reader python backend/chatgpt.py login --no-browser --port 1455
 ```
 
-Open the HTTPS site and enter the owner key. For Android, enter the same hostname, select HTTPS and port 443. Sessions expire after seven days or a reader restart. Settings offers sign-out for the current device. The reverse proxy should expose only the owner-mode reader. Keep any separate diagnostic servers and Ollama listeners private.
+Read the [privacy notice](../PRIVACY.md) before opening the printed private link in your local browser. Keep SSH open until consent finishes. Return to the reader and choose a model. If the port is in use, use the same alternate port for the SSH forward and login. A just-started sign-in in Settings may hold the OAuth lock until that attempt ends.
 
-The ChatGPT provider checks account model availability when a GPT model is selected and before inference. Both the missed-text scan and the translation/review stages use the selected provider. The existing Codex transport can be selected explicitly with `--frontier-provider codex`. Local jobs continue to use the configured local models.
+OpenAI determines which models your ChatGPT plan can use. These requests use your plan's eligible allowance and limits. In the Android reader, if you built and installed it, complete consent in the phone browser and tap **Open Tralens**. Sign in only as the owner, from devices you control. [OpenAI's open-source integration guide](https://developers.openai.com/siwc/token-sharing-open-source)
 
-See OpenAI’s [registration flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) and [model access](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
+Disconnect in Tralens Settings or run `docker compose exec reader python backend/chatgpt.py logout`. To connect a different account, disconnect, stop the reader, remove the protected `tralens-data/config/tralens/chatgpt/account.json` file, and start again. Manage remaining access through your ChatGPT account's connections.
+
+## Data, upgrades, and recovery
+
+| Default path | Contents |
+| --- | --- |
+| `tralens-data/library` | SQLite library, originals, translated pages, and per-job evidence |
+| `tralens-data/config` | Owner key for HTTPS and protected ChatGPT configuration |
+| `tralens-data/state` | Runtime and inference state, caches, and upload scratch space |
+| `tralens-data/models` | Downloaded PaddleOCR models |
+| `tralens-data/assets` | Optional operator-supplied assets |
+
+The default upload and job storage budget is 8 GiB, with up to 2 GiB reserved per job. Keep free disk space beyond that budget for temporary files, models, and backups. Deleting a book in the reader removes its library entries. To reclaim older job artifacts, stop the service and back up the tree before archiving selected job directories. Removing a job directory also removes its job history and can affect saved transcript or diagnostic access.
+
+Stop the reader before backing up. Protect backups as they may contain owner keys and OAuth credentials. Restore into an empty directory while the reader is stopped, preserving ownership and permissions. Use the same image version for the first start after restoring. Store the data on a local filesystem with file locks and atomic renames.
+
+Pin `TRALENS_IMAGE` in `.env` to a version or digest before unattended deployments. To upgrade, stop and back up, change the image tag, check the release notes, and run:
+
+```sh
+docker compose pull reader
+docker compose run --rm setup
+docker compose up -d --wait
+```
+
+To roll back, stop the reader, restore the pre-upgrade backup, and recreate the service with its original image tag. A newer image can migrate SQLite or job records. Use the same state directory when multiple separate libraries share an Ollama endpoint so Tralens can coordinate inference.
+
+### Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Reader fails to start | Run `docker compose logs --tail=100 reader`. Confirm UID/GID, bind paths, model setup, and private owner-key permissions. |
+| Browser cannot connect | Confirm `docker compose ps`, the port, the tunnel, or the proxy Host header and exact HTTPS origin. |
+| Local translations fail | Confirm the Ollama endpoint and installed tag. Make sure Ollama has enough memory and test with one page. |
+| Queue waits for a previous local inference | Inspect with `docker compose exec reader python backend/tools/inference_state.py --endpoint http://127.0.0.1:11434`. Use the configured endpoint if different. Acknowledge an incident only after confirming on the Ollama host that the request has stopped. |
+| GPT model is missing | Confirm account eligibility and model availability. Reconnect if the grant was revoked or expired. |
+| Upload fails | Check the file types, archive contents, page and size limits, writable state, available space, and proxy upload policy. |
+
+## Build from source
+
+Clone the release tag or branch you want. Follow the README for `.env` and directories, then set `TRALENS_IMAGE=tralens:local` in `.env`.
+
+```sh
+docker compose -f compose.yml -f compose.build.yml build reader
+docker compose run --rm --pull never setup
+docker compose up -d --wait --pull never
+```
+
+The image includes a DejaVu Sans font manifest for English lettering. To use a licensed custom static font, place it and its license under `tralens-data/assets` and point `TRALENS_FONTS` at its manifest under `/assets`. Use the [manifest format](../DEVELOPMENT.md#explicit-font-manifest), with container paths and hashes. The default Compose command expects one face. More advanced startup arguments and a native developer install are in the [development guide](../DEVELOPMENT.md).

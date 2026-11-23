@@ -186,7 +186,10 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
             row.update(display_status=composed_status(row),source_visibility='clean_replacement_unverified' if composed_status(row)=='clean' else 'aggressive_removal_unverified')
             continue
         if 'binding' not in row:
-            row['display_status'] = 'missing'
+            if row.get('source_status') == 'abstained' and (row.get('original_label_retained') or row.get('original_artwork_retained')):
+                row.update(display_status='unchanged',source_visibility='original_retained')
+            else:
+                row['display_status'] = 'missing'
             continue
         if row['binding']['text'] == unit.selected.text or row.get('reason_code') == 'replacement_unchanged_text':
             row.update(display_status='unchanged',source_visibility='original_retained')
@@ -194,7 +197,7 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
         row['display_status'] = 'undisplayed'
         attempt = {'policy':POLICY,'status':'unresolved','native_reason':row.get('reason_code')}
         row['display_fallback'] = attempt
-        if row.get('reason_code') in ('runtime_locality','evaluation_cap'):
+        if row.get('reason_code') in ('runtime_locality','evaluation_cap','uncorroborated_source'):
             attempt['reason'] = 'source_validation_or_explicit_evaluation_limit'
             continue
         extra = pixels*(len(row['binding']['member_ids'])+16)+64_000_000

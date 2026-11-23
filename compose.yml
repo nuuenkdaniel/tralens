@@ -1,0 +1,65 @@
+x-tralens: &tralens
+  image: ${TRALENS_IMAGE:-ghcr.io/nuuenkdaniel/tralens:v0.1.0-beta.1}
+  platform: linux/amd64
+  user: "${TRALENS_UID:-1000}:${TRALENS_GID:-1000}"
+  init: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+
+services:
+  reader:
+    <<: *tralens
+    # The reader and OAuth callback bind to loopback. Ollama also runs on the host.
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    environment:
+      HOME: /config
+      XDG_CONFIG_HOME: /config
+      XDG_CACHE_HOME: /state/cache
+      TMPDIR: /state/tmp
+      TRALENS_STATE_ROOT: /state
+      TRALENS_ORIGIN: ${TRALENS_ORIGIN:-}
+      TRALENS_PORT: ${TRALENS_PORT:-7871}
+      TRALENS_FRONTIER_PROVIDER: ${TRALENS_FRONTIER_PROVIDER:-chatgpt}
+      TRALENS_OWNER_KEY_FILE: /config/owner.key
+    volumes:
+      - ${TRALENS_LIBRARY:-./tralens-data/library}:/library
+      - ${TRALENS_CONFIG:-./tralens-data/config}:/config
+      - ${TRALENS_STATE:-./tralens-data/state}:/state
+      - ${TRALENS_MODELS:-./tralens-data/models}:/models:ro
+      - ${TRALENS_ASSETS:-./tralens-data/assets}:/assets:ro
+    command:
+      - --check-assets
+      - --output-root
+      - /library
+      - --model-root
+      - /models
+      - --fonts
+      - "${TRALENS_FONTS:-/app/fonts.json}"
+      - --endpoint
+      - "${TRALENS_OLLAMA:-http://127.0.0.1:11434}"
+      - --model
+      - "${TRALENS_MODEL:-translategemma:4b}"
+      - --profile
+      - "${TRALENS_MODEL_PROFILE:-translategemma}"
+    healthcheck:
+      test: ["CMD", "python", "/app/deploy/check-health.py"]
+      interval: 15s
+      timeout: 4s
+      start_period: 15s
+      retries: 3
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  setup:
+    <<: *tralens
+    profiles: [setup]
+    environment:
+      HF_HOME: /models/.cache
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    volumes:
+      - ${TRALENS_MODELS:-./tralens-data/models}:/models
+    entrypoint: ["/bin/sh", "/app/deploy/download-models.sh"]

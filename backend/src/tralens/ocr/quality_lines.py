@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
+from .recognition_units import image_fingerprint
 from ..translation.contracts import canonical, revision, strict_json
 
 
@@ -19,10 +20,6 @@ ANGLES = (0, -4, 4, -8, 8)
 def require(condition, message):
     if not condition:
         raise ValueError(message)
-
-
-def digest(image):
-    return hashlib.sha256(f'RGB:{image.width}:{image.height}:'.encode()+image.tobytes()).hexdigest()
 
 
 def normalized(text):
@@ -70,7 +67,7 @@ class OriginalLines:
         pixels[support] = self.pixels[top:bottom, left:right][support]
         view = Image.fromarray(pixels)
         return view, {'source_id': source_id, 'bounds': bounds, 'components': chosen,
-            'native_pixels_sha256': digest(view), 'kind': 'original_components_on_white_for_recognition_only',
+            'native_pixels_sha256': image_fingerprint(view), 'kind': 'original_components_on_white_for_recognition_only',
             'source_pixels_modified': False, 'erase_permission': False}
 
 
@@ -112,7 +109,7 @@ def attempt(unit, proposal, source, *, vision, manga, stage, retain, retain_imag
     context = source.image.crop(proposal.crop_bounds)
     require(context.width*context.height*16 <= 2_000_000, 'line fallback context budget')
     context = context.resize((context.width*4, context.height*4), Image.Resampling.LANCZOS)
-    proof['context_pixels_sha256'] = digest(context)
+    proof['context_pixels_sha256'] = image_fingerprint(context)
     for index, original in enumerate(raw):
         source_id = original['source_id']
         if original['confidence'] >= RAW_FLOOR and source_id not in forced:
@@ -152,7 +149,7 @@ def attempt(unit, proposal, source, *, vision, manga, stage, retain, retain_imag
                     text = manga(transformed, source_box_id=source_id, crop_bounds=binding['bounds'])
                     require(type(text) is str and len(text) <= 1000, 'invalid corroborating line output')
                     retain_image(prefix+f'-line-{index}-trial-{trial_index}-angle-{angle}.png', transformed)
-                    trial['readings'].append({'angle': angle, 'text': text, 'pixels_sha256': digest(transformed)})
+                    trial['readings'].append({'angle': angle, 'text': text, 'pixels_sha256': image_fingerprint(transformed)})
                     if normalized(text) == normalized(verdict['text']):
                         item.update(selected_trial=trial_index, text=verdict['text'])
                         break
@@ -204,7 +201,7 @@ def validate_pixels(proof, image, detections):
         and 0 <= bounds[0] < bounds[2] <= image.width and 0 <= bounds[1] < bounds[3] <= image.height
         and (bounds[2]-bounds[0])*(bounds[3]-bounds[1])*16 <= 2_000_000, 'mixed context geometry budget')
     context = image.crop(bounds)
-    require(digest(context.resize((context.width*4, context.height*4), Image.Resampling.LANCZOS)) == proof['context_pixels_sha256'],
+    require(image_fingerprint(context.resize((context.width*4, context.height*4), Image.Resampling.LANCZOS)) == proof['context_pixels_sha256'],
             'mixed context original pixels drift')
     for line in proof['lines']:
         if line['kind'] == 'raw_unchanged':
@@ -219,4 +216,4 @@ def validate_pixels(proof, image, detections):
             require(revision(payload(view, scaled_context if trial['context'] else None)) == trial['payload_sha256'],
                     'mixed visual input payload drift')
             for reading in trial['readings']:
-                require(digest(manga_view(native, reading['angle'])) == reading['pixels_sha256'], 'mixed rotated line source pixels drift')
+                require(image_fingerprint(manga_view(native, reading['angle'])) == reading['pixels_sha256'], 'mixed rotated line source pixels drift')

@@ -1,0 +1,17 @@
+**
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!PRIVACY.md
+!deploy/
+!deploy/*.py
+!deploy/*.sh
+!backend/
+!backend/**
+!frontend/
+!frontend/web/
+!frontend/web/**
+**/__pycache__/

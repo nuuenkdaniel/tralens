@@ -243,3 +243,115 @@ def discover(engine,image,reader):
         stage=getattr(engine,'outlined_sound_discovery',{'policy':POLICY,'added_ids':[]})
         stage['error']=type(error).__name__+': '+str(error)[:512]
         engine.outlined_sound_discovery=stage
+
+
+def outlined_kana(image, box, reader):
+    """Corroborate a weak or truncated native reading against outlined glyph interiors."""
+    import re
+    from PIL import Image
+    l,t,r,b = box.bbox
+    w,h = r-l,b-t
+    if not (24 <= min(w,h) and max(w,h) <= 144 and len(box.text) <= 2
+            and (box.confidence < .5 or re.fullmatch('[一-鿿]',box.text))):
+        return
+    # A single square glyph can be the beginning of a horizontal effect.
+    extend = round(w*1.15) if len(box.text)==1 and .65 <= w/h <= 1.5 else 0
+    bounds = max(0,l-2),max(0,t-2),min(image.width,r+extend+3),min(image.height,b+7)
+    crop = image.crop(bounds)
+    gray = cv2.cvtColor(np.asarray(crop),cv2.COLOR_RGB2GRAY)
+    contours,tree = cv2.findContours(np.uint8(gray<150),cv2.RETR_CCOMP,cv2.CHAIN_APPROX_SIMPLE)
+    if tree is None:
+        return
+    surface = np.full(gray.shape,255,np.uint8)
+    holes = []
+    for contour,parent in zip(contours,tree[0,:,3]):
+        x,y,cw,ch = cv2.boundingRect(contour)
+        if (parent >= 0 and 4 <= min(cw,ch) and max(cw,ch) < min(64,.85*max(w,h))
+                and cv2.contourArea(contour) > .15*cw*ch):
+            holes.append(contour)
+            cv2.drawContours(surface,[contour],-1,0,-1)
+    if not 3 <= len(holes) <= 14:
+        return
+    x,y,cw,ch = cv2.boundingRect(np.concatenate(holes))
+    view = Image.fromarray(surface[y:y+ch,x:x+cw]).convert('RGB')
+    reading = reader(view)
+    if not isinstance(reading,str) or not re.fullmatch('[ぁ-ゖァ-ヺー]{1,5}[っッ]',reading) or reader(crop) != reading:
+        return
+    left,top = bounds[:2]
+    polygon = np.float32([[left+x-2,top+y-2],[left+x+cw+2,top+y-2],
+                          [left+x+cw+2,top+y+ch+2],[left+x-2,top+y+ch+2]])
+    polygon = np.clip(polygon,[0,0],[image.width-1,image.height-1]).astype('float32')
+    yy,xx = np.where(surface == 0)
+    major,minor = (yy,xx) if ch>cw else (xx,yy)
+    lo,hi = np.percentile(major,[25,75])
+    slope = (np.median(minor[major>=hi])-np.median(minor[major<=lo]))/max(1,hi-lo)
+    angle = float(np.clip(np.degrees(np.arctan(slope))*(1 if ch>cw else -1),-15,15))
+    return reading, polygon, angle
+
+
+def blank_sound(image, box, reader):
+    """Check an existing blank detector footprint for a short handwritten effect."""
+    import re
+    if box.text or max(box.bbox[2]-box.bbox[0],box.bbox[3]-box.bbox[1]) > 320:
+        return None
+    reading = None
+    for view in reader_geometry.VIEWS:
+        try:
+            mapping = reader_geometry.plan(image.size,box.poly,view=view)
+            crop = reader_geometry.pixels(image,mapping)
+            if view == 'tight' and np.std(np.asarray(crop.convert('L'))) < 5:
+                return None
+            text = reader(crop)
+        except (ValueError, RuntimeError):
+            return None
+        if not isinstance(text,str) or not re.fullmatch(r'[ぁ-ゖァ-ヺー]{1,7}[っッ][！!？?]?',text):
+            return None
+        if reading is not None and text != reading:
+            return None
+        reading = text
+    return reading
+
+
+def refine_outlined_kana(engine,image,reader):
+    if len(engine.raw_detections)!=1 or not engine.raw_detections[0]:
+        return
+    original = engine.raw_detections[0]
+    current = list(original)
+    trials = 0
+    for i,box in enumerate(original):
+        if trials >= 16:
+            break
+        if len(box.text)>2 or min(box.bbox[2]-box.bbox[0],box.bbox[3]-box.bbox[1])<24:
+            continue
+        trials += 1
+        reading = blank_sound(image,box,reader)
+        if reading:
+            from .types import OCREngine
+            replacement = Text_Box(box.box_id,box.confidence,box.poly,reading,review=1)
+            replacement.reason = 'corroborated_blank_sound'
+            replacement.selected_engine = OCREngine.HAYAI
+            replacement.ocr_metadata = {**box.ocr_metadata,
+                'candidates':{**box.ocr_metadata.get('candidates',{}),'hayai':reading},
+                'blank_sound':{'original_text':box.text,'original_status':box.status.value,
+                               'views':list(reader_geometry.VIEWS),'reading':reading}}
+            current[i] = replacement
+            continue
+        result = outlined_kana(image,box,reader)
+        if not result:
+            continue
+        reading,poly,angle = result
+        # A sliver overlapping the rim of an adjacent label is common on physical objects.
+        if overlap(poly,[cv2.convexHull(other.poly.astype('float32')) for other in original if other is not box]):
+            continue
+        replacement = Text_Box(box.box_id,box.confidence,poly,reading,review=1)
+        from .types import OCREngine
+        replacement.selected_engine = OCREngine.HAYAI
+        replacement.reason = 'corroborated_outline_reading'
+        replacement.ocr_metadata = {**box.ocr_metadata,'outline_reading':{'original_text':box.text,
+            'original_polygon':box.poly.tolist(),'angle':angle,'reading':reading,'views':['glyph_interiors','source_crop']}}
+        replacement.ocr_metadata['candidates'] = {**box.ocr_metadata.get('candidates',{}),'hayai':reading}
+        current[i] = replacement
+    if any(a is not b for a,b in zip(original,current)):
+        engine.automatic_unit_proposals = [propose_page_from_boxes(current,engine.image_path,
+            complementary_ownership=True,regroup_companions=True)]
+        engine.raw_detections = [current]

@@ -18,6 +18,13 @@ from tralens.translation.contracts import automatic_units,canonical
 
 
 class CropReadings(unittest.TestCase):
+    def test_square_repeated_effect_requires_three_agreeing_reads_and_a_matching_kana(self):
+        record = dict(direction='unknown', polygons=[[]], scores=[.43], source='く', readings=['ごくごく']*3)
+        self.assertTrue(c.select_record(record))
+        self.assertFalse(c.select_record(dict(record, source='あ')))
+        self.assertFalse(c.select_record(dict(record, scores=[.95])))
+        self.assertFalse(c.select_record(dict(record, readings=['ごくごく','ごく','ごくごく'])))
+
     def setUp(self):
         self.image,self.original,self.batch=fixtures.AutomaticRecognitionTests().fixture(text='ネットワー7の')
         self.engine=SimpleNamespace(automatic_unit_proposals=(self.batch,),automatic_recognition_results=())
@@ -26,6 +33,21 @@ class CropReadings(unittest.TestCase):
     def refine(self,reader):
         c.refine(self.engine,self.image,self.original,reader=reader,model_identity='synthetic',output=self.output)
         return automatic_units(self.batch,self.engine.automatic_recognition_results[0])[0]
+
+    def test_clipped_column_requires_attached_ink_and_matching_separate_kana(self):
+        from PIL import ImageDraw
+        image = Image.new('RGB', (160, 180), 'white')
+        record = dict(source='はや', direction='unknown', polygons=[[[50,30],[90,30],[90,105],[50,105]]],
+                      scores=[.79], readings=['はやはや', 'はや', 'はや'])
+        self.assertIsNone(c.clipped_kana_views(image, record))
+        ImageDraw.Draw(image).line([(75,99),(64,108),(75,116)], fill='black', width=3)
+        column, glyph = c.clipped_kana_views(image, record)
+        self.assertGreater(column.height, glyph.height)
+        record['clipped_kana'] = dict(readings=['はやく','く'], view_hashes=['a','b'])
+        self.assertTrue(c.select_record(record))
+        self.assertEqual(c.candidate_text(record), 'はやく')
+        record['clipped_kana']['readings'][1] = 'し'
+        self.assertFalse(c.select_record(record))
 
     def test_reflowed_abbreviation_requires_native_bar_and_exact_other_characters(self):
         from PIL import ImageDraw

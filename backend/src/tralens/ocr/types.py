@@ -19,6 +19,7 @@ class OCRStatus(str, Enum):
 
 
 class OCREngine(str, Enum):
+    HAYAI = "hayai"
     FRONTIER = "frontier"
     PADDLE = "paddle"
     MANGA = "manga"

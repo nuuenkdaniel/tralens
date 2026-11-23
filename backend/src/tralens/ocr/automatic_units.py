@@ -147,6 +147,117 @@ def _kanji(text):
     return any("\u3400" <= c <= "\u9fff" or "\U00020000" <= c <= "\U0002fa1f" for c in text)
 
 
+def join_reread_columns(groups, by_id):
+    """Two locally reread vertical columns whose original OCR split off a digit."""
+    result = list(groups)
+    single = {g.group[0].box_id:g for g in groups if len(g.group)==1}
+    for source,group in single.items():
+        meta = json.loads(by_id[source][0].metadata_json)
+        anchor = meta.get('short_column_anchor')
+        if (anchor not in single or group not in result or single[anchor] not in result or anchor==source
+                or not meta.get('corroborated_short_reading')
+                or not json.loads(by_id[anchor][0].metadata_json).get('corroborated_short_reading')):
+            continue
+        result[result.index(single[anchor])] = Text_Group(single[anchor].group+group.group,
+            method='paired_short_columns',direction='vertical')
+        result.remove(group)
+    return result
+
+
+def join_shared_balloon(groups, pixels, detections, excluded):
+    """Read adjacent vertical passages sharing one enclosed sheet of white paper."""
+    candidates = [g for g in groups if g.direction == 'vertical' and 2 <= len(g.group) <= 6
+                  and all(b.box_id not in excluded for b in g.group)]
+    if len(candidates) < 2 or pixels.shape[0]*pixels.shape[1]>8_000_000:
+        return groups
+    # Find a staggered pair before doing any pixel work. Inspect only its local
+    # balloon so a large white panel or the page margin cannot join passages.
+    result = list(groups)
+    ordered = sorted(candidates,key=lambda g:-max(b.bbox[0] for b in g.group))
+    for i,right in enumerate(ordered):
+        for left in ordered[i+1:]:
+            if right not in result or left not in result:
+                continue
+            boxes = right.group+left.group
+            widths = [b.bbox[2]-b.bbox[0] for b in boxes]
+            scale = min(widths)
+            lhs = max(b.bbox[2] for b in left.group)
+            rhs = min(b.bbox[0] for b in right.group)
+            stagger = abs(right.group[0].bbox[1]-left.group[0].bbox[1])
+            if not (0<rhs-lhs<2*scale and max(widths)<1.6*scale and .5*scale<stagger<1.4*scale):
+                continue
+            x,y,r,b = (min(v.bbox[0] for v in boxes),min(v.bbox[1] for v in boxes),
+                       max(v.bbox[2] for v in boxes),max(v.bbox[3] for v in boxes))
+            if crop_conflicts((x,y,r,b),tuple(v.box_id for v in boxes),detections):
+                continue
+            pad = min(128,3*scale)
+            l,t = max(0,x-pad),max(0,y-pad)
+            paper = pixels[t:b+pad+1,l:r+pad+1].min(axis=2)>240
+            if paper.size>512*512:
+                continue
+            _,labels = cv2.connectedComponents(paper.astype(np.uint8),connectivity=4)
+            owners = set()
+            for box in boxes:
+                x1,y1,x2,y2 = box.bbox
+                tile = labels[y1-t:y2-t+1,x1-l:x2-l+1]
+                votes = np.bincount(tile.ravel())
+                votes[0] = 0
+                owners.add(int(votes.argmax()) if votes.max()>.5*tile.size else 0)
+            if len(owners)!=1 or 0 in owners:
+                continue
+            surface = labels==owners.pop()
+            if any(edge.any() for edge in (surface[0],surface[-1],surface[:,0],surface[:,-1])):
+                continue
+            # Both the ceiling and floor bend inward between balloon lobes.
+            top,bottom = surface.argmax(0),len(surface)-surface[::-1].argmax(0)
+            ca = int(np.median([v.bbox[0]+v.bbox[2] for v in left.group])/2)-l
+            cb = int(np.median([v.bbox[0]+v.bbox[2] for v in right.group])/2)-l
+            if (top[lhs-l:rhs-l+1].max()<max(top[ca],top[cb])+scale*.12
+                    or bottom[lhs-l:rhs-l+1].min()>min(bottom[ca],bottom[cb])-scale*.12):
+                continue
+            result[result.index(right)] = Text_Group(boxes,method='shared_balloon_columns',direction='vertical')
+            result.remove(left)
+    return result
+
+
+def join_terminal_marks(groups, pixels, detections, regions, by_id, excluded):
+    """Attach a punctuation column immediately following aligned vertical dialogue."""
+    pairs = []
+    for mark_group in groups:
+        if len(mark_group.group) != 1:
+            continue
+        mark = mark_group.group[0]
+        text = unicodedata.normalize('NFKC',mark.text.strip())
+        if (mark.box_id in excluded or not 1 <= len(text) <= 12 or not any(c in '!?' for c in text)
+                or any(c not in '.!?' for c in text)):
+            continue
+        x,y,r,b = mark.bbox
+        for group in groups:
+            if group.direction != 'vertical' or group is mark_group:
+                continue
+            last = min(group.group,key=lambda box:box.bbox[0])
+            lx,ly,lr,lb = last.bbox
+            ids = tuple(box.box_id for box in group.group)+(mark.box_id,)
+            if (not excluded.isdisjoint(ids) or not any(_kana(box.text) or _kanji(box.text) for box in group.group)
+                    or b-y < 1.6*(r-x) or not .65 <= (r-x)/max(1,lr-lx) <= 1.4
+                    or not 0 <= lx-r <= .45*(r-x) or abs(y-ly) > .35*(r-x)
+                    or min(b,lb)-max(y,ly) < .85*min(b-y,lb-ly)):
+                continue
+            owners = {regions[by_id[key][2]][0] for key in ids if by_id[key][2] in regions}
+            bounds = (x,min(y,*(box.bbox[1] for box in group.group)),
+                max(box.bbox[2] for box in group.group),max(b,*(box.bbox[3] for box in group.group)))
+            seam = pixels[max(y,ly):min(b,lb),r:lx]
+            if (len(owners) <= 1 and not crop_conflicts(bounds,ids,detections)
+                    and seam.size and np.mean(seam.min(axis=2)>=235) >= .96):
+                pairs.append((group,mark_group))
+    result = list(groups)
+    for group,mark in pairs:
+        if sum(g is group or m is mark for g,m in pairs) == 1:
+            result[result.index(group)] = Text_Group(group.group+mark.group,method='terminal_punctuation',direction='vertical')
+            result.remove(mark)
+    return result
+
+
 def stacked_vertical_clauses(groups, pixels, detections, regions, by_id, excluded):
     """Join two tiers of vertical print across a blank seam after a concessive."""
     blocks = []
@@ -196,14 +307,15 @@ def join_horizontal_continuations(groups, pixels, detections, regions, by_id, ex
     for upper in groups:
         last = upper.group[-1]
         obligation = last.text.rstrip().endswith(('ないと','なくては','なければ'))
-        if upper.direction != 'horizontal' or last.confidence < .90 or not (obligation or last.box_id in clause_parents):
+        object_phrase = last.text.rstrip().endswith('を')
+        if upper.direction != 'horizontal' or last.confidence < .90 or not (obligation or object_phrase or last.box_id in clause_parents):
             continue
         x,y,r,b = last.bbox
         for lower in groups:
             first = lower.group[0]
             emphatic = first.box_id in clause_parents.get(last.box_id, ())
             if (lower is upper or lower.direction != 'horizontal' or first.confidence < .90
-                    or not (emphatic or (obligation and first.text.lstrip().startswith(('いけな','ならな'))))):
+                    or not (emphatic or (object_phrase and first.text.rstrip('。！').endswith(('ます','ましょう','ください'))) or (obligation and first.text.lstrip().startswith(('いけな','ならな'))))):
                 continue
             lx,ly,lr,lb = first.bbox
             height = b-y
@@ -605,6 +717,12 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
             if (direction == "horizontal" and child.confidence >= .9 and len(wording) >= 4
                     and _kanji(wording) and wording.endswith(("は", "が", "を", "には", "では"))):
                 rejects.append("horizontal_clause_with_case_particle")
+            # A punctuated greeting above a kana title is independent lettering.
+            # Its small size and placement alone can resemble phonetic ruby.
+            if (policy == POLICY and not rejects and direction == 'horizontal' and wording.endswith('!')
+                    and len(wording) >= 4 and _kana(wording) and _kana(parent.text)
+                    and not _kanji(parent.text) and child.confidence >= .70 and parent.confidence >= .70):
+                rejects.append('punctuated_horizontal_heading')
             row = {"parent_id": parent.source_id, "child_glyphs": asdict(child_glyphs),
                 "parent_glyphs": asdict(parent_glyphs), "boundary": boundary, "rejected_reasons": tuple(rejects)}
             child_reading = unicodedata.normalize("NFKC",child.text).strip()
@@ -777,14 +895,38 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
     if not unassigned:
         excluded=set(annotations) | set(annotations.values()) | set(relationship_reasons) | set(dark_runs)
         groups=table_rows.split(groups,bgr,excluded)
+        groups=join_reread_columns(groups,by_id)
+        groups=join_shared_balloon(groups,bgr,detections,excluded)
+        groups=join_terminal_marks(groups,bgr,detections,regions,by_id,excluded)
         groups=stacked_vertical_clauses(groups,bgr,detections,regions,by_id,excluded)
         clause_parents = {child: tuple(row["parent_id"] for row in rows
                 if row["rejected_reasons"] == ("horizontal_clause_with_case_particle",))
             for child,rows in relation_evidence.items() if relationship_reasons.get(child)==("horizontal_clause_with_case_particle",)}
         groups=join_horizontal_continuations(groups,bgr,detections,regions,by_id,excluded,clause_parents)
-    proposals = []
+    # A newly discovered effect beside an already lettered logo needs its own erase region.
+    independent = []
     for group in groups:
+        if len(group.group) == 2:
+            first, second = sorted(group.group, key=lambda box: box.bbox[0])
+            originals = [by_id[box.box_id][0] for box in (first, second)]
+            if (first.bbox[2] <= second.bbox[0]
+                    and any(raw.reason == 'frontier_discovery' for raw in originals)
+                    and any(raw.status == 'accepted' and raw.text.isascii() and raw.text.isalpha()
+                            and len(raw.text) >= 3 for raw in originals)):
+                independent.extend(Text_Group([box], method='singleton', direction=group.direction)
+                                   for box in group.group)
+                continue
+        independent.append(group)
+    proposals = []
+    for group in independent:
         main_ids = tuple(box.box_id for box in group.group)
+        # A two-line heading that overlaps its title can be sorted by x by
+        # the mixed-layout grouper. Read the independently identified heading first.
+        if group.direction == 'horizontal' and len(main_ids) == 2:
+            title, heading = main_ids
+            if any(row['parent_id'] == title and 'punctuated_horizontal_heading' in row['rejected_reasons']
+                   for row in relation_evidence[heading]):
+                main_ids = (heading, title)
         attached = tuple(sorted((child for child, parent in annotations.items() if parent in main_ids), key=_key))
         members = main_ids + attached
         parents = tuple((child, annotations[child]) for child in attached)

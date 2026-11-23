@@ -23,7 +23,7 @@ MAX_LOCAL_PIXELS = 262144
 MAX_LOCAL_SIDE = 1024
 
 
-def native_plan(rgb, detections, member_ids, *, reserved=None, allow_tight_source_seed=False):
+def native_plan(rgb, detections, member_ids, *, reserved=None, allow_tight_source_seed=False, recover_sign=False):
     """Try tighter native strokes before resorting to an OCR-footprint repair.
 
     The support channel is explicitly a dark-contrast heuristic, NOT a learned
@@ -33,8 +33,11 @@ def native_plan(rgb, detections, member_ids, *, reserved=None, allow_tight_sourc
     from . import segmentation
     gray = cv2.cvtColor(np.asarray(rgb), cv2.COLOR_RGB2GRAY)
     support = np.where(gray < 180, 245, 0).astype(np.uint8)
+    sign_text = None
+    if recover_sign and len(member_ids) == 1:
+        sign_text = next(d.get('text') for d in detections if d['source_id'] == member_ids[0])
     plan = segmentation.derive(rgb, detections, member_ids, support, surface='flat',
-                               allow_tight_source_seed=allow_tight_source_seed)
+                               allow_tight_source_seed=allow_tight_source_seed, sign_text=sign_text)
     if reserved is not None:
         n.require(not ((plan.erase | plan.layout) & reserved).any(), 'native best-effort plan conflicts with accepted output')
     evidence = dict(plan.evidence)

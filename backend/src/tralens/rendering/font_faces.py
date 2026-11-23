@@ -66,19 +66,23 @@ class ApprovedFaces:
                 and len(set(values))==len(values),'invalid explicit font fallback list')
         self.requested=requested_id;self.ids=[requested_id,*fallbacks.get(requested_id,[])]
         self.primary=self.fonts[requested_id];self.cache={}
+        self.thought = [face['id'] for face in manifest['fonts']
+                        if face['role']=='thought' and face['weight']=='regular']
 
     def resolve(self,row):
         text=row['binding']['text']
-        if text not in self.cache:
-            for identity in self.ids:
+        thought = row.get('lettering_role')=='thought'
+        key = thought,text
+        if key not in self.cache:
+            for identity in (self.thought+self.ids if thought else self.ids):
                 font=self.fonts[identity]
                 if isinstance(font,n.ResourceLimit):continue
                 if all(ord(c) in font[1] for c in text if c!='\n'):
                     n.validate_text(text,font[1])
-                    self.cache[text]=identity;break
-            n.require(text in self.cache,'missing glyph coverage in requested and explicit fallback faces')
-        identity=self.cache[text];font=self.fonts[identity]
+                    self.cache[key]=identity;break
+            n.require(key in self.cache,'missing glyph coverage in requested and explicit fallback faces')
+        identity=self.cache[key];font=self.fonts[identity]
         row['font_selection']={'requested_id':self.requested,'selected_id':identity,
-            'reason':'requested_complete_coverage' if identity==self.requested else 'explicit_fallback_complete_coverage',
+            'reason':'requested_complete_coverage' if identity==self.requested else 'thought_face' if thought and identity in self.thought else 'explicit_fallback_complete_coverage',
             'font_sha256':n.digest(font[0]),'exact_target_preserved':True}
         return font

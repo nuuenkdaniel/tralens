@@ -55,7 +55,7 @@ const STYLES = {
 function styleOf(options) {
   return options?.visibility_policy === "always-show" || options?.replacement_policy !== "confidence-gated" ? "replace-all" : "protect";
 }
-function runOptions({mode, style, budget, reread = false, lama = false}) {
+function runOptions({mode, style, budget, reread = false, reconstruction = "classical"}) {
   const render = mode === "render", preset = STYLES[render ? style : "replace-all"];
   return {mode, max_attempts: budget, allow_fragments: false, render_policy: "best-effort", translation_policy: "coverage-first",
     replacement_policy: render ? preset.replacement_policy : "all",
@@ -63,7 +63,7 @@ function runOptions({mode, style, budget, reread = false, lama = false}) {
     layout_policy: "source-local", source_localization: false,
     visibility_policy: render ? preset.visibility_policy : "replacement-only",
     removal_policy: render ? preset.removal_policy : "legacy",
-    reconstruction_policy: render && lama && preset.removal_policy === "aggressive" ? "lama" : "classical"};
+    reconstruction_policy: render && preset.removal_policy === "aggressive" ? reconstruction : "classical"};
 }
 // Without the CTD text-mask model, aggressive removal cannot separate lettering
 // from artwork and erases the whole (sometimes very large) OCR polygon.
@@ -132,7 +132,7 @@ if (typeof document !== "undefined") {
     luna_mode: $("luna-mode").value, related_jobs: $("related-label").hidden ? [] : [...$("related-jobs").selectedOptions].map(o => o.value),
     ...runOptions({mode: choice("mode"), style: choice("style"), budget: Number($("budget").value),
     reread: Boolean(config?.quality_reread_available) && $("quality-reread").checked,
-    lama: Boolean(config?.reconstruction_available) && $("reconstruction-policy").value === "lama"})});
+    reconstruction: $("reconstruction-policy").value})});
   function setBusy(value) {
     busy = value;
     const retry = Boolean(current && snapshot && snapshot.status !== "running");
@@ -147,7 +147,7 @@ if (typeof document !== "undefined") {
     for (const input of radios("style")) input.disabled = value || !render;
     $("style-group").dataset.disabled = String(!render);
     $("quality-reread").disabled = value || !config?.quality_reread_available || !render;
-    $("reconstruction-policy").disabled = value || !render || !replaceAll || !config?.reconstruction_available;
+    $("reconstruction-policy").disabled = value || !render || !replaceAll;
     $("quality-retry").disabled = value || !config?.render_enabled;
   }
   function settingsSummary() {
@@ -160,7 +160,7 @@ if (typeof document !== "undefined") {
     const warning = maskWarning(config, mode, style);
     $("mask-warning").textContent = warning; $("mask-warning").hidden = !warning;
     const parts = [mode === "ocr" ? "no model calls" : `up to ${$("budget").value} calls`];
-    if (mode === "render") parts.push(config?.reconstruction_available && style === "replace-all" ? ($("reconstruction-policy").value === "lama" ? "LaMa backgrounds" : "classical backgrounds") : "classical backgrounds");
+    if (mode === "render") parts.push(style === "replace-all" ? $("reconstruction-policy").selectedOptions[0].textContent + " backgrounds" : "classical backgrounds");
     if (mode === "render" && config?.quality_reread_available && $("quality-reread").checked) parts.push("paired rereads");
     $("settings-summary").textContent = parts.join(" · ");
     setBusy(busy);
@@ -585,7 +585,7 @@ if (typeof document !== "undefined") {
     config = value;
     $("reconstruction-policy").value = config.reconstruction_available ? "lama" : "classical";
     $("reconstruction-policy").querySelector('[value="lama"]').disabled = !config.reconstruction_available;
-    $("reconstruction-availability").textContent = config.reconstruction_available ? "LaMa fills removed text in Replace all text mode." : "LaMa not configured (start with --reconstruction-config). Classical fill is used.";
+    $("reconstruction-policy").querySelector('[value="sdxl"]').disabled = !config.sdxl_available;
     $("configuration").textContent = `${config.device} · ${config.model} · Ollama: ${config.endpoint || "configured local service"} · OCR: ${config.model_root}${config.fonts ? " · Fonts: " + config.fonts : " · No --fonts: rendering disabled"}`;
     $("reread-availability").textContent = config.quality_reread_available ? `Rereads low-confidence text with local Manga OCR and ${config.reread_model}.` : "Not configured (start with --manga-reread-model).";
     setChoice("mode", config.render_enabled ? "render" : "translate"); settingsSummary(); setBusy(false);

@@ -29,3 +29,31 @@ class UploadAdmissionTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ReaderHandler.do_POST(request)
                 self.assertTrue(slot.acquire(blocking=False))
+
+
+class MultipartUploadTests(unittest.TestCase):
+    def test_spools_raw_pages_and_rejects_truncated_form(self):
+        from io import BytesIO
+        from tralens.devui.multipart_upload import read_import
+        from tralens.devui.server import RequestError
+
+        class LimitedReads(BytesIO):
+            def read(self, size=-1):
+                if not 0 < size <= 256 * 1024:
+                    raise AssertionError('Upload read exceeded the streaming buffer.')
+                return super().read(size)
+
+        content = b'contents' * 100000
+        prefix = (b'--test\r\nContent-Disposition: form-data; name="metadata"\r\n\r\n{}\r\n'
+                  b'--test\r\nContent-Disposition: form-data; name="page"; filename="chapter.cbz"\r\n\r\n')
+        body = prefix + content + b'\r\n--test--\r\n'
+        mime = 'multipart/form-data; boundary=test'
+        with read_import(LimitedReads(body), len(body), mime) as (meta, files):
+            self.assertEqual(meta, {})
+            [(name, staged)] = files
+            self.assertEqual(name, 'chapter.cbz')
+            self.assertEqual(staged.read_bytes(), content)
+        self.assertFalse(staged.exists())
+        with self.assertRaises(RequestError):
+            with read_import(LimitedReads(body[:-12]), len(body) - 12, mime):
+                self.fail('An incomplete form reached the library.')

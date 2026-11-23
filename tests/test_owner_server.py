@@ -33,6 +33,8 @@ class OwnerReaderTests(unittest.TestCase):
                         connection.close()
                 try:
                     self.assertEqual(call('GET', '/')[0], 200)
+                    self.assertEqual(call('GET', '/healthz')[0], 200)
+                    self.assertEqual(call('GET', '/privacy')[0], 200)
                     for path in ['/developer', '/api/config', '/api/jobs', '/api/library',
                                  '/api/library/pages/' + '0'*32 + '/original',
                                  '/api/library/books/' + '0'*32 + '/both.zip']:
