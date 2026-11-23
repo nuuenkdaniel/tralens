@@ -9,7 +9,8 @@ and Docker Compose v2. The reader uses CPU OCR. Ollama can use CPU or a supporte
 
 Tralens is in preview. Use the source build below today. When a public beta is
 available, download the Compose bundle from [GitHub Releases](https://github.com/nuuenkdaniel/tralens/releases).
-Its `.env.example` pins the image digest used for that release.
+Verify the archive with the attached checksum before extracting it. Its
+`.env.example` pins the image digest for that release.
 
 ### Build the preview
 
@@ -44,8 +45,7 @@ docker compose up -d --wait --pull never
 ```
 
 Open [http://127.0.0.1:7871](http://127.0.0.1:7871) on the host. From another
-computer, use `ssh -N -L 7871:127.0.0.1:7871 user@server` and open that same URL.
-For HTTPS access, follow the [single-owner deployment guide](docs/self-hosted-reader.md#remote-access-over-https).
+computer, use `ssh -N -L 7871:127.0.0.1:7871 user@server` and open the same URL.
 
 Choose a model under **Settings → Translation**, then **Add manga**. Try one page
 to check speed and quality on your hardware.
@@ -54,17 +54,78 @@ to check speed and quality on your hardware.
 
 | Option | Setup | Data sent for translation |
 | --- | --- | --- |
-| **Local Ollama** | Start Ollama on the host. Pull `translategemma:4b` for a smaller model or use `translategemma:12b` or `translategemma:27b` with sufficient memory. Set `TRALENS_MODEL` in `.env` and recreate the reader after changing it. | Text and any inputs required by optional local vision features go to your configured Ollama service. |
+| **Local Ollama** | Select **Local** with Ollama running on the host. Set `TRALENS_MODEL` in `.env` to the installed tag and recreate the reader after changing it. Use `TRALENS_MODEL_PROFILE=generalist` for other model families. | Text and any inputs required by optional local vision features go to your configured Ollama service. |
 | **OpenAI via ChatGPT OAuth** | Open **Settings → Translation**, select an available GPT model, and complete **Continue with ChatGPT** using your own eligible account. No API key is needed. | Tralens sends page images, detected text, and translation prompts to OpenAI. Usage is subject to your plan and limits. |
 
-The server and its connected ChatGPT account are for one owner. For a headless HTTPS server, the [OAuth guide](docs/self-hosted-reader.md#connect-chatgpt-with-oauth) shows how to complete sign-in from your computer. Use **Disconnect ChatGPT** in Settings to revoke access. See the [privacy notice](PRIVACY.md).
+The reader supports one owner per instance. Set `TRALENS_FRONTIER_PROVIDER=disabled`
+to disable ChatGPT. Use **Disconnect ChatGPT** in Settings to revoke access. See
+the [privacy notice](PRIVACY.txt).
+
+For a headless server, forward the OAuth callback from your computer, then run
+the login command from the directory containing `compose.yml` on the server.
+
+```sh
+ssh -L 1455:127.0.0.1:1455 user@server
+cd /path/to/tralens
+docker compose exec reader python backend/chatgpt.py login --no-browser --port 1455
+```
+
+Open the printed link in your computer’s browser. Keep SSH open until consent
+finishes, then return to **Settings → Translation** to choose a GPT model.
+
+## Remote access over HTTPS
+
+Keep the reader and Ollama on loopback. Anyone who can connect to the reader’s
+loopback port can reach it without a key until owner mode is enabled. To enable
+owner mode behind a reverse proxy, set `TRALENS_ORIGIN=https://manga.example.com`
+in `.env` to the exact browser origin without a trailing slash. Create the key
+once in the configured `TRALENS_CONFIG` directory, which defaults to the path below.
+
+```sh
+(umask 077; set -C; openssl rand -hex 32 > tralens-data/config/owner.key)
+docker compose up -d --wait --pull never
+```
+
+Proxy HTTPS to `127.0.0.1:7871` and preserve the original `Host` header. Enter the
+key at the HTTPS reader. Store it securely. Restart after replacing the key to
+end existing sessions.
 
 ## Operating your server
 
-The [self-hosting guide](docs/self-hosted-reader.md) covers HTTPS, storage, backups, upgrades, rollback, model settings, and troubleshooting. See the [source build instructions](docs/self-hosted-reader.md#build-from-source) to run a checkout without a registry image.
+Keep `tralens-data` on a local filesystem. It holds your library, job diagnostics,
+credentials, runtime state, models, and optional assets. Stop the reader before
+backing up the directory and `.env`. Protect backups and preserve ownership and
+permissions. If you customized the data paths, back up those paths too.
+
+For upgrades, save the current image digest and take a stopped backup. Set
+`TRALENS_IMAGE` to the new release digest and repeat the pull, setup, and start
+commands. To roll back, stop the reader and restore the pre-upgrade data into
+empty directories before starting the original image. For startup problems, run
+`docker compose ps` and `docker compose logs --tail=100 reader`.
 
 OCR can miss handwritten text and sound effects. Translation and artwork cleanup vary by page. **Keep the artwork** favors preserving the background when cleanup is uncertain. Use **Compare** to check the result against the original.
 
-Use content you have permission to process and share. Tralens is GPL-3.0-or-later. Font, dependency, and model terms are listed separately. [License](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)
+Use content you have permission to process and share. Tralens is GPL-3.0-or-later.
+[License](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.txt)
 
-Report reproducible issues on [GitHub](https://github.com/nuuenkdaniel/tralens/issues), using a sample you have permission to share. See the [security policy](SECURITY.md) for private reports and the [development guide](DEVELOPMENT.md) for CLI and pipeline work.
+Report reproducible issues in [GitHub Issues](https://github.com/nuuenkdaniel/tralens/issues).
+Send vulnerability reports [privately](https://github.com/nuuenkdaniel/tralens/security/advisories/new).
+
+## Release process
+
+Merge tested PRs into `dev`, then promote `dev` to `main` by PR. Wait for
+`clean-install` and `container / image`. Merges build separate private candidate
+images tagged `tralens-dev:dev` and `tralens:main` on `ghcr.io/nuuenkdaniel`.
+
+1. Pull the exact digest from the successful `main` run with GHCR read access.
+   On a fresh Linux x86-64 host, test Compose setup, local translation, ChatGPT
+   sign-in and translation over HTTPS, disconnect, a stopped backup and restore,
+   and upgrade and rollback when there is a previous release. Review the exact
+   image’s dependency notices and corresponding source before distribution.
+2. Protect `dev`, `main`, and `v*` tags. Restrict the `public-beta` Actions
+   environment to `main`, require a reviewer, and disable administrator bypass.
+   Tag the approved `main` commit and run **Stage public beta** from that commit
+   with the tag and candidate digest. Review the environment deployment.
+3. After redistribution is cleared, make only the `tralens-release` package public.
+   Run **Verify public beta image** with the same tag and digest. Confirm the
+   draft’s Compose bundle pins that digest before publishing the prerelease.

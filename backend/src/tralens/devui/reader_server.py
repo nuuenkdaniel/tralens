@@ -26,7 +26,7 @@ class ReaderHandler(Handler):
             if path == "/healthz":
                 return self.json(200, {"status": "ok"})
             if path == "/privacy":
-                return self.respond(200, (PROJECT / "PRIVACY.md").read_bytes(), "text/plain; charset=utf-8")
+                return self.respond(200, (PROJECT / "PRIVACY.txt").read_bytes(), "text/plain; charset=utf-8")
             if path in (
                 "/",
                 "/reader.js",

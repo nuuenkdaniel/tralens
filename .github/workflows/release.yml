@@ -94,7 +94,7 @@ jobs:
             printf 'Image for Linux x86-64: `%s`\n\n' "$image"
             printf 'Extract the Compose bundle and follow the [setup guide](%s/%s/tree/%s#start-the-reader).\n\n' \
               "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$VERSION"
-            printf 'Verify a clean anonymous pull before publishing this prerelease. See the [release checklist](%s/%s/blob/%s/docs/releasing.md).\n' \
+            printf 'Verify a clean anonymous pull before publishing this prerelease. See the [release checklist](%s/%s/tree/%s#release-process).\n' \
               "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$VERSION"
           } > "$notes"
           if gh release view "$VERSION" --json isDraft >/dev/null 2>&1; then

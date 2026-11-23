@@ -14,7 +14,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 
-COPY pyproject.toml uv.lock README.md LICENSE THIRD_PARTY_NOTICES.md PRIVACY.md ./
+COPY pyproject.toml uv.lock README.md LICENSE THIRD_PARTY_NOTICES.txt PRIVACY.txt ./
 RUN --mount=type=bind,from=uv,source=/uv,target=/bin/uv \
     uv sync --locked --no-dev --group inpainting --python /usr/local/bin/python
 RUN python -c "import paddle; from PIL import features; assert features.check_feature('raqm')"
