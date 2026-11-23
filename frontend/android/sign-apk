@@ -4,7 +4,10 @@ if [[ $# != 3 ]]; then
   echo 'Usage: sign-apk UNSIGNED_APK SIGNED_APK RELEASE_KEYSTORE' >&2
   exit 2
 fi
-: "${ANDROID_RELEASE_KEYSTORE_PASSWORD:?Set the Android release keystore password}"
+if [[ -z ${ANDROID_RELEASE_KEYSTORE_PASSWORD-} ]]; then
+  echo 'Set the Android release keystore password.' >&2
+  exit 2
+fi
 run="$(cd -- "$(dirname -- "$0")" && pwd -P)/android-env"
 input=$(realpath -e -- "$1")
 output=$(realpath -m -- "$2")
