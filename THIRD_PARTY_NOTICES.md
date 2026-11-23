@@ -15,7 +15,7 @@ The image includes Debian packages from the official Python base image and from 
 | PaddleOCR 3.7.0, PaddlePaddle 3.3.1 and PaddleX 3.7.2 | Apache-2.0. [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) · [PaddlePaddle](https://github.com/PaddlePaddle/Paddle) · [PaddleX](https://github.com/PaddlePaddle/PaddleX) |
 | AIStudio SDK 0.3.9 | Apache-2.0 per its [release metadata](https://pypi.org/project/aistudio-sdk/0.3.9/). |
 | OpenCV contrib wheel 4.10.0.84 | OpenCV uses Apache-2.0. The Linux wheel includes separately licensed native libraries such as LGPL FFmpeg and Qt. See the wheel's `LICENSE-3RD-PARTY.txt`, its [build sources](https://github.com/opencv/opencv-python/tree/4.10.0.84), and [OpenCV sources](https://github.com/opencv/opencv/tree/4.10.0). |
-| Pillow 12.3.0 | HPND. Its wheels also include separately licensed image and font libraries. [Pillow sources and notices](https://github.com/python-pillow/Pillow) |
+| Pillow 13.0.0 | HPND. Its wheels also include separately licensed image and font libraries. [Pillow sources and notices](https://github.com/python-pillow/Pillow) |
 | scikit-learn, NumPy, SciPy | BSD-3-Clause, with additional bundled library notices in the wheels. [scikit-learn](https://github.com/scikit-learn/scikit-learn) · [NumPy](https://github.com/numpy/numpy) · [SciPy](https://github.com/scipy/scipy) |
 | ONNX Runtime 1.23.2 | MIT, with bundled component notices. [ONNX Runtime](https://github.com/microsoft/onnxruntime/tree/v1.23.2) |
 | pypdfium2 4.30.0 | Apache-2.0 or BSD-3-Clause, with PDFium and third-party notices in the wheel. [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) |
