@@ -1,0 +1,47 @@
+name: Verify public beta image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing beta tag
+        required: true
+        type: string
+      digest:
+        description: Staged beta image digest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == 'nuuenkdaniel/tralens' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ inputs.version }}
+      DIGEST: ${{ inputs.digest }}
+      DOCKER_CONFIG: ${{ runner.temp }}/tralens-anonymous-docker
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pull and test the published image without credentials
+        shell: bash
+        run: |
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          revision=$(git rev-parse --verify "refs/tags/$VERSION^{commit}")
+          git merge-base --is-ancestor "$revision" refs/remotes/origin/main
+          git checkout --detach "$revision"
+          install -d -m 700 "$DOCKER_CONFIG"
+          docker pull --platform linux/amd64 "ghcr.io/$GITHUB_REPOSITORY-release:$VERSION"
+          docker image inspect --format '{{json .RepoDigests}}' "ghcr.io/$GITHUB_REPOSITORY-release:$VERSION" |
+            jq -e --arg expected "ghcr.io/$GITHUB_REPOSITORY-release@$DIGEST" 'index($expected) != null' >/dev/null
+          # Compose uses the digest-only reference included in the release bundle.
+          export TRALENS_IMAGE="ghcr.io/$GITHUB_REPOSITORY-release@$DIGEST"
+          docker pull --platform linux/amd64 "$TRALENS_IMAGE"
+          bash deploy/smoke-compose.sh

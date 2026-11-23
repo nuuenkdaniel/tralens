@@ -5,6 +5,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+import sys
 import time
 from urllib.parse import urlsplit
 
@@ -38,6 +39,12 @@ assert status == 200
 config = json.loads(body)
 assert config["render_enabled"] and config["worker_mode"] == "isolated_process"
 
+if len(sys.argv) > 1:
+    status, _, body = request("GET", f"/api/jobs/{sys.argv[1]}")
+    assert status == 200 and json.loads(body)["status"] == "complete", body
+    print("Restored the completed OCR job.")
+    sys.exit()
+
 page = Image.new("RGB", (640, 240), "white")
 manifest = json.loads(Path("/app/fonts.json").read_text())
 face = ImageFont.truetype(manifest["fonts"][0]["path"], 74)
@@ -62,3 +69,4 @@ while True:
     time.sleep(1)
 assert result["status"] == "complete", result
 assert any("tralens" in row["text"].lower() for row in result["detections"]), result
+print(json.dumps({"job": job}))

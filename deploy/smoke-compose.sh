@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source_dir=$(cd "$(dirname "$0")/.." && pwd)
+work=$(mktemp -d)
+cp "$source_dir/compose.yml" "$work/"
+cd "$work"
+
+cleanup() {
+    docker compose logs --no-color reader || true
+    docker compose down || true
+    rm -rf "$work"
+}
+trap cleanup EXIT
+
+export TRALENS_UID="$(id -u)" TRALENS_GID="$(id -g)"
+export TRALENS_FRONTIER_PROVIDER=disabled
+export TRALENS_PORT="${TRALENS_PORT:-7871}"
+unset TRALENS_ORIGIN
+install -d -m 700 tralens-data/{library,config,state,models,assets}
+
+docker compose run --rm --pull never setup
+docker compose up -d --wait --wait-timeout 90 --pull never
+curl -fsS "http://127.0.0.1:$TRALENS_PORT/healthz"
+export TRALENS_ORIGIN=https://tralens.example
+(umask 077; openssl rand -hex 32 > tralens-data/config/owner.key)
+docker compose up -d --wait --wait-timeout 90 --pull never
+docker compose exec -T reader python - < "$source_dir/tests/compose_smoke.py" | tee smoke-result.json
+
+docker compose down
+tar -cf backup.tar tralens-data
+mv tralens-data original-data
+tar -xf backup.tar
+docker compose up -d --wait --wait-timeout 90 --pull never
+job=$(python3 -c 'import json; print(json.load(open("smoke-result.json"))["job"])')
+docker compose exec -T reader python - "$job" < "$source_dir/tests/compose_smoke.py"

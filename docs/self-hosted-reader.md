@@ -68,15 +68,15 @@ The default upload and job storage budget is 8 GiB, with up to 2 GiB reserved pe
 
 Stop the reader before backing up. Protect backups as they may contain owner keys and OAuth credentials. Restore into an empty directory while the reader is stopped, preserving ownership and permissions. Use the same image version for the first start after restoring. Store the data on a local filesystem with file locks and atomic renames.
 
-Pin `TRALENS_IMAGE` in `.env` to a version or digest before unattended deployments. To upgrade, stop and back up, change the image tag, check the release notes, and run:
+Before upgrading, save the current digest-pinned `TRALENS_IMAGE` and take a stopped backup. Change `TRALENS_IMAGE` to the new release digest, check the release notes, and run:
 
 ```sh
 docker compose pull reader
-docker compose run --rm setup
-docker compose up -d --wait
+docker compose run --rm --pull never setup
+docker compose up -d --wait --pull never
 ```
 
-To roll back, stop the reader, restore the pre-upgrade backup, and recreate the service with its original image tag. A newer image can migrate SQLite or job records. Use the same state directory when multiple separate libraries share an Ollama endpoint so Tralens can coordinate inference.
+To roll back, stop the reader, restore the pre-upgrade backup, and recreate the service with its original image digest. A newer image can migrate SQLite or job records. Use the same state directory when multiple separate libraries share an Ollama endpoint so Tralens can coordinate inference.
 
 ### Troubleshooting
 
@@ -91,7 +91,7 @@ To roll back, stop the reader, restore the pre-upgrade backup, and recreate the 
 
 ## Build from source
 
-Clone the release tag or branch you want. Follow the README for `.env` and directories, then set `TRALENS_IMAGE=tralens:local` in `.env`.
+Clone the release tag or branch you want. Follow the README for `.env` and directories. Compose uses `tralens:local` by default. If your `.env` pins a release image, set `TRALENS_IMAGE=tralens:local` for the source build.
 
 ```sh
 docker compose -f compose.yml -f compose.build.yml build reader
