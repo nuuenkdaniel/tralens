@@ -391,7 +391,6 @@ function preferences() {
     '<section class="panel fields"><h2>Account</h2><p>Signed in as <b>' + esc(config.username) + '</b></p>' + btn("owner-logout", "Sign out") + "</section>" +
     '<section class="panel fields"><h2>Translation</h2>' +
     field(["translator", "Translation model", translators]) +
-    (config.frontier_provider === "chatgpt" ? '<p class="hint">Connecting ChatGPT is optional and enables GPT translation.</p>' : "") +
     '<p class="hint">' +
     esc(privacy()) +
     "</p>" +
@@ -1239,15 +1238,47 @@ document.addEventListener("input", (e) => {
   }
 });
 function showChatGPTConsent(model) {
+  const phonePlugin = window.Capacitor?.isPluginAvailable?.("PhoneSignIn");
+  const androidBrowser = (/Android/i.test(navigator.userAgent) || navigator.userAgentData?.platform === "Android") && !phonePlugin;
+  if (androidBrowser) {
+    modal("Connect on your phone",
+      '<p>Open Tralens and choose a GPT model in Settings → Translation to sign in.</p>' +
+      '<a id="open-tralens" class="btn primary" href="intent://signin/return#Intent;scheme=tralens-reader;package=app.tralens.reader;end">Open Tralens</a>' +
+      '<div role="status" id="chatgpt-connect"></div>');
+    const panel = $("#chatgpt-connect");
+    const onReturn = async () => {
+      if (document.hidden || !sheet.open || !panel.isConnected) return;
+      try {
+        const result = await api("chatgpt/models");
+        if (sheet.open && panel.isConnected && result.state === "connected") useChatGPTModel(model, result);
+      } catch (err) {
+        if (panel.isConnected) panel.textContent = err.message;
+      }
+    };
+    $("#open-tralens").onclick = () => document.addEventListener("visibilitychange", onReturn);
+    sheet.addEventListener("close", () => document.removeEventListener("visibilitychange", onReturn), {once: true});
+    return;
+  }
   modal("Connect to ChatGPT",
-    '<p>Use your own ChatGPT plan on a Tralens server you control. The server stores your account ID, email and sign-in tokens. When you choose ChatGPT for an import or retry, Tralens sends the selected page images and detected text to OpenAI and processes the queue in the background.</p>' +
-    '<p>You can disconnect in Tralens Settings. Read the <a href="/privacy" target="_blank" rel="noopener">Tralens privacy notice</a> and the <a href="https://openai.com/policies/privacy-policy/" target="_blank" rel="noopener">OpenAI Privacy Policy</a>.</p>' +
-    '<button id="consent-chatgpt" class="primary" type="button">Agree &amp; continue</button>' +
+    '<div id="chatgpt-consent"><p>GPT translations send selected pages and text to OpenAI using your ChatGPT plan.</p>' +
+    '<details><summary>Privacy details</summary><p>Your server stores your account ID, email and sign-in tokens. Translations can finish in the background. Disconnect anytime in Settings.</p>' +
+    '<a href="/privacy" target="_blank" rel="noopener">Tralens privacy notice</a> · <a href="https://openai.com/policies/privacy-policy/" target="_blank" rel="noopener">OpenAI Privacy Policy</a></details>' +
+    '<button id="consent-chatgpt" class="primary" type="button">Continue with ChatGPT</button></div>' +
     '<div id="chatgpt-connect" role="status"></div>');
-  $("#consent-chatgpt").addEventListener("click", (event) => {
-    event.currentTarget.remove();
+  $("#consent-chatgpt").onclick = () => {
+    $("#chatgpt-consent").remove();
     selectChatGPT(model, $("#chatgpt-connect"));
-  }, {once: true});
+  };
+}
+
+function useChatGPTModel(model, result) {
+  config.chatgpt_connected = true;
+  config.chatgpt_models = result.models;
+  if (!result.models.includes(model)) throw Error("Your ChatGPT account does not offer this model.");
+  prefs.translator = model;
+  save();
+  closeSheet();
+  render();
 }
 
 async function selectChatGPT(model, panel) {
@@ -1265,7 +1296,7 @@ async function selectChatGPT(model, panel) {
         result = await api("chatgpt/phone/start", {port});
         if (!active()) return;
         if (result.state === "authorize") {
-          panel.textContent = "Finish signing in with ChatGPT in your phone’s browser, then return to Tralens.";
+          panel.textContent = "Finish signing in, then tap Open Tralens.";
           const fields = await phone.authorize({url: result.url});
           if (!active()) return;
           result = await api("chatgpt/phone/finish", fields);
@@ -1285,12 +1316,11 @@ async function selectChatGPT(model, panel) {
         displayedURL = result.url;
         const remote = config.owner_mode && !["localhost", "127.0.0.1"].includes(location.hostname);
         panel.innerHTML = remote
-          ? '<p>Finish sign-in in the browser on your Tralens server. This reader will reconnect automatically.</p>' +
-            '<details><summary>Using a headless server?</summary><p>Forward port ' + esc(url.port) +
+          ? '<p>Finish signing in on your server.</p>' +
+            '<details><summary>Use an SSH tunnel</summary><p>Forward port ' + esc(url.port) +
             ' from your computer to the same loopback port on the server over SSH, then open this link on your computer.</p>' +
             '<a href="' + esc(url.href) + '" target="_blank" rel="noopener noreferrer">Continue with ChatGPT</a></details>'
-          : '<p>Connect your ChatGPT account to use this model for manga translation.</p>' +
-            '<a class="btn primary" href="' + esc(url.href) + '" target="_blank" rel="noopener noreferrer">Continue with ChatGPT</a>';
+          : '<a class="btn primary" href="' + esc(url.href) + '" target="_blank" rel="noopener noreferrer">Continue with ChatGPT</a>';
       }
       await new Promise(resolve => setTimeout(resolve, 800));
       if (!active()) return;
@@ -1299,13 +1329,7 @@ async function selectChatGPT(model, panel) {
     }
     if (!active()) return;
     if (result.state !== "connected") throw Error(result.error || "Sign-in did not finish.");
-    config.chatgpt_connected = true;
-    config.chatgpt_models = result.models;
-    if (!result.models.includes(model)) throw Error("Your ChatGPT account does not offer this model.");
-    prefs.translator = model;
-    save();
-    closeSheet();
-    render();
+    useChatGPTModel(model, result);
   } catch (err) {
     if (active()) panel.textContent = err.message;
   }

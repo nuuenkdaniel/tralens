@@ -42,7 +42,9 @@ Keep the HTTP listener and Ollama private. If your proxy enforces upload limits,
 
 ## Connect ChatGPT with OAuth
 
-Review the [privacy notice](../PRIVACY.md), then choose a GPT model in **Settings → Translation** and accept the data-use notice. If your browser runs on the server or reaches the reader over SSH, the OAuth callback still needs a loopback connection to the machine running Tralens. For a browser on the host, follow the link the reader shows. For a remote host, use a fixed callback port through SSH.
+On Android, open the Tralens app, sign in as the server owner, and select a GPT model under **Settings → Translation**. Tap **Continue with ChatGPT**, finish in the phone browser, then tap **Open Tralens**. If you started in Android Chrome, **Open Tralens** takes you to the installed app. [Privacy notice](../PRIVACY.md)
+
+For desktop browser sign-in, choose a GPT model and continue. If your browser runs on the server or reaches the reader over SSH, the OAuth callback still needs a loopback connection to the machine running Tralens. For a browser on the host, follow the link the reader shows. For a remote host, use a fixed callback port through SSH.
 
 From your computer, open a dedicated SSH session and run the login command on the server.
 
