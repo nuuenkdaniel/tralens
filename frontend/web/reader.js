@@ -205,11 +205,9 @@ function header(back) {
       ? '<a href="#library" class="btn">' + icon("chev-l") + "Library</a>"
       : '<a href="#library" class="brand"><span class="mark">文<b>A</b></span>Tralens</a>') +
     '<span class="grow"></span>' +
-    (offline ? ib("offline-library", "Downloads on this device", "download") : "") +
+    (offline ? '<button type="button" data-action="offline-library" aria-label="Downloads on this device">' + icon("download") + "Downloads</button>" : "") +
     (!back ? btn("add", "Add manga", "primary wide", "plus") : "") +
-    '<a class="btn icon-btn" href="#settings" aria-label="Settings">' +
-    icon("gear") +
-    "</a>" +
+    (route()[0] === "settings" ? "" : '<a class="btn icon-btn" href="#settings" aria-label="Settings">' + icon("gear") + "</a>") +
     ib("theme", "Switch theme", "contrast") +
     "</header>"
   );
@@ -309,7 +307,7 @@ function library() {
     '<div class="tools"><input id="search" type="search" aria-label="Search manga" placeholder="Search your library" value="' +
     esc(query) +
     '">' +
-    select(
+    choicesField(
       "sort",
       [
         ["recent", "Recently read"],
@@ -324,29 +322,13 @@ function library() {
     btn("add", "Add manga", "primary fab", "plus")
   );
 }
-function select(key, choices, label) {
-  return (
-    '<select aria-label="' +
-    esc(label) +
-    '" data-pref="' +
-    key +
-    '">' +
-    choices
-      .map(
-        ([v, t, off]) =>
-          '<option value="' +
-          v +
-          '" ' +
-          (prefs[key] === v ? "selected " : "") +
-          (off ? "disabled" : "") +
-          ">" +
-          esc(t) +
-          (off ? " · unavailable" : "") +
-          "</option>",
-      )
-      .join("") +
-    "</select>"
-  );
+function choicesField(key, choices, label) {
+  return '<fieldset class="choice-field"><legend>' + esc(label) + '</legend><div class="choices">' +
+    choices.map(([value, text, unavailable]) =>
+      '<label><input type="radio" data-pref="' + key + '" name="pref-' + key + '" value="' + esc(value) + '"' +
+      (prefs[key] === value ? ' checked' : '') + (unavailable ? ' disabled' : '') + '><span>' +
+      esc(text) + (unavailable ? ' · unavailable' : '') + '</span></label>'
+    ).join('') + '</div></fieldset>';
 }
 const readingFields = [
   [
@@ -361,9 +343,9 @@ const readingFields = [
     "layout",
     "Page layout",
     [
-      ["single", "Single page"],
-      ["spread", "Two-page spread"],
-      ["continuous", "Continuous scroll"],
+      ["single", "One page"],
+      ["spread", "Two pages"],
+      ["continuous", "Scroll"],
     ],
   ],
   [
@@ -383,8 +365,7 @@ const readingFields = [
     ],
   ],
 ];
-const field = ([k, l, choices]) =>
-  '<label class="field">' + l + select(k, choices, l) + "</label>";
+const field = ([key, label, choices]) => choicesField(key, choices, label);
 
 function preferences() {
   const translators = [
@@ -463,7 +444,7 @@ function detail(b) {
     icon("play") +
     (b.position ? "Continue reading" : "Start reading") +
     "</a>" +
-    btn("download-book", "Download", "", "download") +
+    btn("download-book", "Export ZIP", "", "download") +
     ib("book-menu", "Manga actions", "more") +
     '</div><div class="line"><h2>Chapters</h2>' +
     btn("add-chapter", "Add chapter", "", "plus") +
@@ -969,7 +950,7 @@ function drawAdd() {
       '<details' + (!selected || editing ? ' open' : '') + '><summary>' +
       (selected ? 'Edit details' : 'Choose files and destination') + '</summary><div class="fields"><div class="drop">' +
       icon("upload") +
-      "<b>Drop manga pages here</b><small>PNG, JPEG, WebP, PDF, CBZ or ZIP · Up to 4 GiB per import</small>" +
+      "<b>Import manga pages</b><small>PNG, JPEG, WebP, PDF, CBZ or ZIP · Up to 4 GiB per import</small>" +
       btn("choose", "Choose pages") +
       '<input id="files" type="file" accept="image/png,image/jpeg,image/webp,application/pdf,application/zip,application/x-zip-compressed,application/vnd.comicbook+zip,application/x-cbz,.cbz,.zip" multiple hidden></div>' +
       (draft.files.length
@@ -1429,7 +1410,9 @@ document.addEventListener("change", async (e) => {
     if (el.dataset.pref === "translator" && el.value !== "local" && config.frontier_provider === "chatgpt" &&
         !(config.chatgpt_connected && config.chatgpt_models?.includes(el.value))) {
       const requested = el.value;
-      el.value = prefs.translator;
+      const previous = el.closest("fieldset").querySelector('input[value="' + CSS.escape(prefs.translator) + '"]');
+      if (previous) previous.checked = true;
+      else el.checked = false;
       if (config.chatgpt_connected) {
         let result;
         try { result = await api("chatgpt/models"); } catch (err) { toast(err.message); return; }
@@ -1443,9 +1426,12 @@ document.addEventListener("change", async (e) => {
       } else showChatGPTConsent(requested);
       return;
     }
+    const restoreFocus = el === document.activeElement;
     prefs[el.dataset.pref] = el.value;
     save();
     render();
+    if (restoreFocus && !el.isConnected)
+      root.querySelector('input[data-pref="' + el.dataset.pref + '"]:checked')?.focus({preventScroll:true});
   }
   if (el.id === "scrub") {
     const { book, chapter } = current();
