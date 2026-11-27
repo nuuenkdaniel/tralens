@@ -49,6 +49,7 @@ class ReaderHandler(Handler):
             if path in (
                 "/",
                 "/reader.js",
+                "/offline.js",
                 "/reader.css",
             ):
                 file = WEB / ("index.html" if path == "/" else path[1:])

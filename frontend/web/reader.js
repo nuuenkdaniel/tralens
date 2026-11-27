@@ -115,6 +115,7 @@ async function api(path, body, reconnect = true, send = fetch) {
   }
   if (res.status === 401) {
     config = null;
+    bindDownloads(null);
     showAccountForm();
     throw Error("Sign in to your Tralens server.");
   }
@@ -204,6 +205,7 @@ function header(back) {
       ? '<a href="#library" class="btn">' + icon("chev-l") + "Library</a>"
       : '<a href="#library" class="brand"><span class="mark">文<b>A</b></span>Tralens</a>') +
     '<span class="grow"></span>' +
+    (offline ? ib("offline-library", "Downloads on this device", "download") : "") +
     (!back ? btn("add", "Add manga", "primary wide", "plus") : "") +
     '<a class="btn icon-btn" href="#settings" aria-label="Settings">' +
     icon("gear") +
@@ -489,7 +491,8 @@ function detail(b) {
               .filter(Boolean)
               .join(" · "),
           ) +
-          "</small></a><details><summary>Pages in " +
+          "</small></a>" + (offline ? '<button class="btn" data-action="save-offline" data-id="' + c.id +
+            '">' + icon("download") + 'Save offline</button>' : "") + "<details><summary>Pages in " +
           esc(c.title) +
           '</summary><div class="pages" data-chapter="' + c.id + '"></div></details>',
       )
@@ -1172,6 +1175,13 @@ async function openReading(pageId, point) {
   if (index >= 0) sheet.querySelectorAll(".reading-text li")[index].scrollIntoView({block:"center"});
 }
 async function act(action, pageId) {
+  if (action === "offline-library") return offline?.list();
+  if (action === "save-offline") {
+    const {book} = current();
+    const chapter = book?.chapters.find(c => c.id === pageId);
+    if (offline && chapter) return offline.save({id: chapter.id, book: book.title, title: chapter.title, originals: chapter.pages.filter(p => !p.ready).length, urls: chapter.pages.map(best)});
+    return;
+  }
   if (action === "transcript") return openReading(pageId);
   if (action === "skip-page") {
     const {book, page} = current();
@@ -1613,7 +1623,7 @@ document.addEventListener("drop", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (
-    sheet.open ||
+    sheet.open || offline?.isOpen() ||
     !current().page ||
     e.target.matches("input,select,textarea")
   )
@@ -1649,6 +1659,7 @@ document.addEventListener(
 );
 addEventListener("resize", () => { if (config && route()[0] === "read" && !sheet.open) render(); });
 addEventListener("tralens-back", event => {
+  if (offline?.back()) { event.preventDefault(); return; }
   if (sheet.open) closeSheet();
   else if ($("#keep-server")) $("#keep-server").click();
   else if ($('#account-form input[autocomplete="new-password"]') && $(".account-switch:not([hidden])")) $(".account-switch").click();
@@ -1664,6 +1675,7 @@ addEventListener("hashchange", () => {
   window.scrollTo(0, 0);
 });
 function accountChanged() {
+  bindDownloads(null);
   try { localStorage.setItem("tralens-account-change", crypto.randomUUID()); } catch {}
   location.reload();
 }
@@ -1685,6 +1697,21 @@ function serverOrigin(value) {
 }
 const nativeConnection = window.Capacitor?.isPluginAvailable?.("ReaderConnection")
   ? window.Capacitor.Plugins.ReaderConnection : null;
+const offlineModule = nativeConnection ? await import("./offline.js") : null;
+const offlineKey = "tralens-offline-account";
+let offline, offlineUser;
+function bindDownloads(user) {
+  if (!offlineModule) return;
+  if (user) localStorage.setItem(offlineKey, user);
+  else localStorage.removeItem(offlineKey);
+  if (offlineUser === user) return;
+  offline?.dispose();
+  offlineUser = user;
+  offline = user ? offlineModule.downloads(user, {
+    escape: esc, notify: toast, direction: () => prefs.direction,
+    unauthorized: () => { config = null; bindDownloads(null); showAccountForm(); }
+  }) : null;
+}
 const serverKey = "tralens-verified-server";
 let selectedServer = "";
 try {
@@ -1870,7 +1897,9 @@ function showCredentials(message = "", setupToken = "") {
 async function init() {
   root.innerHTML = '<main class="empty"><h1>Connecting to your library…</h1><p>' + esc(location.origin) + '</p></main>';
   try {
+    if (offlineModule && !navigator.onLine && localStorage.getItem(offlineKey)) throw Error("Offline");
     config = await api("config");
+    bindDownloads(config.username);
     rememberServer(location.origin);
     try {
       const saved = localStorage.getItem("tralens-reader:" + config.username) ||
@@ -1888,11 +1917,15 @@ async function init() {
   } catch (err) {
     if ($("#account-form")) return;
     config = null;
+    const remembered = offlineModule && localStorage.getItem(offlineKey);
+    if (remembered) bindDownloads(remembered);
     accountCard("Server unavailable", "Check your connection to " + location.host + " and try again.",
+      (offline ? btn("offline-library", "Open downloads", "", "download") : "") +
       '<button type="button" class="primary" id="retry-server">Retry connection</button>' +
       '<button type="button" class="account-switch" id="choose-server">Change server</button>');
     $("#retry-server").onclick = init;
     $("#choose-server").onclick = () => showServerForm();
+    if (offline && await offline.hasSaved().catch(() => false)) await offline.list();
   }
 }
 if (location.hash.startsWith("#setup=")) {
