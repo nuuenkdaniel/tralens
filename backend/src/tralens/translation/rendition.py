@@ -1059,7 +1059,9 @@ def self_contained_prompt(source, nearby=()):
             and not re.search(r'勝手に|無断で|くせに|[私僕俺]が|わたしが',source)):
         return ('Translate the standalone Japanese line into natural dialogue. The final te-oite form asks '
                 'the listener to do something in preparation. Keep the addressee as the person doing the '
-                'work and preserve who they are to speak to or act for. Give only the English line. '+source)
+                'work. Preserve any named group or institution that identifies the person, including its '
+                'specific field or subject. Use familiar English for technical abbreviations. Make the request '
+                'sound like something a person would actually say. Keep the line concise. Give only the English dialogue. '+source)
     if re.search(r'(?:トイレ|お手洗い|シャワー|浴室|台所|キッチン)(?:を|は)?貸す', source):
         return ('Translate the following Japanese comic lettering. The speaker offers the addressee use of a '
                 'fixed facility. Treat 貸す as granting access. Then render the invitation in natural spoken '
