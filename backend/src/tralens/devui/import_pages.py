@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 import subprocess
 import stat
+import tempfile
+import time
 import zipfile
 import zlib
 
@@ -15,6 +17,12 @@ from .server import MAX_UPLOAD, RequestError
 
 MAX_PAGES = 256
 MAX_ZIP_DIRECTORY_BYTES = 16 * 1024**2
+
+
+def require_space(location, size):
+    space = os.statvfs(location)
+    if space.f_bavail * space.f_frsize < size + 64 * 1024**2:
+        raise RequestError("Insufficient disk space. Free some space and try again.", 507)
 
 
 def webp_png(data):
@@ -31,21 +39,31 @@ def webp_png(data):
         return out.getvalue(), rgb.size
 
 
-def poppler(command):
+def poppler(command, deadline):
+    metadata = command[0] == "pdfinfo"
+    timeout = min(45, deadline - time.monotonic())
+    if timeout <= 0:
+        raise ValueError("This PDF took too long to render.")
+    # File-size rlimits apply to regular files, not pipes read into the parent.
+    limit = 256 * 1024 if metadata else 32 * 1024**2
     try:
-        result = subprocess.run(
-            ["prlimit", "--as=1073741824", "--fsize=33554432", "--", *command],
-            capture_output=True, timeout=45, env={**os.environ, "LC_ALL": "C"},
-        )
+        with tempfile.TemporaryFile() as output:
+            result = subprocess.run(
+                ["prlimit", "--as=1073741824", f"--fsize={limit}", "--", *command],
+                stdout=output if metadata else subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=timeout, env={**os.environ, "LC_ALL": "C"},
+            )
+            if result.returncode == 127:
+                raise ValueError("Install Poppler on the server to import PDFs.")
+            if result.returncode:
+                raise ValueError("Cannot read this PDF. Check for damage or password protection.")
+            if metadata:
+                output.seek(0)
+                return output.read(limit)
     except FileNotFoundError as exc:
         raise ValueError("PDF import needs Poppler and util-linux on the server.") from exc
     except subprocess.TimeoutExpired as exc:
         raise ValueError("This PDF took too long to render.") from exc
-    if result.returncode:
-        if result.returncode == 127:
-            raise ValueError("Install Poppler on the server to import PDFs.")
-        raise ValueError("Cannot read this PDF. Check for damage or password protection.")
-    return result.stdout
 
 
 def expand(name, data, directory, remaining):
@@ -59,16 +77,19 @@ def expand(name, data, directory, remaining):
     if signature == b"%PDF-" or name.lower().endswith(".pdf"):
         document = path or directory / "source.pdf"
         if path is None:
+            require_space(directory, len(data))
             document.write_bytes(data)
-        info = poppler(["pdfinfo", str(document)])
+        deadline = time.monotonic() + 300
+        info = poppler(["pdfinfo", str(document)], deadline)
         match = re.search(rb"^Pages:\s+(\d+)\s*$", info, re.M)
         if not match or not 0 < int(match[1]) <= remaining:
             raise ValueError(f"An import can contain at most {MAX_PAGES} pages.")
         for page in range(1, int(match[1]) + 1):
             prefix = directory / "render"
             prefix.with_suffix(".png").unlink(missing_ok=True)
+            require_space(directory, 32 * 1024**2)
             poppler(["pdftoppm", "-f", str(page), "-l", str(page), "-singlefile",
-                     "-cropbox", "-scale-to", "2000", "-png", str(document), str(prefix)])
+                     "-cropbox", "-scale-to", "2000", "-png", str(document), str(prefix)], deadline)
             image = prefix.with_suffix(".png").read_bytes()
             with Image.open(BytesIO(image), formats=("PNG",)) as im:
                 yield f"{Path(name).stem[:180]}-{page:03}.png", "image/png", image, im.size

@@ -282,6 +282,22 @@ assert "paddleocr" not in sys.modules
         self.reject(state, lambda s: s["units"][0].update(visual_alternates=[]))
         self.reject(state, lambda s: s["input_schedule"][0].update(request_revision="stale"))
 
+    def test_historical_review_replays_source_pixels_and_fragment_priority(self):
+        prepare = report.visual.prepare_input
+        with patch.object(report.visual, "prepare_input", side_effect=lambda *args:
+                          prepare(*args, legacy_stroke=True)):
+            state = self.state(3)
+        for unit in state["units"]:
+            for fragment in unit["fragment_previews"]:
+                fragment["scheduling"]["unicode_version"] = "13.0.0"
+        self.validate(state)
+        self.reject(state, lambda s: s["units"][0]["fragment_previews"][0]["scheduling"].update(priority_tier=99))
+        self.reject(state, lambda s: s["units"][0]["fragment_previews"][0]["scheduling"].update(unicode_version="1.0.0"))
+        def change_bound_view(s):
+            for row in (s["units"][0]["ocr_review"], s["ocr_review"]["units"][0]):
+                row["views"][1]["sha256"] = "0" * 64
+        self.reject(state, change_bound_view)
+
     def test_mixed_typed_ids_and_svg_text_are_preserved_and_escaped(self):
         for ids in ((1, "1"), (1, ATTACK)):
             for box, identifier in zip(self.fixture.boxes, ids):

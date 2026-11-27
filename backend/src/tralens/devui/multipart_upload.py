@@ -8,7 +8,7 @@ from python_multipart import MultipartParser
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import parse_options_header
 
-from .import_pages import MAX_PAGES
+from .import_pages import MAX_PAGES, require_space
 from .server import RequestError
 
 MAX_IMPORT_BYTES = 4 * 1024**3
@@ -37,6 +37,7 @@ def read_import(stream, length, content_type):
         try:
             remaining = length
             while remaining:
+                require_space(directory, remaining)
                 chunk = stream.read(min(remaining, 256 * 1024))
                 if not chunk:
                     raise RequestError('Incomplete upload.')
