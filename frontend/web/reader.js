@@ -1468,7 +1468,7 @@ addEventListener("resize", () => { if (config && route()[0] === "read" && !sheet
 addEventListener("tralens-back", event => {
   if (sheet.open) closeSheet();
   else if ($("#keep-server")) $("#keep-server").click();
-  else if ($('#account-form input[autocomplete="new-password"]')) $(".account-switch").click();
+  else if ($('#account-form input[autocomplete="new-password"]') && $(".account-switch:not([hidden])")) $(".account-switch").click();
   else if (current().page) location.replace("#book/" + current().book.id);
   else if (config && ["book", "settings"].includes(route()[0])) location.replace("#library");
   else return;
@@ -1585,6 +1585,30 @@ function showAccountForm(message = "") {
   if (selectedServer === location.origin) showCredentials(message);
   else showServerForm(message);
 }
+function requestSetupLink(form, message) {
+  $(".account-card h1").textContent = "Use your setup link";
+  document.title = "Owner setup · Tralens";
+  $(".account-intro").textContent = "Open the private link from your server, or paste it here to continue in the app.";
+  form.innerHTML = `
+    <label class="field">Private setup link<input name="link" type="url" required autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+    <p class="account-guidance">On the server, find the link in <code>/library/owner-setup.url</code> inside the reader container.</p>
+    <p class="error" role="alert"></p><button class="primary">Continue setup</button>`;
+  const alert = form.querySelector('[role="alert"]');
+  alert.textContent = message;
+  form.onsubmit = event => {
+    event.preventDefault();
+    const prefix = location.origin + "/#setup=";
+    const link = form.elements.link.value.trim();
+    const token = link.slice(prefix.length);
+    if (!link.startsWith(prefix) || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
+      alert.textContent = "Paste the full setup link for this server, including #setup=.";
+      return;
+    }
+    form.reset();
+    showCredentials("", token);
+    $('input[name="username"]')?.focus();
+  };
+}
 function showCredentials(message = "", setupToken = "") {
   accountCard("Sign in", "Open your manga library.", `
     <div class="account-server"><span>${esc(location.origin)}</span><button type="button" id="change-server" aria-label="Change server">Change</button></div>
@@ -1617,11 +1641,8 @@ function showCredentials(message = "", setupToken = "") {
   fetch("/api/auth/settings", {redirect:"error"}).then(r => r.ok ? r.json() : null).then(data => {
     if (!form.isConnected || !data) return;
     if (data.setup_required) {
-      setMode("setup");
-      if (data.setup_link_required && !setupToken) {
-        form.hidden = true;
-        $(".account-intro").textContent = "Open the private setup link from your server to create its owner account.";
-      }
+      if (data.setup_link_required && !setupToken) requestSetupLink(form, message);
+      else setMode("setup");
     } else {
       toggle.hidden = !data.registration;
       if (setupToken) alert.textContent = "This server already has an owner. Sign in to continue.";
@@ -1645,7 +1666,7 @@ function showCredentials(message = "", setupToken = "") {
       });
       if (!response.ok) {
         const reason = (await response.json()).error || "Sign-in failed.";
-        if (action === "setup" && response.status === 409) {
+        if (action === "setup" && (response.status === 403 || response.status === 409)) {
           showCredentials(reason);
           return;
         }
