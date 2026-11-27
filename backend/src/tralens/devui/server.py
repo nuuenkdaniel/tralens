@@ -11,6 +11,7 @@ import ipaddress
 import json
 import mimetypes
 import math
+import os
 from pathlib import Path
 import re
 import secrets
@@ -203,6 +204,10 @@ class App:
         if any(p.is_symlink() for p in (self.root, *self.root.parents)):
             raise ValueError('Development job root must not use symlinks.')
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if config.reader_mode:
+            directory = self.root.stat()
+            if directory.st_uid != os.geteuid() or directory.st_mode & 0o022:
+                raise ValueError("The library directory must belong to the service user and only that user may write to it.")
         self.token = secrets.token_urlsafe(32)
         self.lock = threading.Lock()
         self.jobs, self.active = {}, None
@@ -524,6 +529,9 @@ class App:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def request_token(self):
+        return self.server.app.token
+
     def setup(self):
         super().setup()
         self.connection.settimeout(30)
@@ -531,14 +539,19 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # Polling is intentionally quiet; the browser shows job errors.
 
-    def respond(self, status, body, mime='application/json', *, attachment=None):
+    def respond(self, status, body, mime='application/json', *, attachment=None, discovery=False, probe_worker=False):
         self.send_response(status)
         self.send_header('Content-Type', mime)
         self.send_header('Content-Length', str(len(body)))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Referrer-Policy', 'no-referrer')
-        self.send_header('Content-Security-Policy', "default-src 'self'; connect-src 'self'; img-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+        if discovery:
+            self.send_header('Access-Control-Allow-Origin', '*')
+        policy = "default-src 'self'; connect-src 'self'; img-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+        if probe_worker:
+            policy = "default-src 'none'; connect-src https: http://localhost:* http://127.0.0.1:* http://[::1]:*"
+        self.send_header('Content-Security-Policy', policy)
         if attachment:
             self.send_header('Content-Disposition', 'attachment; filename="'+attachment+'"')
         self.end_headers()
@@ -547,12 +560,14 @@ class Handler(BaseHTTPRequestHandler):
     def json(self, status, value):
         self.respond(status, json.dumps(value, ensure_ascii=False, allow_nan=False).encode())
 
-    def local_request(self):
+    def local_request(self, *, discovery=False):
         owner = getattr(self.server, 'owner', None)
+        public_navigation = (self.command == "GET" and urlsplit(self.path).path == "/" and
+                             self.headers.get("Sec-Fetch-Mode") == "navigate")
         if owner:
             if (self.headers.get('Host') != owner.host or
-                    self.headers.get('Origin', owner.origin) != owner.origin or
-                    self.headers.get('Sec-Fetch-Site') == 'cross-site'):
+                    not discovery and self.headers.get('Origin', owner.origin) != owner.origin or
+                    self.headers.get('Sec-Fetch-Site') == 'cross-site' and not public_navigation and not discovery):
                 raise RequestError('Unexpected reader host or origin.', 403)
             return
         port = self.server.server_port
@@ -567,9 +582,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get('Host') not in hosts:
             raise RequestError('This viewer only accepts a configured local-interface Host.', 403)
         origin = self.headers.get('Origin')
-        if origin and origin not in {'http://'+host for host in hosts}:
+        if not discovery and origin and origin not in {'http://'+host for host in hosts}:
             raise RequestError('Cross-origin requests are not allowed.', 403)
-        if self.headers.get('Sec-Fetch-Site') == 'cross-site':
+        if self.headers.get('Sec-Fetch-Site') == 'cross-site' and not public_navigation and not discovery:
             raise RequestError('Cross-site requests are not allowed.', 403)
 
     def do_GET(self):
@@ -606,7 +621,7 @@ class Handler(BaseHTTPRequestHandler):
             cancel = re.fullmatch('/api/jobs/([0-9a-f]{32})/cancel', self.path)
             if self.path != '/api/jobs' and retry is None and cancel is None:
                 raise RequestError('Not found.', 404)
-            if not secrets.compare_digest(self.headers.get('X-Tralens-Token', ''), self.server.app.token):
+            if not secrets.compare_digest(self.headers.get('X-Tralens-Token', '').encode(), self.request_token().encode()):
                 raise RequestError('Invalid session token; reload the page.', 403)
             lengths = self.headers.get_all('Content-Length') or []
             if self.headers.get('Transfer-Encoding') or len(lengths) != 1 or not re.fullmatch('[0-9]{1,10}', lengths[0]):

@@ -28,7 +28,6 @@ let config,
   noticeTimer,
   hideTimer;
 let pendingPosition = Promise.resolve(),
-  loading = false,
   focusReturn,
   dismissed = "",
   uploadBusy = false;
@@ -87,7 +86,7 @@ function current() {
   };
 }
 function save() {
-  localStorage.setItem("tralens-reader", JSON.stringify(prefs));
+  localStorage.setItem(config?.username ? "tralens-reader:" + config.username : "tralens-reader", JSON.stringify(prefs));
   document.documentElement.dataset.theme = prefs.theme;
 }
 document.documentElement.dataset.theme = prefs.theme;
@@ -105,30 +104,74 @@ async function api(path, body, reconnect = true) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
+  if (path === "config") opts.signal = AbortSignal.timeout(6000);
   const res = await fetch("/api/" + path, opts);
   if (res.status === 401) {
     config = null;
-    showOwnerLogin();
+    showAccountForm();
     throw Error("Sign in to your Tralens server.");
   }
-  const data = await res.json();
+  const data = res.ok ? await res.json() : await res.json().catch(() => ({}));
   if (
     res.status === 403 &&
     reconnect &&
     body !== undefined &&
     /token|reload/i.test(data.error || "")
   ) {
-    config = await api("config");
+    const fresh = await api("config");
+    if (fresh.username !== config?.username) {
+      location.reload();
+      throw Error("The signed-in account changed.");
+    }
+    config = fresh;
     return api(path, body, false);
   }
-  if (!res.ok) throw Error(data.error || "Request failed.");
+  if (!res.ok) throw Error(data.error || "Server request failed (HTTP " + res.status + "). Try again.");
   return data;
 }
+let pollTimer, refreshId = 0;
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  if (document.hidden || !config) return;
+  const busy = catalog.books.some(b => b.chapters.some(c =>
+    c.pages.some(p => ["queued", "running", "waiting"].includes(p.status))));
+  pollTimer = setTimeout(poll, busy ? 2500 : 60000);
+}
+async function poll() {
+  if (!config || uploadBusy || document.hidden) return schedulePoll();
+  try { await refresh(); }
+  catch (err) { toast(err.message); schedulePoll(); }
+}
 async function refresh(force = false) {
+  const id = ++refreshId;
   const data = await api("library");
-  const changed = JSON.stringify(catalog) !== JSON.stringify(data);
+  if (id !== refreshId || !config) return;
+  const before = current();
+  const previous = catalog;
   catalog = data;
-  if (force || changed) render();
+  schedulePoll();
+  const after = current();
+  if (!force && before.page && after.page && $(".reader") &&
+      before.book.title === after.book.title && before.chapter.title === after.chapter.title &&
+      before.book.chapters.at(-1).id === after.book.chapters.at(-1).id &&
+      before.chapter.pages.length === after.chapter.pages.length) {
+    const continuous = $(".continuous");
+    const start = after.chapter.pages.indexOf(after.page);
+    const count = prefs.layout === "spread" && view !== "compare" ? 2 : 1;
+    const visible = continuous ? after.chapter.pages : after.chapter.pages.slice(start, start + count);
+    const offset = continuous ? 0 : start;
+    for (const [i, page] of visible.entries()) {
+      const old = before.chapter.pages[offset + i];
+      if (JSON.stringify(old) === JSON.stringify(page)) continue;
+      if (!continuous || old.id !== page.id) return render();
+      continuous.children[i].outerHTML = pageImage(page, view);
+    }
+    if (continuous && JSON.stringify(before.page) !== JSON.stringify(after.page)) {
+      $("#page-status").innerHTML = pageBanner(after.page);
+    }
+    return;
+  }
+  if (force || JSON.stringify(previous) !== JSON.stringify(data)) render();
 }
 function settings() {
   const protect = prefs.protection === "protect";
@@ -333,10 +376,6 @@ const readingFields = [
 ];
 const field = ([k, l, choices]) =>
   '<label class="field">' + l + select(k, choices, l) + "</label>";
-function connectionButton() {
-  return window.Capacitor?.isPluginAvailable?.("ReaderConnection")
-    ? btn("configure-server", "Change server", "", "server") : "";
-}
 
 function preferences() {
   const translators = [
@@ -348,10 +387,11 @@ function preferences() {
   return (
     header(true) +
     '<main class="wrap settings"><h1>Settings</h1>' +
-    (connectionButton() ? '<section class="panel fields"><h2>Server</h2><p>' + esc(location.origin) + '</p>' + connectionButton() + '</section>' : '') +
-    (config.owner_mode ? btn("owner-logout", "Sign out of this server", "") : "") +
+    '<section class="panel fields"><h2>Server</h2><p>' + esc(location.origin) + '</p>' + btn("configure-server", "Change server", "", "server") + '</section>' +
+    '<section class="panel fields"><h2>Account</h2><p>Signed in as <b>' + esc(config.username) + '</b></p>' + btn("owner-logout", "Sign out") + "</section>" +
     '<section class="panel fields"><h2>Translation</h2>' +
     field(["translator", "Translation model", translators]) +
+    (config.frontier_provider === "chatgpt" ? '<p class="hint">Connecting ChatGPT is optional and enables GPT translation.</p>' : "") +
     '<p class="hint">' +
     esc(privacy()) +
     "</p>" +
@@ -415,6 +455,7 @@ function detail(b) {
     icon("play") +
     (b.position ? "Continue reading" : "Start reading") +
     "</a>" +
+    btn("download-book", "Download", "", "download") +
     ib("book-menu", "Manga actions", "more") +
     '</div><div class="line"><h2>Chapters</h2>' +
     btn("add-chapter", "Add chapter", "", "plus") +
@@ -444,27 +485,22 @@ function detail(b) {
           ) +
           "</small></a><details><summary>Pages in " +
           esc(c.title) +
-          '</summary><div class="pages">' +
-          c.pages
-            .map(
-              (p, i) =>
-                '<a href="' +
-                readURL(b, p) +
-                '"><img loading="lazy" src="' +
-                best(p) +
-                '" alt="Page ' +
-                (i + 1) +
-                '">' +
-                (i + 1) +
-                "</a>",
-            )
-            .join("") +
-          "</div></details>",
+          '</summary><div class="pages" data-chapter="' + c.id + '"></div></details>',
       )
       .join("") +
     "</div></main>"
   );
 }
+root.addEventListener("toggle", (event) => {
+  if (!event.target.matches("details[open]")) return;
+  const list = event.target.querySelector(".pages[data-chapter]");
+  if (!list || list.childElementCount) return;
+  const { book } = current();
+  const chapter = book?.chapters.find(c => c.id === list.dataset.chapter);
+  if (chapter) list.innerHTML = chapter.pages.map((p, i) =>
+    '<a href="' + readURL(book, p) + '"><img loading="lazy" src="' + best(p) +
+    '" alt="Page ' + (i + 1) + '">' + (i + 1) + '</a>').join("");
+}, true);
 function pageImage(p, mode) {
   const columns = prefs.layout === "spread" || (view === "compare" && prefs.comparison === "side") ? 2 : 1;
   const width = Math.min(innerWidth / columns, prefs.fit === "width" ? Infinity : innerHeight * p.width / p.height, p.width);
@@ -492,6 +528,25 @@ function pageImage(p, mode) {
     "</div>"
   );
 }
+function pageBanner(p) {
+  const pending = ["queued", "running"].includes(p.status),
+    error = p.error || (p.status === "skipped" ? "Translation skipped." : null);
+  return view !== "original" &&
+    (pending || error) &&
+    dismissed !== p.id + ":" + p.status
+      ? '<div class="banner">' +
+        esc(
+          pending
+            ? p.status === "queued"
+              ? "Waiting to translate…"
+              : "Translating this page…"
+            : error,
+        ) +
+        (!pending && p.status !== "waiting" ? btn("retry-page", "Try again") : "") +
+        ib("dismiss", "Dismiss", "x") +
+        "</div>"
+      : "";
+}
 function reader(b, c, p) {
   const i = c.pages.indexOf(p),
     rtl = prefs.direction === "rtl",
@@ -518,26 +573,6 @@ function reader(b, c, p) {
       "</div>";
   else if (prefs.layout === "continuous" && view !== "compare")
     content = c.pages.map((x) => pageImage(x, view)).join("");
-  const pending = ["queued", "running"].includes(p.status),
-    error = p.error || (p.status === "skipped" ? "Translation skipped." : null);
-  const banner =
-    view !== "original" &&
-    (pending || error) &&
-    dismissed !== p.id + ":" + p.status
-      ? '<div class="banner">' +
-        esc(
-          pending
-            ? p.status === "queued"
-              ? "Waiting to translate…"
-              : "Translating this page…"
-            : error,
-        ) +
-        (pending || p.status === "waiting"
-          ? btn("skip-page", "Skip page")
-          : btn("retry-page", "Try again")) +
-        ib("dismiss", "Dismiss", "x") +
-        "</div>"
-      : "";
   return (
     '<main class="reader ' +
     (prefs.background === "paper" ? "paper " : "") +
@@ -547,7 +582,7 @@ function reader(b, c, p) {
     '">' +
     content +
     "</div>" +
-    banner +
+    '<div id="page-status">' + pageBanner(p) + "</div>" +
     '<header><a class="btn icon-btn" href="#book/' +
     b.id +
     '" aria-label="Back to manga">' +
@@ -637,9 +672,10 @@ function render() {
   const searchFocused = document.activeElement?.id === "search",
     caret = searchFocused ? $("#search").selectionStart : 0;
   const wipeValue = $("#wipe")?.value;
-  const continuous = $(".continuous"),
-    oldScroll = continuous?.scrollTop,
+  const oldCanvas = $(".canvas"),
+    oldScroll = oldCanvas?.scrollTop,
     same = lastRender === location.hash;
+  const expanded = same && screen === "book" ? [...root.querySelectorAll("details[open] .pages")].map(el => el.dataset.chapter) : [];
   const hidden = same && $(".reader")?.classList.contains("clean");
   clearTimeout(hideTimer);
   root.innerHTML = reading
@@ -656,6 +692,10 @@ function render() {
         ? "Settings"
         : book?.title || "Library") + " · Tralens";
   lastRender = location.hash;
+  for (const id of expanded) {
+    const list = root.querySelector('.pages[data-chapter="' + id + '"]');
+    if (list) list.parentElement.open = true;
+  }
   if (searchFocused && $("#search")) {
     $("#search").focus();
     $("#search").setSelectionRange(caret, caret);
@@ -665,11 +705,12 @@ function render() {
     setWipe($("#wipe")?.value || 50);
     if (hidden) $(".reader").classList.add("clean");
     else showChrome();
-    if ($(".continuous")) {
-      const canvas = $(".continuous");
+    const canvas = $(".canvas");
+    const keepScroll = same && oldCanvas?.className === canvas.className;
+    if (keepScroll) canvas.scrollTop = oldScroll;
+    if (canvas.classList.contains("continuous")) {
       const target = canvas.querySelector('[data-page="' + page.id + '"]');
-      if (same && oldScroll !== undefined) canvas.scrollTop = oldScroll;
-      else target?.scrollIntoView({ block: "start" });
+      if (!keepScroll) target?.scrollIntoView({ block: "start" });
       let timer;
       canvas.onscroll = () => {
         clearTimeout(timer);
@@ -681,6 +722,7 @@ function render() {
             (x) => x.getBoundingClientRect().bottom > middle,
           );
           if (el && el.dataset.page !== current().page?.id) {
+            const { book, chapter } = current();
             const next = chapter.pages.find((x) => x.id === el.dataset.page);
             history.replaceState(null, "", readURL(book, next));
             lastRender = location.hash;
@@ -688,12 +730,13 @@ function render() {
             $(".reader output").textContent =
               $("#scrub").value + " / " + chapter.pages.length;
             persistPosition(book, next);
-            // Refresh chrome, page status and slider while retaining scroll offset.
-            render();
+            $("#page-status").innerHTML = pageBanner(next);
+            updateEndLink(book, next);
           }
         }, 180);
       };
     }
+    updateEndLink(book, page);
     persistPosition(book, page);
   } else lastFocusPage = "";
 }
@@ -714,31 +757,71 @@ function showChrome() {
       r.classList.add("clean");
   }, 4300);
 }
+function updateEndLink(book, page) {
+  const forward = $('.edge[data-action="next"], .edge[data-action="chapters"]');
+  const atEnd = book.chapters.at(-1).pages.at(-1).id === page.id ||
+    (prefs.layout === "spread" && view !== "compare" && book.chapters.at(-1).pages.at(-2)?.id === page.id);
+  forward.dataset.action = atEnd ? "chapters" : "next";
+  forward.textContent = atEnd ? "Back to chapters" : "";
+  if (atEnd) forward.setAttribute("aria-label", "Back to chapters");
+  else {
+    forward.setAttribute("aria-label", "Next page");
+    forward.innerHTML = icon(prefs.direction === "rtl" ? "chev-l" : "chev-r");
+  }
+}
+function goToPage(book, page) {
+  const from = current();
+  const previous = $(".canvas");
+  history.replaceState(null, "", readURL(book, page));
+  if (previous?.classList.contains("continuous") && current().chapter === from.chapter) {
+    previous.querySelector('[data-page="' + page.id + '"]').scrollIntoView({block: "start"});
+    lastRender = location.hash;
+    const index = from.chapter.pages.indexOf(page) + 1;
+    $("#scrub").value = index;
+    $(".reader output").textContent = index + " / " + from.chapter.pages.length;
+    $("#page-status").innerHTML = pageBanner(page);
+    updateEndLink(book, page);
+    persistPosition(book, page);
+    return;
+  }
+  const top = previous?.scrollTop;
+  render();
+  const images = [...$(".canvas").querySelectorAll(".page-image")];
+  if (previous && !previous.classList.contains("continuous") && !$(".continuous") &&
+      images.some(img => !img.complete)) {
+    previous.querySelectorAll("[id]").forEach(el => el.removeAttribute("id"));
+    previous.inert = true;
+    previous.setAttribute("aria-hidden", "true");
+    previous.classList.add("previous-page");
+    $(".reader").append(previous);
+    previous.scrollTop = top;
+    Promise.allSettled(images.map(img => img.decode())).then(() => previous.remove());
+  }
+}
 function turn(delta, chapterOnly = false) {
   const { book, chapter, page } = current();
   if (!page) return;
   if (chapterOnly) {
     const c = book.chapters[book.chapters.indexOf(chapter) + delta];
-    if (c) location.hash = readURL(book, c.pages[0]);
+    if (c) return goToPage(book, c.pages[0]);
     return;
   }
-  const pages = pagesOf(book),
-    step =
-      prefs.layout === "spread" && view !== "compare"
-        ? delta > 0
-          ? Math.min(2, chapter.pages.length - chapter.pages.indexOf(page))
-          : chapter.pages.indexOf(page) === 1
-            ? 1
-            : 2
-        : 1;
-  const n =
-    pages[
-      Math.max(
-        0,
-        Math.min(pages.length - 1, pages.indexOf(page) + delta * step),
-      )
-    ];
-  if (n) location.hash = readURL(book, n);
+  const pages = pagesOf(book);
+  let offset = delta;
+  if (prefs.layout === "spread" && view !== "compare") {
+    const index = chapter.pages.indexOf(page);
+    if (delta > 0) {
+      offset = Math.min(2, chapter.pages.length - index);
+    } else if (index > 0) {
+      offset = -Math.min(2, index);
+    } else {
+      const previous = book.chapters[book.chapters.indexOf(chapter) - 1];
+      offset = previous?.pages.length % 2 === 0 ? -2 : -1;
+    }
+  }
+  const n = pages[pages.indexOf(page) + offset];
+  if (n) return goToPage(book, n);
+
 }
 function modal(title, html) {
   if (!sheet.open) focusReturn = document.activeElement;
@@ -779,8 +862,10 @@ function addBook(id = "", files = []) {
   };
   addFiles(files);
   drawAdd();
+  if (!files.length && window.Capacitor?.isNativePlatform?.()) $("#files").click();
 }
 function addFiles(files) {
+  draft.fileError = "";
   for (const file of [...files].sort((a, b) =>
     a.name.localeCompare(b.name, undefined, { numeric: true }),
   )) {
@@ -788,7 +873,7 @@ function addFiles(files) {
       !/\.(png|jpe?g|webp|pdf|cbz|zip)$/i.test(file.name) ||
       (!/\.(pdf|cbz|zip)$/i.test(file.name) && file.size > config.max_upload_bytes)
     ) {
-      toast("Choose PNG, JPEG, WebP, PDF, CBZ or ZIP. Images can be up to 32 MiB each.");
+      draft.fileError = "Choose PNG, JPEG, WebP, PDF, CBZ or ZIP. Images can be up to 32 MiB each.";
       continue;
     }
     draft.files.push({ file, url: URL.createObjectURL(file) });
@@ -799,9 +884,17 @@ function addFiles(files) {
       .replace(/[_-]+/g, " ");
 }
 function drawAdd() {
+  const selected = draft.files.length;
+  const destination = catalog.books.find(b => b.id === draft.book)?.title || draft.title;
+  const editing = sheet.open && $("#import .import-summary") && $("#import details")?.open;
   modal(
     draft.book ? "Add chapter" : "Add manga",
-    '<form id="import" class="fields"><div class="drop">' +
+    '<form id="import" class="fields">' +
+      (selected ? '<div class="import-summary"><b>' + esc(draft.files[0].file.name) + '</b>' +
+        (selected > 1 ? ' + ' + (selected - 1) + ' more' : '') + '<p>' + esc(destination) +
+        ' · ' + esc(draft.chapter) + '</p></div>' : '') +
+      '<details' + (!selected || editing ? ' open' : '') + '><summary>' +
+      (selected ? 'Edit details' : 'Choose files and destination') + '</summary><div class="fields"><div class="drop">' +
       icon("upload") +
       "<b>Drop manga pages here</b><small>PNG, JPEG, WebP, PDF, CBZ or ZIP · Up to 4 GiB per import</small>" +
       btn("choose", "Choose pages") +
@@ -809,7 +902,7 @@ function drawAdd() {
       (draft.files.length
         ? "<div><small>" +
           draft.files.length +
-          ' files · Reading order</small><div class="tray">' +
+          (draft.files.length === 1 ? " file" : " files") + ' · Reading order</small><div class="tray">' +
           draft.files
             .map(
               (f, i) =>
@@ -861,9 +954,9 @@ function drawAdd() {
       '<label class="field">Chapter<input id="chapter" maxlength="200" required value="' +
       esc(draft.chapter) +
       '"></label>' +
-      '<p class="hint">' +
+      '</div></details><p class="hint">' +
       esc(privacy()) +
-      '</p><div class="error" role="alert" id="import-error"></div><button class="primary" ' +
+      '</p><div class="error" role="alert" id="import-error">' + esc(draft.fileError) + '</div><button class="primary" ' +
       (!draft.files.length || !config.render_enabled ? "disabled" : "") +
       (prefs.translator === "local" ? ">Add &amp; translate</button>" : ">Add &amp; translate with ChatGPT</button>") +
       (!config.render_enabled
@@ -913,28 +1006,29 @@ function menu(kind) {
       '<div class="menu-list">' +
         btn("rename", "Rename manga") +
         btn("add-chapter", "Add chapter") +
-        btn("download-book", "Download manga") +
         btn("retry-book", "Translate again") +
         btn("delete", "Delete from library", "danger") +
         "</div>",
     );
-  if (kind === "download-book")
+  if (kind === "download-book") {
+    const pages = pagesOf(book);
+    const ready = pages.filter(p => p.ready).length;
     return modal(
       "Download manga",
       '<div class="menu-list">' +
-        ["translated", "original", "both"]
+        ["translated", "original", "both"].filter(v => v !== "translated" || ready)
           .map(
             (v) =>
               '<a class="btn" href="/api/library/books/' +
               book.id +
               "/" +
               v +
-              '.zip" download>' +
+              '.zip" download="' + esc(book.title + "-" + v + ".zip") + '">' +
               esc(
                 {
-                  translated: "Available translated pages",
+                  translated: "Translated pages (" + ready + " of " + pages.length + ")",
                   original: "Original pages",
-                  both: "Originals and translations",
+                  both: "All originals + " + ready + " translated",
                 }[v],
               ) +
               " · ZIP</a>",
@@ -942,6 +1036,7 @@ function menu(kind) {
           .join("") +
         "</div>",
     );
+  }
   if (kind === "rename")
     return modal(
       "Rename manga",
@@ -970,7 +1065,7 @@ function menu(kind) {
             best(page) +
             '" download="translated.png">Download translation</a>'
           : "") +
-        btn("retry-page", "Translate again") +
+        (["queued", "running", "waiting"].includes(page.status) ? btn("skip-page", "Skip translation") : btn("retry-page", "Translate again")) +
         btn("fullscreen", "Toggle full screen") +
         "</div>",
     );
@@ -1003,15 +1098,16 @@ async function act(action, pageId) {
   if (action === "skip-page") {
     const {book, page} = current();
     await api("library/skip", {book: book.id, page: page.id});
+    closeSheet();
     return refresh(true);
   }
   if (action === "owner-logout") {
-    const reply = await fetch("/api/owner/logout", {method: "POST"});
-    if (reply.ok || reply.status === 401) location.reload();
+    const reply = await fetch("/api/auth/logout", {method: "POST"});
+    if (reply.ok || reply.status === 401) accountChanged();
     else toast("Could not sign out.");
     return;
   }
-  if (action === "configure-server") return window.Capacitor.Plugins.ReaderConnection.configure();
+  if (action === "configure-server") return showServerForm();
   const { book, page } = current();
   if (
     [
@@ -1051,6 +1147,7 @@ async function act(action, pageId) {
   }
   if (action === "add" || action === "add-chapter")
     return addBook(action === "add-chapter" ? book.id : "");
+  if (action === "chapters") return location.replace("#book/" + book.id);
   if (action === "choose") return $("#files").click();
   if (action === "next" || action === "prev")
     return turn(action === "next" ? 1 : -1);
@@ -1083,6 +1180,18 @@ async function act(action, pageId) {
   if (action === "reconnect") return init();
 }
 document.addEventListener("click", (e) => {
+  const download = e.target.closest("a[download]");
+  if (download && window.Capacitor?.isPluginAvailable?.("ReaderConnection")) {
+    e.preventDefault();
+    const path = new URL(download.href).pathname;
+    api("library/download-ticket", {path})
+      .then(({ticket}) => window.Capacitor.Plugins.ReaderConnection.download({
+        path, ticket, filename: download.download
+      }))
+      .then(() => toast("Download started."))
+      .catch(error => toast(error.message));
+    return;
+  }
   const a = e.target.closest("[data-action]");
   if (a) {
     act(a.dataset.action, a.dataset.id).catch((err) => toast(err.message));
@@ -1120,8 +1229,14 @@ document.addEventListener("input", (e) => {
     $("#shelf").innerHTML = shelf();
   }
   if (e.target.id === "wipe") setWipe(e.target.value);
-  if (draft && ["title", "chapter"].includes(e.target.id))
+  if (draft && ["title", "chapter"].includes(e.target.id)) {
     draft[e.target.id] = e.target.value;
+    const summary = $(".import-summary p");
+    if (summary) {
+      const book = catalog.books.find(b => b.id === draft.book);
+      summary.textContent = (book?.title || draft.title) + " · " + draft.chapter;
+    }
+  }
 });
 function showChatGPTConsent(model) {
   modal("Connect to ChatGPT",
@@ -1195,13 +1310,24 @@ async function selectChatGPT(model, panel) {
     if (active()) panel.textContent = err.message;
   }
 }
-document.addEventListener("change", (e) => {
+document.addEventListener("change", async (e) => {
   const el = e.target;
   if (el.dataset.pref) {
-    if (el.dataset.pref === "translator" && el.value !== "local" && config.frontier_provider === "chatgpt") {
+    if (el.dataset.pref === "translator" && el.value !== "local" && config.frontier_provider === "chatgpt" &&
+        !(config.chatgpt_connected && config.chatgpt_models?.includes(el.value))) {
       const requested = el.value;
       el.value = prefs.translator;
-      showChatGPTConsent(requested);
+      if (config.chatgpt_connected) {
+        let result;
+        try { result = await api("chatgpt/models"); } catch (err) { toast(err.message); return; }
+        if (result.state === "connected") {
+          config.chatgpt_models = result.models;
+          if (result.models.includes(requested)) prefs.translator = requested;
+          else toast("This model is unavailable for your account.");
+          save();
+          render();
+        } else showChatGPTConsent(requested);
+      } else showChatGPTConsent(requested);
       return;
     }
     prefs[el.dataset.pref] = el.value;
@@ -1210,7 +1336,7 @@ document.addEventListener("change", (e) => {
   }
   if (el.id === "scrub") {
     const { book, chapter } = current();
-    location.hash = readURL(book, chapter.pages[Number(el.value) - 1]);
+    await goToPage(book, chapter.pages[Number(el.value) - 1]);
   }
   if (el.id === "files") {
     addFiles(el.files);
@@ -1227,11 +1353,14 @@ document.addEventListener("change", (e) => {
 });
 document.addEventListener("submit", async (e) => {
   e.preventDefault();
+  if (uploadBusy || e.target.id === "account-form") return;
   const button = e.target.querySelector('button:not([type="button"])');
   if (button) button.disabled = true;
   try {
     if (e.target.id === "import") {
       uploadBusy = true;
+      e.target.inert = true;
+      button.textContent = "Adding…";
       const form = new FormData();
       form.append(
         "metadata",
@@ -1243,11 +1372,21 @@ document.addEventListener("submit", async (e) => {
         }),
       );
       draft.files.forEach((f) => form.append("page", f.file));
-      await api("library/add", form);
-      uploadBusy = false;
+      let added;
+      try {
+        added = await api("library/add", form);
+      } finally {
+        uploadBusy = false;
+        e.target.inert = false;
+      }
       closeSheet();
       await refresh(true);
-      location.hash = "library";
+      const book = catalog.books.find(b => b.id === added.book);
+      const chapter = book?.chapters.find(c => c.id === added.chapter);
+      if (chapter?.pages.length) {
+        history.replaceState(null, "", "#book/" + book.id);
+        location.hash = readURL(book, chapter.pages[0]);
+      }
       toast("Added to your library.");
     } else if (e.target.id === "rename") {
       await api("library/rename", {
@@ -1261,7 +1400,9 @@ document.addEventListener("submit", async (e) => {
     if ($("#import-error")) $("#import-error").textContent = err.message;
     else toast(err.message);
   } finally {
-    uploadBusy = false;
+    if (e.target.id === "import") {
+      button.textContent = prefs.translator === "local" ? "Add & translate" : "Add & translate with ChatGPT";
+    }
     if (button) button.disabled = false;
   }
 });
@@ -1274,7 +1415,7 @@ document.addEventListener("dragover", (e) => {
 });
 document.addEventListener("drop", (e) => {
   e.preventDefault();
-  if (uploadBusy) return;
+  if (!config || uploadBusy) return;
   if (e.dataTransfer.files.length) {
     if (!draft) addBook("", e.dataTransfer.files);
     else {
@@ -1324,35 +1465,190 @@ document.addEventListener(
   { passive: true },
 );
 addEventListener("resize", () => { if (config && route()[0] === "read" && !sheet.open) render(); });
+addEventListener("tralens-back", event => {
+  if (sheet.open) closeSheet();
+  else if ($("#keep-server")) $("#keep-server").click();
+  else if ($('#account-form input[autocomplete="new-password"]')) $(".account-switch").click();
+  else if (current().page) location.replace("#book/" + current().book.id);
+  else if (config && ["book", "settings"].includes(route()[0])) location.replace("#library");
+  else return;
+  event.preventDefault();
+});
 addEventListener("hashchange", () => {
   if (!config) return;
   if (sheet.open) closeSheet();
   render();
   window.scrollTo(0, 0);
 });
-function showOwnerLogin() {
-  if (root.querySelector("#owner-login")) return;
+function accountChanged() {
+  try { localStorage.setItem("tralens-account-change", crypto.randomUUID()); } catch {}
+  location.reload();
+}
+addEventListener("storage", event => {
+  if (event.key === "tralens-account-change") location.reload();
+});
+addEventListener("pageshow", event => {
+  if (event.persisted) location.reload();
+});
+function serverOrigin(value) {
+  const raw = value.trim();
+  const scheme = /^(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(raw) ? "http://" : "https://";
+  const url = new URL(raw.includes("://") ? raw : scheme + raw);
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if ((url.protocol !== "https:" && !(loopback && url.protocol === "http:")) ||
+      url.username || url.password || url.pathname !== "/" || url.search || url.hash)
+    throw Error("Enter an HTTPS server address, or use HTTP on localhost.");
+  return url.origin;
+}
+const nativeConnection = window.Capacitor?.isPluginAvailable?.("ReaderConnection")
+  ? window.Capacitor.Plugins.ReaderConnection : null;
+const serverKey = "tralens-verified-server";
+let selectedServer = "";
+try {
+  const stored = localStorage.getItem(serverKey);
+  if (stored) selectedServer = serverOrigin(stored);
+  else if (localStorage.getItem("tralens-account-change")) selectedServer = location.origin;
+} catch {}
+if (nativeConnection) {
+  try { if ((await nativeConnection.selected()).selected) selectedServer = location.origin; } catch {}
+}
+function rememberServer(origin) {
+  selectedServer = origin;
+  try { localStorage.setItem(serverKey, origin); } catch {}
+}
+function verifyServer(origin) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker("/verify-server.js");
+    const finish = ok => {
+      clearTimeout(timer);
+      worker.terminate();
+      if (ok) resolve();
+      else reject(Error("Couldn’t verify this Tralens server. Check the address and connection, then try again."));
+    };
+    const timer = setTimeout(() => finish(false), 8000);
+    worker.onmessage = event => finish(event.data === true);
+    worker.onerror = () => finish(false);
+    worker.postMessage(origin);
+  });
+}
+function accountCard(title, intro, content) {
   if (sheet.open) sheet.close();
+  clearTimeout(pollTimer);
   catalog = {books: [], bytes: 0};
-  root.innerHTML = '<main class="empty"><h1>Sign in to Tralens</h1><p>' + esc(location.origin) +
-    '</p><form id="owner-login"><label>Server owner key <input type="password" required maxlength="256" autocomplete="current-password"></label> <button class="primary">Sign in</button><p role="alert"></p></form>' + connectionButton() + '</main>';
-  root.querySelector("form").onsubmit = async (event) => {
+  document.title = title + " · Tralens";
+  root.innerHTML = `<main class="account-screen"><section class="account-card">
+    <div class="account-brand"><span class="mark" aria-hidden="true">文<b>A</b></span>Tralens</div>
+    <h1 tabindex="-1">${esc(title)}</h1><p class="account-intro">${esc(intro)}</p>${content}</section></main>`;
+}
+function showServerForm(message = "", initial = selectedServer || (nativeConnection ? "" : location.origin)) {
+  config = null;
+  accountCard("Connect to your server", "Verify the address of your Tralens server to continue.", `
+    <form id="account-form" method="post">
+      <label class="field">Server address<input name="server" required inputmode="url" autocomplete="url" autocapitalize="none" spellcheck="false" value="${esc(initial)}" placeholder="manga.example.com"></label>
+      <p class="error" role="alert">${esc(message)}</p><button class="primary">Verify server</button>
+    </form>${selectedServer === location.origin ? '<button type="button" class="account-switch" id="keep-server">Back to current server</button>' : ""}`);
+  const form = $("#account-form"), input = form.elements.server, button = form.querySelector("button");
+  const back = $("#keep-server");
+  if (back) back.onclick = () => location.reload();
+  form.onsubmit = async event => {
     event.preventDefault();
-    const form = event.currentTarget;
+    if (button.disabled) return;
+    const error = form.querySelector(".error");
+    error.textContent = "";
+    button.disabled = input.readOnly = true;
+    button.textContent = "Verifying…";
     try {
-      const response = await fetch("/api/owner/login", {method: "POST", body: form.querySelector("input").value});
-      if (!response.ok) throw Error((await response.json()).error);
-      form.reset();
-      await init();
+      const origin = serverOrigin(input.value);
+      await verifyServer(origin);
+      if (!form.isConnected) return;
+      if (nativeConnection && origin !== location.origin) {
+        await nativeConnection.connect({url: origin});
+      } else if (origin !== location.origin) {
+        rememberServer(origin);
+        location.assign(origin + "/#verify-server");
+      } else {
+        rememberServer(origin);
+        await init();
+        $(".account-card h1")?.focus();
+      }
+    } catch (err) {
+      error.textContent = err.message;
+      input.focus();
+    } finally {
+      button.disabled = input.readOnly = false;
+      button.textContent = "Verify server";
+    }
+  };
+}
+function showAccountForm(message = "") {
+  if ($("#account-form")) return;
+  if (selectedServer === location.origin) showCredentials(message);
+  else showServerForm(message);
+}
+function showCredentials(message = "") {
+  accountCard("Sign in", "Open your manga library.", `
+    <div class="account-server"><span>${esc(location.origin)}</span><button type="button" id="change-server" aria-label="Change server">Change</button></div>
+    <form id="account-form" method="post">
+      <label class="field">Username<input name="username" required maxlength="32" autocomplete="username" autocapitalize="none" spellcheck="false"></label>
+      <label class="field">Password<input name="password" type="password" required autocomplete="current-password"></label>
+      <p class="account-guidance" hidden>Use a 3–32 character username and a password of at least 15 characters.</p>
+      <p role="alert" class="error">${esc(message)}</p><button class="primary">Sign in</button>
+    </form><button type="button" class="account-switch" hidden>Create an account</button>`);
+  const form = $("#account-form"), password = form.elements.password;
+  const submit = form.querySelector("button"), toggle = $(".account-switch"), alert = form.querySelector('[role="alert"]');
+  const change = $("#change-server");
+  change.onclick = () => { showServerForm(); $(".account-card h1").focus(); };
+  let register = false;
+  fetch("/api/auth/settings", {redirect:"error"}).then(r => r.ok ? r.json() : null).then(data => {
+    if (form.isConnected) toggle.hidden = data?.registration !== true;
+  }).catch(() => {});
+  toggle.onclick = () => {
+    register = !register;
+    password.value = "";
+    password.autocomplete = register ? "new-password" : "current-password";
+    password.minLength = register ? 15 : 1;
+    form.elements.username.pattern = register ? "[a-zA-Z0-9][a-zA-Z0-9._\\-]{2,31}" : ".*";
+    $(".account-guidance").hidden = !register;
+    submit.textContent = register ? "Create account" : "Sign in";
+    $(".account-card h1").textContent = register ? "Create an account" : "Sign in";
+    document.title = $(".account-card h1").textContent + " · Tralens";
+    $(".account-intro").textContent = register ? "Start a private library on this server." : "Open your manga library.";
+    toggle.textContent = register ? "Back to sign in" : "Create an account";
+    alert.textContent = "";
+    form.elements.username.focus();
+  };
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (submit.disabled) return;
+    submit.disabled = toggle.disabled = change.disabled = true;
+    alert.textContent = "";
+    try {
+      const response = await fetch("/api/auth/" + (register ? "register" : "login"), {
+        method: "POST", redirect: "error", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({username: form.elements.username.value, password: password.value}),
+      });
+      if (!response.ok) throw Error((await response.json()).error || "Sign-in failed.");
+      password.value = "";
+      rememberServer(location.origin);
+      accountChanged();
     } catch (error) {
-      form.querySelector('[role="alert"]').textContent = error.message;
+      alert.textContent = error.message;
+    } finally {
+      submit.disabled = toggle.disabled = change.disabled = false;
     }
   };
 }
 async function init() {
-  if (connectionButton()) root.innerHTML = '<main class="empty"><h1>Connecting to your library…</h1><p>' + esc(location.origin) + '</p>' + connectionButton() + '</main>';
+  root.innerHTML = '<main class="empty"><h1>Connecting to your library…</h1><p>' + esc(location.origin) + '</p></main>';
   try {
     config = await api("config");
+    rememberServer(location.origin);
+    try {
+      const saved = localStorage.getItem("tralens-reader:" + config.username) ||
+        (config.username === "owner" ? localStorage.getItem("tralens-reader") : null);
+      prefs = {...defaults, ...JSON.parse(saved || "{}")};
+      document.documentElement.dataset.theme = prefs.theme;
+    } catch { prefs = {...defaults}; }
     if (prefs.translator !== "local" && (config.chatgpt_connected === false ||
         (config.chatgpt_models && !config.chatgpt_models.includes(prefs.translator)))) {
       prefs.translator = "local";
@@ -1361,28 +1657,35 @@ async function init() {
     }
     await refresh(true);
   } catch (err) {
-    if (root.querySelector("#owner-login")) return;
-    root.innerHTML =
-      '<main class="empty"><h1>Library unavailable</h1><p>' +
-      esc(err.message) +
-      "</p>" +
-      (connectionButton() ? '<p class="hint">Check that your phone can reach ' + esc(location.origin) + '.</p>' + connectionButton() : "") +
-      btn("reconnect", "Reconnect", "primary") +
-      "</main>";
+    if ($("#account-form")) return;
+    config = null;
+    showAccountForm("Could not open this server. Check its address and try again.");
   }
 }
-await init();
-setInterval(async () => {
-  if (!config || loading || document.hidden || uploadBusy) return;
-  loading = true;
+if (location.hash === "#verify-server") {
+  history.replaceState(null, "", location.pathname);
   try {
-    await refresh();
-  } catch (err) {
-    toast(err.message);
-  } finally {
-    loading = false;
+    await verifyServer(location.origin);
+    rememberServer(location.origin);
+    await init();
+  } catch (error) { showServerForm(error.message, location.origin); }
+} else if (selectedServer && selectedServer !== location.origin && !nativeConnection) {
+  accountCard("Connecting to your server", selectedServer,
+    '<button type="button" class="account-switch" id="choose-server">Change server</button>');
+  const change = $("#choose-server");
+  change.onclick = () => showServerForm();
+  try {
+    await verifyServer(selectedServer);
+    if (change.isConnected) location.replace(selectedServer + "/#verify-server");
+  } catch (error) {
+    if (change.isConnected) showServerForm(error.message, selectedServer);
   }
-}, 2500);
+} else if (nativeConnection && !selectedServer) showServerForm();
+else await init();
+document.addEventListener("visibilitychange", () => {
+  clearTimeout(pollTimer);
+  if (!document.hidden) poll();
+});
 
 function dragDivider(e) {
   const area = e.target.closest(".wipe");
@@ -1397,6 +1700,7 @@ function dragDivider(e) {
 }
 document.addEventListener("pointerdown", (e) => {
   const area = e.target.closest(".wipe");
+  if (area && $(".reader").classList.contains("clean")) showChrome();
   if (area && !e.target.matches("input")) {
     area.setPointerCapture(e.pointerId);
     dragDivider(e);

@@ -4,9 +4,11 @@ from contextlib import contextmanager
 import fcntl
 import json
 import math
+import os
 import re
 from pathlib import Path
 import sqlite3
+import stat
 import tempfile
 import threading
 import time
@@ -15,7 +17,7 @@ import zipfile
 
 from PIL import Image
 from .server import RequestError, checkpoint, options
-from .import_pages import MAX_PAGES, expand, webp_png
+from .import_pages import MAX_PAGES, expand, require_space, webp_png
 
 
 def label(value):
@@ -63,16 +65,42 @@ def saved_reading(directory):
     return json.dumps(lines, ensure_ascii=False), width
 
 
+def private_library_file(path, *, create):
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+    fd = os.open(path, flags | (os.O_CREAT if create else 0), 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+            raise ValueError(f"Use a private, service-owned regular file for {path.name}.")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            os.fchmod(fd, 0o600)
+        return os.fdopen(fd, "r+b")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 class Library:
     def __init__(self, app):
         self.app = app
         self.path = app.root / "reader.sqlite3"
-        self.owner = (app.root / "library.lock").open("a")
+        self.owner = private_library_file(app.root / "library.lock", create=True)
         try:
             fcntl.flock(self.owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            private_library_file(self.path, create=True).close()
+            # SQLite creates new journals with the database's mode. Tighten
+            # journals left by a prior process before SQLite opens them.
+            for suffix in ("-journal", "-wal", "-shm"):
+                try:
+                    private_library_file(self.path.with_name(self.path.name + suffix), create=False).close()
+                except FileNotFoundError:
+                    pass
         except BlockingIOError:
             self.owner.close()
             raise RuntimeError("Another reader already owns this library.") from None
+        except BaseException:
+            self.owner.close()
+            raise
         self.wake = threading.Event()
         self.stopped = threading.Event()
         with self.db() as db:
@@ -85,6 +113,9 @@ class Library:
                 CREATE INDEX IF NOT EXISTS page_chapter ON pages(chapter);
                 CREATE INDEX IF NOT EXISTS page_queue ON pages(status);
             """)
+            if "account" not in {r["name"] for r in db.execute("PRAGMA table_info(books)")}:
+                db.execute("ALTER TABLE books ADD COLUMN account TEXT NOT NULL DEFAULT 'owner'")
+            db.execute("CREATE INDEX IF NOT EXISTS book_account ON books(account)")
             columns = {r["name"] for r in db.execute("PRAGMA table_info(pages)")}
             for dimension in ("width", "height"):
                 if dimension not in columns:
@@ -144,28 +175,30 @@ class Library:
         finally:
             db.close()
 
-    def catalog(self):
+    def catalog(self, account="owner"):
         with self.db() as db:
             db.execute("BEGIN")
             books = {
                 r["id"]: dict(r, chapters=[])
-                for r in db.execute("SELECT * FROM books ORDER BY rowid")
+                for r in db.execute("SELECT id,title,added,last_read,position FROM books WHERE account=? ORDER BY rowid", (account,))
             }
             chapters = {}
-            for r in db.execute("SELECT * FROM chapters ORDER BY rowid"):
+            for r in db.execute("SELECT * FROM chapters WHERE book IN (SELECT id FROM books WHERE account=?) ORDER BY rowid", (account,)):
                 chap = chapters[r["id"]] = dict(r, pages=[])
                 books[r["book"]]["chapters"].append(chap)
             for r in db.execute(
-                "SELECT id,chapter,name,width,height,status,error,reading_width,reading IS NOT NULL AND reading != '[]' AS has_text,updated,final IS NOT NULL AS ready FROM pages ORDER BY rowid"
+                "SELECT id,chapter,name,width,height,status,error,reading_width,reading IS NOT NULL AND reading != '[]' AS has_text,updated,final IS NOT NULL AS ready FROM pages WHERE chapter IN (SELECT chapters.id FROM chapters JOIN books ON chapters.book=books.id WHERE account=?) ORDER BY rowid", (account,)
             ):
                 chapters[r["chapter"]]["pages"].append(dict(r))
             used = db.execute(
-                "SELECT coalesce(sum(length(source)+coalesce(length(final),0)),0) FROM pages"
+                "SELECT coalesce(sum(length(source)+coalesce(length(final),0)),0) FROM pages JOIN chapters ON pages.chapter=chapters.id JOIN books ON chapters.book=books.id WHERE books.account=?", (account,)
             ).fetchone()[0]
         return dict(books=list(books.values()), bytes=used)
 
-    def settings(self, supplied):
+    def settings(self, supplied, account="owner"):
         settings = options(supplied, render_enabled=self.app.config.fonts is not None)
+        if account != "owner" and settings.get("translation_model", "local") != "local":
+            raise RequestError("Use the local translator for this account.", 403)
         if settings["mode"] != "render":
             raise RequestError("Reader pages require rendering.")
         config = self.app.config
@@ -178,8 +211,10 @@ class Library:
             )
         return json.dumps(settings)
 
-    def add(self, meta, files):
-        settings = self.settings(meta.get("options"))
+    def add(self, meta, files, account="owner"):
+        if meta.get("book") is not None and not isinstance(meta["book"], str):
+            raise RequestError("Invalid manga identifier.")
+        settings = self.settings(meta.get("options"), account)
         if not 1 <= len(files) <= 256:
             raise RequestError("Choose between 1 and 256 pages per import.")
         with tempfile.TemporaryDirectory(prefix="tralens-import-") as temp:
@@ -196,33 +231,36 @@ class Library:
                         if total > self.app.config.root_storage_bytes:
                             raise ValueError("Expanded pages exceed library storage capacity.")
                         source = directory / str(len(pages))
+                        require_space(directory, len(content))
                         source.write_bytes(content)
                         pages.append((uuid.uuid4().hex, filename, mime, source, *size))
+                except RequestError:
+                    raise
                 except (ValueError, OSError, Image.DecompressionBombError) as exc:
                     raise RequestError(f"{name}: {exc}") from exc
-            return self.store_pages(meta, settings, pages, total)
+            return self.store_pages(meta, settings, pages, total, account)
 
-    def store_pages(self, meta, settings, pages, total):
+    def check_capacity(self, db, growth):
+        pages = db.execute("PRAGMA page_count").fetchone()[0]
+        unused = db.execute("PRAGMA freelist_count").fetchone()[0]
+        page_size = db.execute("PRAGMA page_size").fetchone()[0]
+        if (pages - unused) * page_size + growth > self.app.config.root_storage_bytes:
+            raise RequestError("Library storage is full.", 409)
+
+    def store_pages(self, meta, settings, pages, total, account):
         book = meta.get("book")
         chapter = uuid.uuid4().hex
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            free = (
-                db.execute("PRAGMA freelist_count").fetchone()[0]
-                * db.execute("PRAGMA page_size").fetchone()[0]
-            )
-            if (
-                self.path.stat().st_size - free + total
-                > self.app.config.root_storage_bytes
-            ):
-                raise RequestError("Library storage is full.", 409)
+            require_space(self.path, total)
+            self.check_capacity(db, total)
             if not book:
                 book = uuid.uuid4().hex
                 db.execute(
-                    "INSERT INTO books VALUES(?,?,?,0,NULL)",
-                    (book, label(meta.get("title")), time.time()),
+                    "INSERT INTO books(id,title,added,last_read,position,account) VALUES(?,?,?,0,NULL,?)",
+                    (book, label(meta.get("title")), time.time(), account),
                 )
-            elif not db.execute("SELECT id FROM books WHERE id=?", (book,)).fetchone():
+            elif not db.execute("SELECT id FROM books WHERE id=? AND account=?", (book, account)).fetchone():
                 raise RequestError("Manga no longer exists.", 404)
             db.execute(
                 "INSERT INTO chapters(id,book,title) VALUES(?,?,?)",
@@ -233,12 +271,18 @@ class Library:
                 ((i, chapter, name, mime, path.read_bytes(), w, h, settings)
                  for i, name, mime, path, w, h in pages),
             )
+            self.check_capacity(db, 0)
         self.wake.set()
         return dict(book=book, chapter=chapter)
 
-    def change(self, action, body):
+    def change(self, action, body, account="owner"):
         book = body.get("book")
+        if any(value is not None and not isinstance(value, str) for value in (book, body.get("page"))):
+            raise RequestError("Invalid manga or page identifier.")
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not db.execute("SELECT 1 FROM books WHERE id=? AND account=?", (book, account)).fetchone():
+                raise RequestError("Manga unavailable.", 404)
             if action == "rename":
                 updated = db.execute(
                     "UPDATE books SET title=? WHERE id=?",
@@ -259,7 +303,6 @@ class Library:
                         (page, page),
                     )
             elif action == "skip":
-                db.execute("BEGIN IMMEDIATE")
                 target = db.execute("SELECT status,job FROM pages WHERE id=? AND chapter IN "
                     "(SELECT id FROM chapters WHERE book=?)", (body.get("page"), book)).fetchone()
                 if not target or target["status"] not in ("queued", "waiting", "running"):
@@ -270,7 +313,7 @@ class Library:
                     self.app.cancel(target["job"])
                 updated = db.execute("UPDATE pages SET status='skipped',error=NULL WHERE id=?", (body["page"],))
             elif action == "retry":
-                settings = self.settings(body.get("options"))
+                settings = self.settings(body.get("options"), account)
                 updated = db.execute(
                     "UPDATE pages SET options=?,status='queued',error=NULL WHERE status NOT IN ('queued','running') "
                     "AND chapter IN (SELECT id FROM chapters WHERE book=?) AND (? IS NULL OR id=?)",
@@ -283,35 +326,46 @@ class Library:
         self.wake.set()
         return {}
 
-    def transcript(self, page):
+    def transcript(self, page, account="owner"):
         with self.db() as db:
-            row = db.execute("SELECT reading FROM pages WHERE id=?", (page,)).fetchone()
+            row = db.execute("SELECT reading FROM pages JOIN chapters ON pages.chapter=chapters.id JOIN books ON chapters.book=books.id WHERE pages.id=? AND books.account=?", (page, account)).fetchone()
         if not row or row["reading"] is None:
             raise RequestError("Page text unavailable.", 404)
         return json.loads(row["reading"])
 
-    def image(self, page, variant):
+    def image(self, page, variant, account="owner"):
         with self.db() as db:
             field = "source" if variant == "original" else "final"
             r = db.execute(
-                f"SELECT mime,{field} AS data FROM pages WHERE id=?", (page,)
+                f"SELECT mime,{field} AS data FROM pages JOIN chapters ON pages.chapter=chapters.id JOIN books ON chapters.book=books.id WHERE pages.id=? AND books.account=?", (page, account)
             ).fetchone()
         if not r or r["data"] is None:
             raise RequestError("Page unavailable.", 404)
         return (r["mime"] if field == "source" else "image/png"), r["data"]
 
-    def archive(self, book, variant):
+    def archive_name(self, book, variant, account="owner"):
+        with self.db() as db:
+            row = db.execute("SELECT title FROM books WHERE id=? AND account=?", (book, account)).fetchone()
+        title = row["title"] if row else "Manga"
+        title = "".join(c if c.isalnum() or c in " -_." else "_" for c in title)
+        # Leave space for the variant and extension on byte-limited filesystems.
+        title = title.encode("utf-8")[:190].decode("utf-8", "ignore").strip(" .") or "Manga"
+        return f"{title}-{variant}.zip"
+
+    def archive(self, book, variant, account="owner"):
         archive = tempfile.TemporaryFile()
         try:
             with self.db() as db, zipfile.ZipFile(archive, "w") as z:
                 rows = db.execute(
                     "SELECT chapters.id,mime,source,final FROM pages JOIN chapters ON chapters.id=pages.chapter "
-                    "WHERE chapters.book=? ORDER BY chapters.rowid,pages.rowid",
-                    (book,),
+                    "JOIN books ON books.id=chapters.book WHERE chapters.book=? AND books.account=? ORDER BY chapters.rowid,pages.rowid",
+                    (book, account),
                 )
                 previous = None
                 chapter = 0
                 for cid, mime, source, final in rows:
+                    size = (len(source) if variant != "translated" else 0) + (len(final or b"") if variant != "original" else 0)
+                    require_space(archive.fileno(), size)
                     if previous != cid:
                         chapter += 1
                         number = 0
@@ -416,8 +470,21 @@ class Library:
 
     def finish(self, page, final, error, reading=None, width=None):
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if final is not None:
+                previous = db.execute(
+                    "SELECT coalesce(length(final),0) + coalesce(length(CAST(reading AS BLOB)),0) FROM pages "
+                    "WHERE id=? AND status='running'", (page,)
+                ).fetchone()
+                if previous is None:
+                    return
+                size = len(final) + len((reading or "").encode())
+                require_space(self.path, size)
+                self.check_capacity(db, max(0, size - previous[0]))
             db.execute(
                 "UPDATE pages SET status=?,error=?,final=coalesce(?,final),reading=CASE WHEN ? THEN ? ELSE reading END, "
                 "reading_width=CASE WHEN ? THEN ? ELSE reading_width END,updated=updated+1 WHERE id=? AND status='running'",
                 ("ready" if final else "failed", error, final, final is not None, reading, final is not None, width, page),
             )
+            if final is not None:
+                self.check_capacity(db, 0)

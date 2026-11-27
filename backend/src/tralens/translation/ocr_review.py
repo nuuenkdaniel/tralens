@@ -181,7 +181,7 @@ def _png(image):
     return raw
 
 
-def prepare_input(unit, image, image_bytes, raw_detections, model):
+def prepare_input(unit, image, image_bytes, raw_detections, model, *, legacy_stroke=False):
     """Independent current geometry, not proposal crop_safe or crop ownership proof."""
     from PIL import ImageDraw
     page = strict_json(unit.page_json)
@@ -226,7 +226,18 @@ def prepare_input(unit, image, image_bytes, raw_detections, model):
         try:
             draw = ImageDraw.Draw(overlay)
             draw.line(localized+[localized[0]],fill="blue",width=2)
-            draw.text((0,0),"TARGET (blue polygon)",fill="blue",stroke_width=1,stroke_fill="white")
+            label = "TARGET (blue polygon)"
+            if legacy_stroke:
+                # Pillow 10 drew the white outline without filling the glyph.
+                # Current Pillow fills the stroke, changing the bound PNG bytes.
+                from PIL import Image, ImageFont
+                font = ImageFont.load_default()
+                mask, offset = font.getmask2(label, "L", stroke_width=1, stroke_filled=False)
+                with Image.frombytes("L", mask.size, bytes(mask)) as outline:
+                    overlay.paste("white", offset, outline)
+                draw.text((0, 0), label, font=font, fill="blue")
+            else:
+                draw.text((0, 0), label, fill="blue", stroke_width=1, stroke_fill="white")
             overlay_png = _png(overlay)
             overlay_pixels = image_fingerprint(overlay)
         finally:

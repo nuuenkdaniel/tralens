@@ -35,7 +35,13 @@ class OwnerReaderTests(unittest.TestCase):
                     self.assertEqual(call('GET', '/')[0], 200)
                     self.assertEqual(call('GET', '/healthz')[0], 200)
                     self.assertEqual(call('GET', '/privacy')[0], 200)
-                    for path in ['/developer', '/api/config', '/api/jobs', '/api/library',
+                    foreign = {"Origin": "https://other.example", "Sec-Fetch-Site": "cross-site"}
+                    status, cookie, info = call("GET", "/api/auth/discovery", **foreign)
+                    self.assertEqual((status, cookie, json.loads(info)), (200, None, {"service": "tralens-reader", "version": 1}))
+                    self.assertEqual(call("GET", "/api/auth/discovery", Host="unexpected.example", **foreign)[0], 403)
+                    for private in ("/api/config", "/api/auth/settings", "/verify-server.js"):
+                        self.assertEqual(call("GET", private, **foreign)[0], 403)
+                    for path in ['/developer', '/api/config', '/api/jobs', '/api/library', '/api/chatgpt/models',
                                  '/api/library/pages/' + '0'*32 + '/original',
                                  '/api/library/books/' + '0'*32 + '/both.zip']:
                         self.assertEqual(call('GET', path)[0], 401, path)

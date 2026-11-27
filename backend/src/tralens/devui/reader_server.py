@@ -1,5 +1,6 @@
 """Serve the independent web client and its library under the job API's origin."""
 
+import hmac
 import json
 import mimetypes
 from pathlib import Path
@@ -7,8 +8,9 @@ import re
 import secrets
 import shutil
 import threading
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
+from .accounts import Accounts
 from .library import Library
 from .multipart_upload import MAX_IMPORT_BYTES, read_import
 from .server import Handler, RequestError, STATIC, ThreadingHTTPServer
@@ -18,11 +20,22 @@ WEB = PROJECT / "frontend/web"
 ID = "[0-9a-f]{32}"
 
 
+DOWNLOAD_PATH = re.compile(rf"/api/library/(?:books/{ID}/(?:original|translated|both)\.zip|pages/{ID}/(?:original|translated))")
+
+
 class ReaderHandler(Handler):
+    def request_token(self):
+        return hmac.digest(self.server.app.token.encode(), self.server.accounts.session_id(self), "sha256").hex()
+
     def do_GET(self):
         path = urlsplit(self.path).path
         try:
+            if path == "/api/auth/discovery":
+                self.local_request(discovery=True)
+                return self.respond(200, b'{"service":"tralens-reader","version":1}', "application/json", discovery=True)
             self.local_request()
+            if path == "/verify-server.js":
+                return self.respond(200, (WEB / "verify-server.js").read_bytes(), "text/javascript", probe_worker=True)
             if path == "/healthz":
                 return self.json(200, {"status": "ok"})
             if path == "/privacy":
@@ -34,9 +47,14 @@ class ReaderHandler(Handler):
             ):
                 file = WEB / ("index.html" if path == "/" else path[1:])
                 self.respond(200, file.read_bytes(), mimetypes.guess_type(file.name)[0])
+            elif path == "/api/auth/settings":
+                self.json(200, {"registration": self.server.accounts.registration})
             else:
-                if self.server.owner:
-                    self.server.owner.authorize(self)
+                ticket = self.headers.get("X-Tralens-Download")
+                if ticket and DOWNLOAD_PATH.fullmatch(path):
+                    self.account = self.server.accounts.download_account(ticket, path)
+                else:
+                    self.account = self.server.accounts.identify(self)
                 return self._private_get(path)
         except RequestError as exc:
             self.json(exc.status, dict(error=str(exc)))
@@ -46,12 +64,22 @@ class ReaderHandler(Handler):
             if path == "/api/config":
                 config = self.server.app.public_config()
                 config['owner_mode'] = bool(self.server.owner)
+                config['username'] = self.account
+                config['token'] = self.request_token()
+                if self.account != "owner":
+                    config = {k:config[k] for k in ("token", "username", "model", "render_enabled", "max_upload_bytes",
+                              "reconstruction_available", "sdxl_available")}
+                    return self.json(200, dict(config, frontier_provider="disabled", chatgpt_models=[]))
                 config['frontier_provider'] = self.server.frontier_provider
                 if self.server.chatgpt:
                     config['chatgpt_connected'] = self.server.chatgpt.connected()
                 elif self.server.frontier_provider == 'disabled':
                     config['chatgpt_models'] = []
                 self.json(200, config)
+            elif self.account != "owner" and not path.startswith("/api/library/") and path != "/api/library":
+                raise RequestError("Not found.", 404)
+            elif path == "/api/chatgpt/models" and self.server.chatgpt:
+                self.json(200, self.server.chatgpt.available() or {"state": "disconnected"})
             elif path == "/api/chatgpt/status" and self.server.chatgpt:
                 self.json(200, self.server.chatgpt.status())
             elif path == "/developer":
@@ -61,28 +89,36 @@ class ReaderHandler(Handler):
                     "text/html; charset=utf-8",
                 )
             elif path == "/api/library":
-                self.json(200, self.server.library.catalog())
+                self.json(200, self.server.library.catalog(self.account))
             elif match := re.fullmatch(f"/api/library/pages/({ID})/transcript", path):
-                self.json(200, self.server.library.transcript(match[1]))
+                self.json(200, self.server.library.transcript(match[1], self.account))
             elif match := re.fullmatch(
                 f"/api/library/pages/({ID})/(original|translated)", path
             ):
-                mime, data = self.server.library.image(*match.groups())
+                mime, data = self.server.library.image(*match.groups(), self.account)
                 self.respond(200, data, mime)
             elif match := re.fullmatch(
                 rf"/api/library/books/({ID})/(original|translated|both)\.zip", path
             ):
-                with self.server.library.archive(*match.groups()) as archive:
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/zip")
-                    self.send_header(
-                        "Content-Disposition",
-                        'attachment; filename="manga-' + match[2] + '.zip"',
-                    )
-                    self.send_header("Content-Length", str(archive.tell()))
-                    self.end_headers()
-                    archive.seek(0)
-                    shutil.copyfileobj(archive, self.wfile)
+                if not self.server.archive_slot.acquire(blocking=False):
+                    raise RequestError("Another download is being prepared. Try again shortly.", 429)
+                try:
+                    with self.server.library.archive(*match.groups(), self.account) as archive:
+                        name = self.server.library.archive_name(*match.groups(), self.account)
+                        fallback = re.sub(r"[^a-zA-Z0-9 ._-]", "_", name)
+                        self.send_response(200)
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("Content-Type", "application/zip")
+                        self.send_header(
+                            "Content-Disposition",
+                            f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{quote(name, safe="")}',
+                        )
+                        self.send_header("Content-Length", str(archive.tell()))
+                        self.end_headers()
+                        archive.seek(0)
+                        shutil.copyfileobj(archive, self.wfile)
+                finally:
+                    self.server.archive_slot.release()
             else:
                 return super().do_GET()
         except RequestError as exc:
@@ -90,20 +126,19 @@ class ReaderHandler(Handler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if self.server.owner:
-            try:
-                self.local_request()
-                if path == "/api/owner/login":
-                    return self.server.owner.login(self)
-                if path == "/api/owner/logout":
-                    if self.headers.get("Origin") != self.server.owner.origin:
-                        raise RequestError("Unexpected origin.", 403)
-                    return self.server.owner.logout(self)
-                self.server.owner.authorize(self)
-            except RequestError as exc:
-                self.close_connection = True
-                self.json(exc.status, dict(error=str(exc)))
-                return
+        try:
+            self.local_request()
+            paths = {"/api/auth/login": "login", "/api/auth/register": "register", "/api/auth/logout": "logout",
+                     "/api/owner/login": "owner", "/api/owner/logout": "logout"}
+            if path in paths:
+                return self.server.accounts.handle(self, paths[path])
+            self.account = self.server.accounts.identify(self)
+            if self.account != "owner" and not path.startswith("/api/library/"):
+                raise RequestError("Not found.", 404)
+        except RequestError as exc:
+            self.close_connection = True
+            self.json(exc.status, dict(error=str(exc)))
+            return
         # Multipart parsing and document rasterization can each use substantially
         # more memory than the upload. Admit one upload before reading its body.
         uploading = path in ("/api/library/add", "/api/jobs")
@@ -127,7 +162,7 @@ class ReaderHandler(Handler):
         try:
             self.local_request()
             if not secrets.compare_digest(
-                self.headers.get("X-Tralens-Token", ""), self.server.app.token
+                self.headers.get("X-Tralens-Token", "").encode(), self.request_token().encode()
             ):
                 raise RequestError("Reload the page to reconnect.", 403)
             lengths = self.headers.get_all("Content-Length") or []
@@ -143,7 +178,7 @@ class ReaderHandler(Handler):
                 if not 0 < length <= MAX_IMPORT_BYTES:
                     raise RequestError("Import up to 4 GiB at a time.", 413)
                 with read_import(self.rfile, length, self.headers.get("Content-Type", "")) as (meta, files):
-                    return self.json(201, self.server.library.add(meta, files))
+                    return self.json(201, self.server.library.add(meta, files, self.account))
             if not 0 < length <= 8192:
                 raise RequestError("Request body is too large.", 413)
             data = self.rfile.read(length)
@@ -166,14 +201,23 @@ class ReaderHandler(Handler):
                 body = json.loads(data)
                 if not isinstance(body, dict):
                     raise RequestError("Expected library settings.")
+                if path == "/api/library/download-ticket":
+                    target = body.get("path")
+                    if not isinstance(target, str) or not DOWNLOAD_PATH.fullmatch(target):
+                        raise RequestError("Choose a reader download.")
+                    # The GET performs the same ownership check as a browser download.
+                    self.json(200, {"ticket": self.server.accounts.download_ticket(self, target)})
+                    return
                 self.json(
                     200,
                     self.server.library.change(
-                        path.removeprefix("/api/library/"), body
+                        path.removeprefix("/api/library/"), body, self.account
                     ),
                 )
         except RequestError as exc:
             self.json(exc.status, dict(error=str(exc)))
+        except RecursionError:
+            self.json(400, dict(error="Request is nested too deeply."))
         except (ValueError, TypeError, OSError) as exc:
             self.json(400, dict(error=str(exc)))
 
@@ -207,9 +251,9 @@ class ReaderServer(ThreadingHTTPServer):
         super().server_close()
 
 
-def create_reader_server(app, port, *, host, owner=None):
+def create_reader_server(app, port, *, host, owner=None, registration=True):
     frontier_provider = app.config.frontier_provider
-    if owner and host != "127.0.0.1":
+    if host != "127.0.0.1":
         raise ValueError("The HTTPS proxy must connect over loopback.")
     server = ReaderServer((host, port), ReaderHandler)
     server.connection_slots = threading.BoundedSemaphore(32)
@@ -220,10 +264,12 @@ def create_reader_server(app, port, *, host, owner=None):
     server.frontier_provider = frontier_provider
     server.chatgpt = ReaderConnection() if frontier_provider == 'chatgpt' else None
     server.owner = owner
+    server.archive_slot = threading.BoundedSemaphore(1)
     server.upload_slot = threading.BoundedSemaphore(1)
     server.app = app
     try:
         server.library = Library(app)
+        server.accounts = Accounts(server.library, owner, registration)
     except BaseException:
         server.server_close()
         raise

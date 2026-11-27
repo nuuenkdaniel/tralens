@@ -850,3 +850,55 @@ select:hover:not(:disabled) {
 .reading-text li { margin: 1rem 0; }
 .reading-text svg { display: block; height: auto; width: auto; max-height: 5rem; max-width: 100%; }
 .reading-text p { font-size: max(18px, 1.125rem); line-height: 1.5; overflow-wrap: anywhere; margin: .35rem 0; }
+
+#import details[open] > summary { margin-bottom: 1rem; }
+.import-summary { overflow-wrap: anywhere; }
+.reader.clean .imagebox:not([data-reading-fallback]) .read-english:not(:focus-visible) {
+  opacity: 0;
+  pointer-events: none;
+}
+.previous-page {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: inherit;
+}
+
+.account-screen {
+  min-height: 100dvh;
+  display: grid;
+  align-items: safe center;
+  justify-items: center;
+  padding: clamp(16px, 5vh, 56px) 16px;
+  background: radial-gradient(ellipse at top left, var(--soft), transparent 65%), var(--bg);
+}
+.account-card {
+  width: min(100%, 420px);
+  padding: clamp(22px, 5vw, 36px);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--panel);
+  box-shadow: var(--shade);
+}
+.account-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; font-weight: 750; }
+.account-card h1 { font-size: clamp(1.5rem, 4vw, 1.875rem); line-height: 1.2; }
+.account-intro { margin: 6px 0 22px; color: var(--muted); }
+#account-form { display: grid; gap: 14px; }
+#account-form input { min-height: 44px; font-size: 1rem; font-weight: 400; }
+#account-form :disabled { opacity: .65; }
+#account-form .primary { min-height: 46px; margin-top: 4px; }
+#account-form .error:empty, .account-card [hidden] { display: none; }
+.account-guidance { color: var(--muted); font-size: .875rem; }
+.account-switch { display: block; margin: 12px auto 0; padding: 10px; border: 0; color: var(--accent); background: transparent; }
+.account-card h1:focus { outline: none; }
+.account-server { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: -6px 0 18px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; }
+.account-server span { font-size: .875rem; overflow-wrap: anywhere; }
+.account-server button, .account-switch { min-height: 44px; }
+.account-server button { flex: none; border: 0; background: transparent; color: var(--accent); padding: 0 4px; font-size: .875rem; }
+
+@media (max-width: 440px) and (max-height: 680px) {
+  .account-screen { padding-block: 12px; }
+  .account-brand { margin-bottom: 16px; }
+  .account-intro { margin-bottom: 16px; }
+  #account-form { gap: 10px; }
+}

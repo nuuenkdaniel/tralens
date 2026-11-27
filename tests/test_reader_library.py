@@ -1,5 +1,7 @@
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
+import os
 from tempfile import TemporaryDirectory
 import time
 import json
@@ -12,6 +14,47 @@ from tralens.devui.server import App, Config, RequestError
 
 
 class ReaderLibraryTests(unittest.TestCase):
+    def test_private_database_and_rollback_journal_on_existing_mount(self):
+        path = self.library.path
+        with self.library.db() as db:
+            db.execute("PRAGMA user_version=17")
+        self.library.close()
+        path.parent.chmod(0o755)
+        path.chmod(0o644)
+        self.library = Library(self.app)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        with self.library.db() as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 17)
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("PRAGMA user_version=18")
+            journal = path.with_name(path.name + "-journal")
+            self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
+
+    def test_rejects_writable_mount_and_linked_library_files(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "mount"
+            root.mkdir()
+            root.chmod(0o777)
+            with self.assertRaisesRegex(ValueError, "library directory"):
+                App(Config(root, root, reader_mode=True))
+            root.chmod(0o700)
+            app = App(Config(root, root, reader_mode=True))
+            target = base / "other"
+            target.write_bytes(b"private external data")
+            target.chmod(0o644)
+            for name in ("library.lock", "reader.sqlite3", "reader.sqlite3-journal", "reader.sqlite3-wal", "reader.sqlite3-shm"):
+                path = root / name
+                for link in (os.symlink, os.link):
+                    with self.subTest(name=name, link=link.__name__):
+                        path.unlink(missing_ok=True)
+                        link(target, path)
+                        with self.assertRaises((ValueError, OSError)):
+                            Library(app)
+                        path.unlink()
+                        self.assertEqual(target.read_bytes(), b"private external data")
+                        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+
     def setUp(self):
         folder = TemporaryDirectory()
         self.addCleanup(folder.cleanup)
@@ -52,6 +95,19 @@ class ReaderLibraryTests(unittest.TestCase):
             time.sleep(0.02)
         self.fail(self.library.catalog())
 
+    def test_translation_storage_limit_preserves_previous_page_and_releases_transaction(self):
+        self.library.add(self.meta, [self.file])
+        page = self.finished()["chapters"][0]["pages"][0]["id"]
+        previous = self.library.image(page, "translated")
+        with self.library.db() as db:
+            db.execute("UPDATE pages SET status='running' WHERE id=?", (page,))
+        self.app.config = replace(self.app.config, root_storage_bytes=self.library.path.stat().st_size + 1024)
+        with self.assertRaisesRegex(RequestError, "storage is full"):
+            self.library.finish(page, b"x" * 65536, None)
+        self.library.finish(page, None, "Library storage is full.")
+        self.assertEqual(self.library.catalog()["books"][0]["chapters"][0]["pages"][0]["status"], "failed")
+        self.assertEqual(self.library.image(page, "translated"), previous)
+
     def test_chapters_pages_position_download_and_restart(self):
         first = self.library.add(self.meta, [self.file, self.file])
         self.library.add(
@@ -86,6 +142,14 @@ class ReaderLibraryTests(unittest.TestCase):
         self.assertEqual(self.calls[-1]["translation_model"], "local")
         self.library.change("delete", dict(book=book["id"]))
         self.assertEqual(self.library.catalog()["books"], [])
+
+    def test_archive_name_uses_current_title_and_fits_android_downloads(self):
+        added = self.library.add(self.meta, [self.file])
+        book = added["book"]
+        self.library.change("rename", {"book": book, "title": "夜空 / Manga"})
+        self.assertEqual(self.library.archive_name(book, "both"), "夜空 _ Manga-both.zip")
+        self.library.change("rename", {"book": book, "title": "夜" * 180})
+        self.assertLessEqual(len(self.library.archive_name(book, "translated").encode()), 255)
 
     def test_pdf_document_order_and_webp_original(self):
         pdf, webp = BytesIO(), BytesIO()
