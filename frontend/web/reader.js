@@ -30,7 +30,7 @@ let config,
 let pendingPosition = Promise.resolve(),
   focusReturn,
   dismissed = "",
-  uploadBusy = false;
+  pendingImport = null;
 const esc = (text) =>
   String(text ?? "").replace(
     /[&<>"']/g,
@@ -95,7 +95,7 @@ function toast(message) {
   clearTimeout(noticeTimer);
   noticeTimer = setTimeout(() => ($("#notice").textContent = ""), 4500);
 }
-async function api(path, body, reconnect = true) {
+async function api(path, body, reconnect = true, send = fetch) {
   const opts =
     body === undefined
       ? {}
@@ -104,8 +104,14 @@ async function api(path, body, reconnect = true) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  if (path === "config") opts.signal = AbortSignal.timeout(6000);
-  const res = await fetch("/api/" + path, opts);
+  if (path === "config" || path.startsWith("library/imports/")) opts.signal = AbortSignal.timeout(6000);
+  let res;
+  try {
+    res = await send("/api/" + path, opts);
+  } catch (err) {
+    if (err instanceof TypeError) throw Error("Couldn’t reach your server. Check your connection.");
+    throw err;
+  }
   if (res.status === 401) {
     config = null;
     showAccountForm();
@@ -124,7 +130,7 @@ async function api(path, body, reconnect = true) {
       throw Error("The signed-in account changed.");
     }
     config = fresh;
-    return api(path, body, false);
+    return api(path, body, false, send);
   }
   if (!res.ok) throw Error(data.error || "Server request failed (HTTP " + res.status + "). Try again.");
   return data;
@@ -138,7 +144,7 @@ function schedulePoll() {
   pollTimer = setTimeout(poll, busy ? 2500 : 60000);
 }
 async function poll() {
-  if (!config || uploadBusy || document.hidden) return schedulePoll();
+  if (!config || document.hidden) return schedulePoll();
   try { await refresh(); }
   catch (err) { toast(err.message); schedulePoll(); }
 }
@@ -835,7 +841,6 @@ function modal(title, html) {
   if (!sheet.open) sheet.showModal();
 }
 function closeSheet() {
-  if (uploadBusy) return;
   sheet.close();
 }
 sheet.addEventListener("close", () => {
@@ -846,10 +851,11 @@ sheet.addEventListener("close", () => {
   focusReturn?.focus();
   showChrome();
 });
-sheet.addEventListener("cancel", (e) => {
-  if (uploadBusy) e.preventDefault();
-});
 function addBook(id = "", files = []) {
+  if (pendingImport) {
+    $("#import-status").scrollIntoView();
+    return toast("Finish or dismiss the current import first.");
+  }
   draft = {
     book: id,
     title: "",
@@ -1375,44 +1381,128 @@ document.addEventListener("change", async (e) => {
     drawAdd();
   }
 });
+function importStatus(message, percent = null, failed = false) {
+  $("#import-status").hidden = false;
+  $("#import-name").textContent = pendingImport.name;
+  $("#import-message").textContent = message;
+  const progress = $("#import-progress");
+  progress.hidden = failed;
+  if (percent === null) progress.removeAttribute("value");
+  else progress.value = percent;
+  $("#import-stop").hidden = failed || !pendingImport.request;
+  $("#import-retry").hidden = $("#import-dismiss").hidden = !failed;
+}
+
+function clearImport() {
+  pendingImport?.request?.abort();
+  pendingImport = null;
+  $("#import-status").hidden = true;
+}
+
+function sendImport(url, opts) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const item = pendingImport;
+    item.request = xhr;
+    $("#import-stop").hidden = false;
+    $("#import-stop").textContent = "Stop upload";
+    xhr.open("POST", url);
+    xhr.setRequestHeader("X-Tralens-Token", opts.headers["X-Tralens-Token"]);
+    let timer;
+    function watch(ms) {
+      clearTimeout(timer);
+      timer = setTimeout(() => xhr.abort(), ms);
+    }
+    xhr.upload.onprogress = event => {
+      watch(90000);
+      if (event.lengthComputable) {
+        const percent = Math.round(100 * event.loaded / event.total);
+        importStatus("Uploading · " + percent + "%", percent);
+      }
+    };
+    xhr.upload.onload = () => {
+      $("#import-stop").textContent = "Stop waiting";
+      watch(6 * 60000);
+      importStatus("Upload sent. Preparing pages on your server…");
+    };
+    xhr.onload = () => resolve(new Response(xhr.responseText || null, {status: xhr.status}));
+    xhr.onerror = () => reject(Error("Connection lost. Reconnect and retry."));
+    xhr.onabort = () => reject(Error(item.stopped ? "Stopped waiting. Retry checks whether your chapter was saved." :
+      "Your server stopped responding. Check your connection and retry."));
+    xhr.onloadend = () => clearTimeout(timer);
+    watch(90000);
+    xhr.send(opts.body);
+  });
+}
+
+async function runImport(item, retry = false) {
+  item.request = null;
+  item.stopped = false;
+  importStatus(retry ? "Checking your library…" : "Uploading…");
+  const receipt = () => api("library/imports/" + item.id);
+  let added;
+  try {
+    if (retry) added = await receipt();
+    if (pendingImport !== item) return;
+    if (!added) {
+      importStatus("Uploading…");
+      added = await api("library/add", item.form, true, sendImport);
+    }
+  } catch (err) {
+    if (pendingImport !== item) return;
+    // A disconnect after the upload can hide a successful commit.
+    item.request = null;
+    importStatus("Checking whether your chapter was saved…");
+    try { added = await receipt(); } catch { /* Keep the files available for retry. */ }
+    if (pendingImport !== item) return;
+    if (!added) {
+      const network = err instanceof TypeError || err.name === "TimeoutError";
+      importStatus(network ? "Couldn’t reach your server. Reconnect and retry." : err.message, null, true);
+      return;
+    }
+  }
+  if (pendingImport !== item) return;
+  clearImport();
+  toast("Added to your library.");
+  try {
+    await refresh(true);
+  } catch {
+    if (config) toast("Added to your library. Reconnect to see your pages.");
+    schedulePoll();
+    return;
+  }
+  const book = catalog.books.find(b => b.id === added.book);
+  const chapter = book?.chapters.find(c => c.id === added.chapter);
+  if (chapter?.pages.length && location.hash === item.route && !sheet.open) {
+    history.replaceState(null, "", "#book/" + book.id);
+    location.hash = readURL(book, chapter.pages[0]);
+  }
+}
+$("#import-stop").onclick = () => {
+  pendingImport.stopped = true;
+  pendingImport.request?.abort();
+};
+$("#import-retry").onclick = () => runImport(pendingImport, true);
+$("#import-dismiss").onclick = clearImport;
+
 document.addEventListener("submit", async (e) => {
   e.preventDefault();
-  if (uploadBusy || e.target.id === "account-form") return;
+  if (e.target.id === "account-form") return;
+  if (e.target.id === "import") {
+    if (pendingImport) return;
+    const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
+    const form = new FormData();
+    form.append("metadata", JSON.stringify({import_id: id, book: draft.book,
+      title: draft.title, chapter: draft.chapter, options: settings()}));
+    draft.files.forEach(f => form.append("page", f.file));
+    pendingImport = {id, form, name: draft.title || draft.chapter, route: location.hash};
+    closeSheet();
+    return runImport(pendingImport);
+  }
   const button = e.target.querySelector('button:not([type="button"])');
   if (button) button.disabled = true;
   try {
-    if (e.target.id === "import") {
-      uploadBusy = true;
-      e.target.inert = true;
-      button.textContent = "Adding…";
-      const form = new FormData();
-      form.append(
-        "metadata",
-        JSON.stringify({
-          book: draft.book,
-          title: draft.title,
-          chapter: draft.chapter,
-          options: settings(),
-        }),
-      );
-      draft.files.forEach((f) => form.append("page", f.file));
-      let added;
-      try {
-        added = await api("library/add", form);
-      } finally {
-        uploadBusy = false;
-        e.target.inert = false;
-      }
-      closeSheet();
-      await refresh(true);
-      const book = catalog.books.find(b => b.id === added.book);
-      const chapter = book?.chapters.find(c => c.id === added.chapter);
-      if (chapter?.pages.length) {
-        history.replaceState(null, "", "#book/" + book.id);
-        location.hash = readURL(book, chapter.pages[0]);
-      }
-      toast("Added to your library.");
-    } else if (e.target.id === "rename") {
+    if (e.target.id === "rename") {
       await api("library/rename", {
         book: current().book.id,
         title: $("#new-title").value,
@@ -1421,12 +1511,8 @@ document.addEventListener("submit", async (e) => {
       await refresh(true);
     }
   } catch (err) {
-    if ($("#import-error")) $("#import-error").textContent = err.message;
-    else toast(err.message);
+    toast(err.message);
   } finally {
-    if (e.target.id === "import") {
-      button.textContent = prefs.translator === "local" ? "Add & translate" : "Add & translate with ChatGPT";
-    }
     if (button) button.disabled = false;
   }
 });
@@ -1439,7 +1525,7 @@ document.addEventListener("dragover", (e) => {
 });
 document.addEventListener("drop", (e) => {
   e.preventDefault();
-  if (!config || uploadBusy) return;
+  if (!config) return;
   if (e.dataTransfer.files.length) {
     if (!draft) addBook("", e.dataTransfer.files);
     else {
@@ -1556,6 +1642,7 @@ function verifyServer(origin) {
   });
 }
 function accountCard(title, intro, content) {
+  if (pendingImport) clearImport();
   if (sheet.open) sheet.close();
   clearTimeout(pollTimer);
   catalog = {books: [], bytes: 0};

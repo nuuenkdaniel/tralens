@@ -211,7 +211,28 @@ class Library:
             )
         return json.dumps(settings)
 
+    @staticmethod
+    def import_chapter(account, key):
+        if not isinstance(key, str) or not re.fullmatch("[0-9a-f]{32}", key):
+            raise RequestError("Invalid import identifier.")
+        return uuid.uuid5(uuid.NAMESPACE_URL, f"tralens:import:{account}:{key}").hex
+
+    @staticmethod
+    def saved_chapter(db, account, chapter):
+        row = db.execute("SELECT book FROM chapters JOIN books ON books.id=chapters.book "
+                         "WHERE chapters.id=? AND books.account=?", (chapter, account)).fetchone()
+        return dict(book=row["book"], chapter=chapter) if row else None
+
+    def import_result(self, account, key):
+        chapter = self.import_chapter(account, key)
+        with self.db() as db:
+            return self.saved_chapter(db, account, chapter)
+
     def add(self, meta, files, account="owner"):
+        if "import_id" in meta:
+            existing = self.import_result(account, meta["import_id"])
+            if existing:
+                return existing
         if meta.get("book") is not None and not isinstance(meta["book"], str):
             raise RequestError("Invalid manga identifier.")
         settings = self.settings(meta.get("options"), account)
@@ -249,9 +270,13 @@ class Library:
 
     def store_pages(self, meta, settings, pages, total, account):
         book = meta.get("book")
-        chapter = uuid.uuid4().hex
+        chapter = self.import_chapter(account, meta["import_id"]) if "import_id" in meta else uuid.uuid4().hex
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
+            if "import_id" in meta:
+                prior = self.saved_chapter(db, account, chapter)
+                if prior:
+                    return prior
             require_space(self.path, total)
             self.check_capacity(db, total)
             if not book:

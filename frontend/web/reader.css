@@ -902,3 +902,18 @@ select:hover:not(:disabled) {
   .account-intro { margin-bottom: 16px; }
   #account-form { gap: 10px; }
 }
+
+#import-status:not([hidden]) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding: .75rem max(1rem, calc((100% - 68rem) / 2));
+  background: var(--soft);
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+#import-status [hidden] { display: none; }
+#import-status > div:last-child { flex-shrink: 0; }
+#import-message { color: var(--muted); }
+#import-progress { width: min(16rem, 100%); accent-color: var(--accent); }

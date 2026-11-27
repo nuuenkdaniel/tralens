@@ -96,6 +96,8 @@ class ReaderHandler(Handler):
                     (STATIC / "index.html").read_bytes(),
                     "text/html; charset=utf-8",
                 )
+            elif match := re.fullmatch(rf"/api/library/imports/({ID})", path):
+                self.json(200, self.server.library.import_result(self.account, match[1]))
             elif path == "/api/library":
                 self.json(200, self.server.library.catalog(self.account))
             elif match := re.fullmatch(f"/api/library/pages/({ID})/transcript", path):

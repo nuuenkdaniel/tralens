@@ -151,6 +151,22 @@ class ReaderLibraryTests(unittest.TestCase):
         self.library.change("rename", {"book": book, "title": "夜" * 180})
         self.assertLessEqual(len(self.library.archive_name(book, "translated").encode()), 255)
 
+    def test_lost_import_response_can_be_retried_once_per_account(self):
+        key = "23" * 16
+        meta = dict(self.meta, import_id=key, options={"mode": "render", "translation_model": "local"})
+        self.assertIsNone(self.library.import_result("owner", key))
+        with self.assertRaises(RequestError):
+            self.library.add(meta, [("bad.pdf", b"%PDF-broken")])
+        self.assertIsNone(self.library.import_result("owner", key))
+        receipt = self.library.add(meta, [self.file])
+        self.assertEqual(self.library.add(meta, [self.file]), receipt)
+        self.assertEqual(self.library.import_result("owner", key), receipt)
+        self.assertIsNone(self.library.import_result("second", key))
+        second = self.library.add(meta, [self.file], "second")
+        self.assertNotEqual(second, receipt)
+        self.assertEqual(len(self.library.catalog()["books"]), 1)
+        self.assertEqual(len(self.library.catalog()["books"][0]["chapters"]), 1)
+
     def test_pdf_document_order_and_webp_original(self):
         pdf, webp = BytesIO(), BytesIO()
         red = Image.new("RGB", (60, 90), "red")

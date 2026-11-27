@@ -242,6 +242,11 @@
         </symbol>
       </defs>
     </svg>
+    <aside id="import-status" hidden aria-label="Manga import">
+      <div><strong id="import-name"></strong><div id="import-message" role="status"></div>
+        <progress id="import-progress" max="100" aria-label="Upload progress"></progress></div>
+      <div><button id="import-stop" hidden>Stop upload</button><button id="import-retry" hidden>Retry</button> <button id="import-dismiss" hidden>Dismiss</button></div>
+    </aside>
     <div id="root"><main class="empty">Opening your library…</main></div>
     <dialog id="sheet"></dialog>
     <div id="notice" role="status" aria-live="polite"></div>
