@@ -43,6 +43,8 @@ The worker expects the fp16 safetensors layout of `diffusers/stable-diffusion-xl
 - Use the manga actions to rename, translate again, download a ZIP, or delete a title. The page menu offers individual downloads and retries. A failed retry retains the last available translation.
 - The library, page images, chapters and reading positions are stored in `reader.sqlite3` under `--output-root` (default `test-results/web-reader/`). Appearance and model preferences are per browser. Deleting a title removes its library entries. The diagnostic job directories are separate and retain their pipeline artifacts. Back up the output directory while the service is stopped.
 
+On Android, open a book and tap **Save offline** on a chapter while connected. The app saves each translated page that is ready and uses the original for remaining pages. Open **Downloads on this device** to read, resume a partial download, or remove a copy. Downloads and offline reading position belong to the signed-in account on that device. To refresh a saved chapter after more pages finish translating, remove it and save it again.
+
 ## Client contract
 
 Serve `web/` as static assets under the backend origin. A local development proxy can forward `/api/` with Host and Origin checks preserved. In owner mode, sign in through the reader over HTTPS. Both the web and Capacitor clients use the server’s secure session cookie.

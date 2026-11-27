@@ -68,6 +68,26 @@ def japanese_count(text):
         'CJK UNIFIED IDEOGRAPH-','CJK COMPATIBILITY IDEOGRAPH-')) for c in text)
 
 
+def corrected_compound(source, reading):
+    """Three matching views may restore a dictionary noun on a possessive label."""
+    prefix, sep, raw = source.rpartition('の')
+    if (not prefix or not sep or not re.fullmatch(r'[一-鿿]{2,4}',raw)
+            or not reading.startswith(prefix+sep) or len(source)!=len(reading)):
+        return False
+    proposed = reading[len(prefix)+1:]
+    if not re.fullmatch(r'[一-鿿]+',proposed) or sum(a!=b for a,b in zip(raw,proposed))!=1:
+        return False
+    try:
+        from fugashi import Tagger
+        import unidic_lite
+        tagger = Tagger(f'-d "{unidic_lite.DICDIR}"')
+    except (ImportError, RuntimeError):
+        return False
+    old, new = list(tagger(raw)), list(tagger(proposed))
+    return (len(old)==2 and old[0].feature.pos2=='普通名詞' and old[1].feature.pos1=='接尾辞'
+            and len(new)==1 and not new[0].is_unk and new[0].feature.pos2=='普通名詞')
+
+
 def selection(source,readings,scores,direction):
     if (direction not in ('horizontal','vertical') or len(readings)!=3
             or not all(type(s) is str and 2<=len(s)<=512 and s.strip() for s in readings)
@@ -108,7 +128,9 @@ def selection(source,readings,scores,direction):
         return True
     # Strong existing readings need independent support. A wholly different
     # detected script can trigger an opt-in hypothesis even at a high raw score.
-    return min(scores)<.92 or (japanese_count(raw)==0 and japanese_count(first)>=1)
+    return (min(scores)<.92 or (japanese_count(raw)==0 and japanese_count(first)>=1)
+            or (direction=='horizontal' and len(scores)==2 and all(normalized(s)==first for s in readings)
+                and corrected_compound(raw, first)))
 
 
 def views(image,bounds,polygons):
@@ -628,7 +650,11 @@ def confirms_raw(record, unit, proposal, image, detections=()):
     # The independent column join must also identify this exact member sequence.
     text=unit.selected.text
     punctuation_only=(record['readings']==[text,text,text+'。'] and column_passage(evidence)==text)
-    if not punctuation_only and not all(isinstance(s,str) and normalized(s)==normalized(text) for s in record['readings']):
+    # A terminal small tsu clips the sound. Three views agreeing on that
+    # extra beat still corroborate every kana that the detector read.
+    ending_only = (len(unit.order)==1 and re.fullmatch(r'[ぁ-ゖァ-ヺー]{2,12}',text)
+                   and record['readings'] in ([text+'っ']*3,[text+'ッ']*3))
+    if not punctuation_only and not ending_only and not all(isinstance(s,str) and normalized(s)==normalized(text) for s in record['readings']):
         from .masked_lines import source_views
         weak=weak_member(evidence,record['readings']) if proposal.get('crop_safe') else None
         member=record.get('weak_member',{})

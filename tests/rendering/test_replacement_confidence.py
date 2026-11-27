@@ -16,6 +16,26 @@ from tralens.translation.contracts import Reading
 
 
 class ReplacementConfidenceTests(unittest.TestCase):
+    def test_letter_sequence_requires_regular_printed_positions(self):
+        def label(i,word,x,y):
+            return dict(source_id=i,text=word,confidence=.98,polygon=[[x,y],[x+10,y],[x+10,y+12],[x,y+12]])
+        seq=[label(3,'K',20,20),label(8,'L',60,23),label(4,'M',102,27)]
+        self.assertTrue(all(rc.printed_sequence(i,seq) for i in (3,8,4)))
+        self.assertFalse(rc.printed_sequence(3,seq[:2]))
+        self.assertFalse(rc.printed_sequence(3,seq[:2]+[label(4,'M',96,57)]))
+
+    def test_circled_letter_needs_enclosing_ink_in_the_original(self):
+        from PIL import Image,ImageDraw
+        art = Image.new('RGB',(90,64),'white')
+        pen = ImageDraw.Draw(art)
+        box = [(22,14),(46,14),(46,38),(22,38)]
+        pen.text((28,19),'R',fill='black')
+        self.assertFalse(rc.circled_letter(art,box,'R'))
+        pen.ellipse((22,14,46,38),outline='black',width=2)
+        self.assertTrue(rc.circled_letter(art,box,'R'))
+        self.assertFalse(rc.circled_letter(art,box,'あ'))
+
+
     def test_weak_latin_over_hatching_requires_parallel_marks_outside_the_box(self):
         from PIL import ImageDraw
         image=Image.new('RGB',(60,80),'white')

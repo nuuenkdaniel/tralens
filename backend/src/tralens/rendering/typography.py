@@ -114,23 +114,12 @@ def layout_dialogue(text, font_data, coverage, mask, style):
             best = key, layer.crop(box), box[:2], provenance, len(probes)-1
     n.require(best is not None, 'overflow: no contained layout within comfortable margins and supplied size bounds')
     _, tile, xy, provenance, index = best
-    # Keep a short hyphenated name or compound together when one line still
-    # fits at a readable size. Preserve the two-line fit for narrower balloons.
-    if (provenance['inserted_break_offsets'] and
-            re.fullmatch(r"[A-Za-z]{2,12}[-‐][A-Za-z]{2,9}[.!?…]*",text)):
-        try:
-            single,metrics = n.layout(text,font_data,coverage,content,
-                {**style,'min_size':max(low,round(provenance['size']*.75)),
-                 'max_size':provenance['size']},work=work,fixed_breaks=())
-        except n.ResourceLimit:
-            raise
-        except ValueError as error:
-            if not str(error).startswith('overflow:'):
-                raise
-        else:
-            box = single.getchannel('A').getbbox()
-            tile,xy,provenance = single.crop(box),box[:2],metrics
-            probes[index]['unbroken_size'] = metrics['size']
+    alternative = n.unbroken_compounds(text,font_data,coverage,content,style,provenance,work)
+    if alternative:
+        single,provenance = alternative
+        box = single.getchannel('A').getbbox()
+        tile,xy = single.crop(box),box[:2]
+        probes[index]['unbroken_size'] = provenance['size']
     layer = Image.new('RGBA', mask.size)
     layer.paste(tile, xy)
     provenance.update(rasterized_pixels=work.rasterized_pixels, search_work=dict(work.search),

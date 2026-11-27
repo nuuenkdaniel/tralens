@@ -367,7 +367,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent.resolve()/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'font_faces.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'source_support.py', 'source_extents.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'printed_contours.py', 'outlined_sound_cleanup.py', 'table_cells.py', 'repeated_strokes.py', '../ocr/table_rows.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/crop_readings.py', '../ocr/upright_latin.py', '../ocr/sound_readings.py', '../ocr/outlined_sounds.py', '../ocr/handwritten.py', '../ocr/handwritten_lines.py', '../ocr/repeated_effects.py', '../ocr/masked_lines.py', '../ocr/sideways_sound.py', '../ocr/display_readings.py', '../ocr/ink_groups.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
+                       for name in ('automatic.py', 'natural.py', 'font_faces.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'source_support.py', 'source_extents.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'printed_contours.py', 'outlined_sound_cleanup.py', 'table_cells.py', 'repeated_strokes.py', '../ocr/table_rows.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/crop_readings.py', '../ocr/upright_latin.py', '../ocr/sound_readings.py', '../ocr/outlined_sounds.py', '../ocr/handwritten.py', '../ocr/handwritten_lines.py', '../ocr/repeated_effects.py', '../ocr/masked_lines.py', '../ocr/detached_kana.py', '../ocr/sideways_sound.py', '../ocr/display_readings.py', '../ocr/ink_groups.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
 
 
 def _report_html(report):
@@ -722,6 +722,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     and min(point[1] for point in source_lines[0]['polygon']) > .85*rgb.height):
                 row['lettering_role'] = 'handwriting'
             if visibility_policy == 'always-show':
+                if len(source_lines)==1 and rc.circled_letter(rgb,source_lines[0]['polygon'],source_word):
+                    raise AutomaticSkip('replacement_unchanged_text','Preserve the printed circled letter.')
                 if len(source_lines)==1 and rc.pencil_hatching(rgb,source_lines[0]):
                     raise AutomaticSkip('uncorroborated_source','The detected strokes continue as hatching outside the text region.')
                 selected = binding.get('reread_selected_revision')
@@ -734,7 +736,9 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     if confirms_raw(crop_records.get(unit.unit_id),unit,proposals[unit.unit_id],rgb,raw):
                         reviewed = unit.selected.text
                 preserve = rc.original_lettering_reason(unit, binding['text'], raw,
-                    proposals[unit.unit_id]['crop_bounds'], rgb.size, reviewed_source=reviewed)
+                    proposals[unit.unit_id]['crop_bounds'], rgb.size, reviewed_source=reviewed,
+                    verify_crop=lambda: unit.selected.origin=='raw_main_reading' and
+                        confirms_raw(crop_records.get(unit.unit_id),unit,proposals[unit.unit_id],rgb,raw))
                 if preserve:
                     raise AutomaticSkip(*preserve)
             if (is_coverage and removal_policy == 'aggressive' and not binding.get('reread_selected_revision')
@@ -1295,7 +1299,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         recovery_artifacts.update(final_artifacts)
         from . import outlined_sound_cleanup
         clean, text, joint_repairs = outlined_sound_cleanup.finish(rgb,clean,text,layout_union,erase_union,raw,units,
-            report['units'],source,backend,recovery_artifacts,faces.resolve,style)
+            report['units'],source,backend,recovery_artifacts,faces.resolve,style,
+            force=visibility_policy=='always-show' and confidence_settings is None)
         if joint_repairs:
             report['outlined_sound_cleanup'] = joint_repairs
             composite = Image.alpha_composite(clean.convert('RGBA'),text).convert('RGB')
@@ -1316,7 +1321,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 rgb, raw, units, report['units'], clean, native_text, native_composite, *faces.primary, style,
                 font_resolver=faces.resolve,
                 max_displays=max(0,min(visible_translations.MAX_ATTEMPTS,(MAX_ARTIFACTS-24-14*len(plans))//3)),native_erase=erase_union,
-                protect_artwork=removal_policy=='aggressive')
+                protect_artwork=removal_policy=='aggressive',
+                replace_all=removal_policy=='aggressive' and confidence_settings is None, cleanup_artifacts=recovery_artifacts)
             report['display_summary'] = display_summary
             report['pixel_audit_scope'] = 'native clean/text before separately audited opaque display overlays'
         except (ValueError, OSError, KeyError, TypeError) as error:
@@ -1330,7 +1336,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 row['display_status'] = (visible_translations.composed_status(row) if row['status']=='automatic_composed' else
                     'missing' if 'binding' not in row else 'unchanged' if row.get('reason_code')=='replacement_unchanged_text'
                     else 'undisplayed')
-                if previous_display in ('patch','caption'):
+                if previous_display in ('patch','caption','aggressive') and 'display_fallback' in row:
                     row['display_fallback'].update(status='unresolved',reason='display_pass_rolled_back')
             report['display_summary'] = {**visible_translations.display_counts(report['units']),
                 'policy':visible_translations.POLICY,'error':str(error),'rolled_back':True,'displayed_translations':

@@ -50,10 +50,30 @@ docker compose up -d --wait --pull never
 
 Open [http://127.0.0.1:7871](http://127.0.0.1:7871) on the host. From another
 computer, use `ssh -N -L 7871:127.0.0.1:7871 user@server` and open that same URL.
-Sign in as `owner` using the key in `tralens-data/library/owner.key`. For HTTPS access and registration settings, follow the [deployment guide](docs/self-hosted-reader.md#remote-access-over-https).
+On a fresh server, verify the address and choose a username and password for the first owner. The owner can connect ChatGPT. Each additional reader gets a private library. Existing owner-key installations keep their current sign-in.
 
 Choose a model under **Settings → Translation**, then **Add manga**. Try one page
 to check speed and quality on your hardware.
+
+### Create the owner account from your phone
+
+Configure [HTTPS access](docs/self-hosted-reader.md#remote-access-over-https) first. In the Android app, enter the HTTPS hostname configured in `TRALENS_ORIGIN` and tap **Verify server**. If you use Tailscale Serve, connect your phone to Tailscale and enter the full `https://…ts.net` hostname shown by `tailscale serve status`.
+
+On the server, run this from the Compose project directory to get your private, one-time setup link:
+
+```sh
+docker compose exec -T reader cat /library/owner-setup.url
+```
+
+Paste the **entire link**, including `#setup=…`, into the app’s **Private setup link** field and tap **Continue setup**. Choose your owner username and password.
+
+You can also scan the link with your phone’s camera. If the server has `qrencode`, display a QR code in its terminal:
+
+```sh
+docker compose exec -T reader cat /library/owner-setup.url | tr -d '\r\n' | qrencode -t ANSIUTF8
+```
+
+If the camera opens a browser, finish setup there, then reopen the app and sign in with the same credentials. Keep the link and QR code private until setup finishes. If the reader restarts before you finish, run the command again for the new link.
 
 ## Translation models
 

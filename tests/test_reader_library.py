@@ -108,6 +108,22 @@ class ReaderLibraryTests(unittest.TestCase):
         self.assertEqual(self.library.catalog()["books"][0]["chapters"][0]["pages"][0]["status"], "failed")
         self.assertEqual(self.library.image(page, "translated"), previous)
 
+    def test_thumbnail_refreshes_on_new_translation_and_preserves_original(self):
+        self.library.add(self.meta, [self.file])
+        page = self.finished()["chapters"][0]["pages"][0]["id"]
+        original = self.library.thumbnail(page, "original")
+        first = self.library.thumbnail(page, "translated")
+        with self.library.db() as db:
+            db.execute("UPDATE pages SET status='running' WHERE id=?", (page,))
+        updated = BytesIO()
+        Image.new("RGB", (1000, 1500), "blue").save(updated, "PNG")
+        self.library.finish(page, updated.getvalue(), None)
+        self.assertNotEqual(first, self.library.thumbnail(page, "translated"))
+        with Image.open(BytesIO(self.library.thumbnail(page, "translated")[1])) as thumb:
+            self.assertEqual(thumb.size, (299, 448))
+        self.assertEqual(self.library.thumbnail(page, "original"), original)
+        self.assertEqual(self.library.image(page, "translated")[1], updated.getvalue())
+
     def test_chapters_pages_position_download_and_restart(self):
         first = self.library.add(self.meta, [self.file, self.file])
         self.library.add(
@@ -150,6 +166,22 @@ class ReaderLibraryTests(unittest.TestCase):
         self.assertEqual(self.library.archive_name(book, "both"), "夜空 _ Manga-both.zip")
         self.library.change("rename", {"book": book, "title": "夜" * 180})
         self.assertLessEqual(len(self.library.archive_name(book, "translated").encode()), 255)
+
+    def test_lost_import_response_can_be_retried_once_per_account(self):
+        key = "23" * 16
+        meta = dict(self.meta, import_id=key, options={"mode": "render", "translation_model": "local"})
+        self.assertIsNone(self.library.import_result("owner", key))
+        with self.assertRaises(RequestError):
+            self.library.add(meta, [("bad.pdf", b"%PDF-broken")])
+        self.assertIsNone(self.library.import_result("owner", key))
+        receipt = self.library.add(meta, [self.file])
+        self.assertEqual(self.library.add(meta, [self.file]), receipt)
+        self.assertEqual(self.library.import_result("owner", key), receipt)
+        self.assertIsNone(self.library.import_result("second", key))
+        second = self.library.add(meta, [self.file], "second")
+        self.assertNotEqual(second, receipt)
+        self.assertEqual(len(self.library.catalog()["books"]), 1)
+        self.assertEqual(len(self.library.catalog()["books"][0]["chapters"]), 1)
 
     def test_pdf_document_order_and_webp_original(self):
         pdf, webp = BytesIO(), BytesIO()

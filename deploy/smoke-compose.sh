@@ -30,7 +30,6 @@ export TRALENS_REGISTRATION=open
 curl -fsS "http://127.0.0.1:$TRALENS_PORT/healthz"
 "${compose[@]}" exec -T reader python - < "$source_dir/tests/compose_smoke.py"
 export TRALENS_ORIGIN=https://tralens.example
-(umask 077; openssl rand -hex 32 > tralens-data/config/owner.key)
 "${compose[@]}" up -d --wait --wait-timeout 90 --pull never
 "${compose[@]}" exec -T reader python - < "$source_dir/tests/compose_smoke.py" | tee smoke-result.json
 

@@ -10,6 +10,19 @@ from .font_fixture import synthetic_font
 
 
 class CompactRecovery(unittest.TestCase):
+    def test_caption_band_requires_two_edges_and_excludes_foreign_ink(self):
+        own = np.zeros((100,240), bool)
+        own[42:57,92:140] = True
+        blocked = np.zeros_like(own)
+        blocked[41:52,150:160] = True
+        page = np.full((100,240,3), 222, np.uint8)
+        self.assertIsNone(aggressive.caption_band(page,own,blocked))
+        page[35:64,37:202] = [123,101,82]
+        band = aggressive.caption_band(page,own,blocked)
+        self.assertTrue(band[49,81])
+        self.assertFalse(band[40,33])
+        self.assertFalse((band & blocked).any())
+
     def setUp(self):
         self.image=Image.new('RGB',(320,360),'white')
         ImageDraw.Draw(self.image).rectangle((155,90,165,250),fill='black')

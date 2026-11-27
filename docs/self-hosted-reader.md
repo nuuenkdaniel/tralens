@@ -17,16 +17,18 @@ Compose defaults to `translategemma:12b`. For 27B, pull `translategemma:27b` and
 
 ## Remote access over HTTPS
 
-For personal access, an SSH tunnel from your computer can reach the loopback reader as shown in the README. Keep the remote end of the tunnel private. The local reader generates `tralens-data/library/owner.key` on first start. Sign in as `owner` with that key. By default anyone who can reach the reader can register, create their own library and use local inference. For an owner-only install, set `TRALENS_REGISTRATION=closed` before first start. Closing registration later preserves existing accounts.
+For personal access, an SSH tunnel from your computer can reach the loopback reader as shown in the README. Keep the remote end of the tunnel private. On a fresh loopback reader, verify the server address, then choose your owner username and password. Only the owner can connect and use ChatGPT. Each account has its own library. By default other readers can register after the owner finishes setup. Set `TRALENS_REGISTRATION=closed` to allow only the initial owner setup and sign-in for existing accounts.
 
-For direct access from your own devices, set `TRALENS_ORIGIN=https://manga.example.com` in `.env`. Use the exact browser origin and omit the trailing slash. Generate the owner key once, using the same account that owns the configuration directory.
+For HTTPS access from your own devices, set `TRALENS_ORIGIN=https://manga.example.com` in `.env` using the exact browser origin without a trailing slash. Configure the proxy below and start the reader. On a fresh HTTPS install, retrieve the private first-time setup link on the server:
 
 ```sh
-(umask 077; set -C; openssl rand -hex 32 > tralens-data/config/owner.key)
 docker compose up -d --wait
+docker compose exec reader cat /library/owner-setup.url
 ```
 
-Save the key securely and use it as the password for `owner` at the HTTPS reader. Sessions expire after seven days or a restart. Restart after replacing the key to invalidate all sessions. If the upgrade comes from an older Compose config that mounted a separate key file, place that existing key at `owner.key` under the configured `TRALENS_CONFIG` directory with mode 0600.
+Open that link on your phone or computer to choose the owner's credentials. The link expires when setup succeeds or the reader restarts. After a restart during setup, read the file again. Future sign-ins use the chosen username and password.
+
+Existing owner-key installations continue to use the username `owner` and the same key. Keep the library and key together when restoring backups. The reader remembers each signed-in browser or app across restarts. Active devices renew their sessions daily, and a session expires after about 90 days of inactivity. On a shared device, use **Settings → Sign out** to revoke its session. Other devices stay signed in.
 
 Set up a local reverse proxy that preserves the original Host header. For example, configure DNS and use Caddy.
 
@@ -40,7 +42,9 @@ Keep the HTTP listener and Ollama private. If your proxy enforces upload limits,
 
 ## Connect ChatGPT with OAuth
 
-Review the [privacy notice](../PRIVACY.md), then choose a GPT model in **Settings → Translation** and accept the data-use notice. If your browser runs on the server or reaches the reader over SSH, the OAuth callback still needs a loopback connection to the machine running Tralens. For a browser on the host, follow the link the reader shows. For a remote host, use a fixed callback port through SSH.
+On Android, open the Tralens app, sign in as the server owner, and select a GPT model under **Settings → Translation**. Tap **Continue with ChatGPT**, finish in the phone browser, then tap **Open Tralens**. If you started in Android Chrome, **Open Tralens** takes you to the installed app. [Privacy notice](../PRIVACY.md)
+
+For desktop browser sign-in, choose a GPT model and continue. If your browser runs on the server or reaches the reader over SSH, the OAuth callback still needs a loopback connection to the machine running Tralens. For a browser on the host, follow the link the reader shows. For a remote host, use a fixed callback port through SSH.
 
 From your computer, open a dedicated SSH session and run the login command on the server.
 
@@ -68,7 +72,7 @@ Disconnect in Tralens Settings or run `docker compose exec reader python backend
 
 The default upload and job storage budget is 8 GiB, with up to 2 GiB reserved per job. Keep free disk space beyond that budget for temporary files, models, and backups. Deleting a book in the reader removes its library entries. To reclaim older job artifacts, stop the service and back up the tree before archiving selected job directories. Removing a job directory also removes its job history and can affect saved transcript or diagnostic access.
 
-Stop the reader before backing up. Protect backups as they may contain owner keys and OAuth credentials. Restore into an empty directory while the reader is stopped, preserving ownership and permissions. Use the same image version for the first start after restoring. Store the data on a local filesystem with file locks and atomic renames.
+Stop the reader before backing up. Protect backups as they may contain owner keys and OAuth credentials. Restore into an empty directory while the reader is stopped, preserving ownership and permissions. On a backup containing the reader_sessions table, run `DELETE FROM reader_sessions;` in the restored `reader.sqlite3` before starting the reader to discard saved logins, including any revoked since the backup. Use the same image version for the first start after restoring. Store the data on a local filesystem with file locks and atomic renames.
 
 Before upgrading, save the current digest-pinned `TRALENS_IMAGE` and take a stopped backup. Change `TRALENS_IMAGE` to the new release digest, check the release notes, and run:
 

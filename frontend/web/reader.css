@@ -835,17 +835,6 @@ select:hover:not(:disabled) {
 }
 .pdf-thumb { display:grid; place-items:center; height:77px; border-radius:5px; color:var(--accent); background:var(--soft); font-weight:650 }
 
-.read-english {
-  position: absolute;
-  bottom: 0.5rem;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 1;
-  min-height: 44px;
-  white-space: nowrap;
-  background: #193d32;
-  color: white;
-}
 .reading-text { padding-left: 1.6rem; }
 .reading-text li { margin: 1rem 0; }
 .reading-text svg { display: block; height: auto; width: auto; max-height: 5rem; max-width: 100%; }
@@ -853,10 +842,6 @@ select:hover:not(:disabled) {
 
 #import details[open] > summary { margin-bottom: 1rem; }
 .import-summary { overflow-wrap: anywhere; }
-.reader.clean .imagebox:not([data-reading-fallback]) .read-english:not(:focus-visible) {
-  opacity: 0;
-  pointer-events: none;
-}
 .previous-page {
   position: absolute;
   inset: 0;
@@ -902,3 +887,30 @@ select:hover:not(:disabled) {
   .account-intro { margin-bottom: 16px; }
   #account-form { gap: 10px; }
 }
+
+#import-status:not([hidden]) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  padding: .75rem max(1rem, calc((100% - 68rem) / 2));
+  background: var(--soft);
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+#import-status [hidden] { display: none; }
+#import-status > div:last-child { flex-shrink: 0; }
+#import-message { color: var(--muted); }
+#import-progress { width: min(16rem, 100%); accent-color: var(--accent); }
+
+.offline-library { padding: 1rem; box-sizing: border-box; width: min(100vw, 52rem); max-height: 100dvh; overflow: auto; }
+.offline-library h1, .offline-library h2 { margin-block: .4em; }
+.offline-library:has(.offline-reader) { width: 100%; max-width: none; height: 100%; max-height: none; margin: 0; border: 0; border-radius: 0; padding: 0; }
+.offline-reader { height: 100%; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; }
+.offline-reader header, .offline-reader footer { padding: .6rem 1rem; gap: .5rem; }
+.offline-reader header b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.offline-canvas { overflow: auto; background: #121616; display: grid; place-items: center; }
+.offline-canvas img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+.offline-reader footer label { display: inline-flex; align-items: center; gap: .35rem; white-space: nowrap; }
+.offline-reader footer select { width: auto; min-width: 3rem; padding-inline: .4rem; }
+@media (max-width: 360px) { .offline-reader footer { padding-inline: .25rem; } }

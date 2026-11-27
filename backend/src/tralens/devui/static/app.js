@@ -55,7 +55,7 @@ const STYLES = {
 function styleOf(options) {
   return options?.visibility_policy === "always-show" || options?.replacement_policy !== "confidence-gated" ? "replace-all" : "protect";
 }
-function runOptions({mode, style, budget, reread = false, reconstruction = "classical"}) {
+function runOptions({mode, style, budget, reread = false, reconstruction = "auto"}) {
   const render = mode === "render", preset = STYLES[render ? style : "replace-all"];
   return {mode, max_attempts: budget, allow_fragments: false, render_policy: "best-effort", translation_policy: "coverage-first",
     replacement_policy: render ? preset.replacement_policy : "all",
@@ -583,7 +583,6 @@ if (typeof document !== "undefined") {
   });
   request("/api/config").then(async value => {
     config = value;
-    $("reconstruction-policy").value = config.reconstruction_available ? "lama" : "classical";
     $("reconstruction-policy").querySelector('[value="lama"]').disabled = !config.reconstruction_available;
     $("reconstruction-policy").querySelector('[value="sdxl"]').disabled = !config.sdxl_available;
     $("configuration").textContent = `${config.device} · ${config.model} · Ollama: ${config.endpoint || "configured local service"} · OCR: ${config.model_root}${config.fonts ? " · Fonts: " + config.fonts : " · No --fonts: rendering disabled"}`;
