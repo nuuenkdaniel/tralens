@@ -1209,6 +1209,14 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
         if not safe:
             structural.append("crop_isolation_unresolved")
         words = ["wording_not_human_checked"]
+        if (attached and len(main_ids)>=2 and group.direction=='vertical'
+                and all(by_id[i][0].status=='accepted' and by_id[i][0].confidence>=.95 for i in main_ids)):
+            supported = {r.source_id for r in relationships if r.relationship=='tentative_furigana'
+                and r.possible_parent_ids==(r.parent_id,) and r.parent_id in main_ids
+                and 'kana_and_main_kanji_corroboration' in r.reasons
+                and 'original_small_glyph_scale_and_side_placement' in r.reasons}
+            if set(attached)<=supported:
+                words.append('main_columns_with_corroborated_side_reading')
         if any(not by_id[i][0].text.strip() for i in main_ids):
             words.append("blank_main_reading")
         if any(by_id[i][0].status != "accepted" for i in main_ids):

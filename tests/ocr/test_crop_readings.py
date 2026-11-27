@@ -18,6 +18,20 @@ from tralens.translation.contracts import automatic_units,canonical
 
 
 class CropReadings(unittest.TestCase):
+    def test_sound_ending_requires_agreement_and_current_source_pixels(self):
+        poly=[[4,4],[26,4],[26,30],[4,30]]
+        evidence=[dict(source_id=1,polygon=poly,text='どばん',reason='neighbor_overlap')]
+        unit=SimpleNamespace(unit_id='sound',order=(1,),selected=SimpleNamespace(text='どばん',evidence_json=canonical(evidence)))
+        record=dict(source='どばん',main_ids=[1],proposal_id='sound',bounds=[4,4,27,31],
+                    polygons=[poly],readings=['どばんっ']*3)
+        proposal=dict(crop_bounds=record['bounds'])
+        image=Image.new('RGB',(32,36),'white')
+        record['view_hashes']=[c.image_fingerprint(v) for v in c.record_views(image,record)]
+        self.assertTrue(c.confirms_raw(record,unit,proposal,image))
+        self.assertFalse(c.confirms_raw({**record,'readings':['どびんっ']*3},unit,proposal,image))
+        image.putpixel((10,10),(0,0,0))
+        self.assertFalse(c.confirms_raw(record,unit,proposal,image))
+
     def test_quoted_literal_preserves_spaces_and_flags_when_three_views_agree_on_the_tail(self):
         source='"git status -s"(3?!'
         record=dict(source=source,direction='horizontal',scores=[.84],quoted_literal_tail=True,

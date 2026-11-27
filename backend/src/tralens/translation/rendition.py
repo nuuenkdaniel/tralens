@@ -176,7 +176,12 @@ def short_reading(unit):
     return ''.join(parts)
 
 
-VISUAL_POLICIES = (VISUAL_PERMISSION, VISUAL_SOUND, VISUAL_ACTOR, VISUAL_OWNER, VISUAL_TONE, VISUAL_REACTION, CLICK)
+PRINTED_SPELLING = "printed_latin_spelling"
+# A cross inside or directly after a Latin name can be an OCR substitution.
+# Exclude numeric dimensions and product names on either side of a crossover.
+SPELLING_TOKEN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]{3,}×[a-z]*(?![A-Za-z0-9×])")
+
+VISUAL_POLICIES = (PRINTED_SPELLING, VISUAL_PERMISSION, VISUAL_SOUND, VISUAL_ACTOR, VISUAL_OWNER, VISUAL_TONE, VISUAL_REACTION, CLICK)
 
 
 def visual_guide(policy, source, punctuation):
@@ -212,6 +217,9 @@ def visual_guide(policy, source, punctuation):
 
 
 def visual_retry(source, primary):
+    token = SPELLING_TOKEN.search(source)
+    if token and token[0] in primary and len(SPELLING_TOKEN.findall(source))==1:
+        return PRINTED_SPELLING
     if positive_reaction(source) and re.match(r'^\W*(?:ugh|yuck|eww?)\b',primary,re.I):
         return VISUAL_REACTION
     if UNMARKED_PART.search(source) and re.search(r'\b(?:my|your|his|her|our|their)\s+(?:eyes?|ears?|mouth|hands?|feet|foot|arms?|face|neck|head|back|wings?|tail)\b',primary,re.I):
@@ -440,9 +448,24 @@ def retry_policy(source, target, style):
     return None
 
 
+def verified_spelling(source, primary, response):
+    """A visual reread may change only the ambiguous character in the copied word."""
+    token = SPELLING_TOKEN.search(source)
+    if token and isinstance(response,str):
+        word = token[0]
+        if response.strip() in (word.replace('×','x'),word.replace('×','X')):
+            pattern = r'(?<![A-Za-z0-9])'+re.escape(word)+r'(?![A-Za-z0-9])'
+            return re.sub(pattern,response.strip(),primary)
+    return primary
+
+
 def candidate_matches(policy, primary, candidate, source='', *, term=None):
     if ' / ' in candidate:
         return False
+    if policy == PRINTED_SPELLING:
+        token = SPELLING_TOKEN.search(source)
+        return bool(token and candidate!=primary and
+            any(verified_spelling(source,primary,token[0].replace('×',x))==candidate for x in ('x','X')))
     if policy == SOUND_LETTERING:
         return bool(re.fullmatch(r"[A-Za-z][A-Za-z'-]*(?: [A-Za-z'-]+)?[!….]*", printed_cadence(source, candidate)))
     if policy == NOUN_LABEL:
@@ -530,6 +553,12 @@ def payload(original, policy=POLICY, source='', *, term=None, punctuation='', sc
     text=messages[0]['content']
     marker='Please translate the following '
     if marker not in text:raise ValueError('unknown specialist prompt structure')
+    if policy == PRINTED_SPELLING:
+        word = SPELLING_TOKEN.search(source)[0]
+        messages[0]['content'] = (f'Read the spelling of the Latin word corresponding to OCR “{word}” in the '
+            'attached lettering. The text may run vertically. Distinguish a letter from a printed symbol. '
+            'Return only the word as printed, keeping its case. Japanese context: '+source)
+        return result
     if policy == VISUAL_REACTION:
         messages[0]['content'] = ('Render the line in two parts. For the sound, write a pleased English hum or a '
             'touched sigh, and for the speech write only the words following that sound. Preserve repetition. Japanese: '+source)
@@ -790,12 +819,15 @@ def positive_reaction(source):
 
 
 @lru_cache(maxsize=256)
-def mimetic_adverb(source):
+def mimetic_adverb(source, *, handwritten=False):
     """Look up a standalone emphatic kana reading before treating it as speech."""
     word = source.strip(' ！!？?…。')
-    if not re.fullmatch(r'[ぁ-ゖァ-ヺー]{1,6}[りリ][っッ]',word):
+    if re.fullmatch(r'[ぁ-ゖァ-ヺー]{1,6}[りリ][っッ]',word):
+        stem = word[:-1]
+    elif handwritten and re.fullmatch(r'[ぁ-ゖァ-ヺー]{2,6}',word):
+        stem = word
+    else:
         return ''
-    stem = word[:-1]
     try:
         from fugashi import Tagger
         import unidic_lite
@@ -1023,6 +1055,11 @@ def announced_item_effect(source, nearby):
 
 
 def self_contained_prompt(source, nearby=()):
+    if (re.search(r'[てで]おいて(?:ね|よ)?[。！!]*$',source)
+            and not re.search(r'勝手に|無断で|くせに|[私僕俺]が|わたしが',source)):
+        return ('Translate the standalone Japanese line into natural dialogue. The final te-oite form asks '
+                'the listener to do something in preparation. Keep the addressee as the person doing the '
+                'work and preserve who they are to speak to or act for. Give only the English line. '+source)
     if re.search(r'(?:トイレ|お手洗い|シャワー|浴室|台所|キッチン)(?:を|は)?貸す', source):
         return ('Translate the following Japanese comic lettering. The speaker offers the addressee use of a '
                 'fixed facility. Treat 貸す as granting access. Then render the invitation in natural spoken '

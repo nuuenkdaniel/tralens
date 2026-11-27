@@ -53,6 +53,17 @@ class SingleRendition(unittest.TestCase):
         for bad in ('{"effect":"swish","explanation":"a fan"}','{"effect":"first\\nsecond"}','{}',None):
             with self.assertRaises(ValueError):
                 rendition.effect_field(bad)
+    def test_visual_spelling_reread_can_only_change_the_confirmed_symbol(self):
+        src='Linu×のアップデート'
+        before='Linu× needs an update.'
+        self.assertEqual(rendition.visual_retry(src,before),rendition.PRINTED_SPELLING)
+        self.assertEqual(rendition.verified_spelling(src,before,'Linux'),'Linux needs an update.')
+        for read in ('Linu×','Unix','Linux needs updates.',''):
+            self.assertEqual(rendition.verified_spelling(src,before,read),before)
+        self.assertIsNone(rendition.visual_retry('4×4の箱','A 4×4 box.'))
+        self.assertIsNone(rendition.visual_retry('Hero×Team','Hero×Team'))
+        self.assertEqual(rendition.verified_spelling('Firefo×を開く','Open Firefo×.','Firefox'),'Open Firefox.')
+
     def test_extracts_only_a_separately_quoted_answer_to_a_translation_request(self):
         source='初めて投稿します。'
         message='Okay, here’s the translation of the post:\n\n“This is my first post.”\n'
@@ -127,6 +138,8 @@ class SingleRendition(unittest.TestCase):
         self.assertIn('明るく',rendition.usage_context('ぱあああ'))
         self.assertFalse(rendition.usage_context('かぽっと外れた'))
         self.assertTrue(rendition.self_contained_prompt('じゃこれもよろしく'))
+        self.assertTrue(rendition.self_contained_prompt('先生に伝えておいてね。'))
+        self.assertFalse(rendition.self_contained_prompt('先生に伝えておいてくれた。'))
         self.assertTrue(rendition.self_contained_prompt('僕はその中でも'))
         self.assertFalse(rendition.self_contained_prompt('どうぞよろしくお願いします。'))
         self.assertFalse(rendition.self_contained_prompt('僕はその中でも一番弱かった。'))

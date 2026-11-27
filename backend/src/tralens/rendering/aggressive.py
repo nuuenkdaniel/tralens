@@ -1634,7 +1634,9 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             layer,job['proof'] = place_on_clean_paper(layer,job['proof'],candidate,
                 job['handwriting_layout'] & ~clearance[y:b,x:r],font_data,coverage,style)
             entry['layout'] = job['proof']
-        if (layer is not None and row.get('lettering_role')=='shout' and method.startswith('learned_')
+        sx,sy,sw,sh = job['source_box']
+        display_word = row.get('lettering_role')=='shout' or (sw > .30 * rgb.width and sh > .10 * rgb.height)
+        if (layer is not None and display_word and method.startswith('learned_')
                 and len(row['binding']['text'].split())==1 and (entry['mask_evidence'].get('policy')=='bound_drawn_outline'
                 or np.mean(candidate[job['own']].min(1)>235)>.72)):
             allowed = job['own'] & ~job['protected'] & ~clearance[y:b,x:r]
@@ -1645,7 +1647,6 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                 layer,job['proof'] = place_on_clean_paper(layer,job['proof'],candidate,allowed,
                     font_data,coverage,{**style,'min_size':job['proof']['size'],'max_size':job['proof']['size']})
                 entry['layout'] = job['proof']
-        sx,sy,sw,sh = job['source_box']
         ids = row['binding']['member_ids']
         collides = layer is not None and (np.asarray(layer.getchannel('A')).astype(bool) & clearance[y:b,x:r]).any()
         repair_balloon = layer is None or collides or (job['proof']['size'] < style['min_size'] and
@@ -1873,6 +1874,17 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             # surface only where its English clears all earlier lettering.
             mask = mask & ~reserved[y:b,x:r]
             blocked = p.dilate(alpha[y:b,x:r],2) | initial_reserved[y:b,x:r]
+        if method.startswith('learned_') and layer is not None and (mask & reserved[y:b,x:r]).any():
+            overlap = mask & reserved[y:b,x:r]
+            # Neighboring cleanplates can share a border. Keep the earlier pixels
+            # when the two repairs agree along their seam and the new lettering
+            # clears every reservation. Never splice through prior lettering.
+            seam = overlap & p.dilate(mask & ~overlap, 1)
+            if seam.any() and not (overlap & alpha[y:b,x:r]).any():
+                delta = np.abs(candidate[seam].astype(np.int16) - plate[y:b,x:r][seam]).max(axis=1)
+                if np.mean(delta) <= 12:
+                    mask = mask & ~overlap
+                    entry['retained_neighbor_cleanup_pixels'] = int(overlap.sum())
         if layer is None or (mask&reserved[y:b,x:r]).any() or (local_alpha&blocked).any():
             # Retain candidate evidence. Automatic reuse in final cleanup was
             # rejected after visual trials showed copied/hallucinated lettering.

@@ -4,7 +4,7 @@ import time
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from ..ocr import crop_readings, outlined_sounds, sound_readings
 from . import reconstruction as rec
@@ -232,7 +232,7 @@ def source_centered_lettering(text, font, coverage, frame, blocked, style, *, wr
     return None
 
 
-def plan_lettering(original, text, layout, raw, active, rows, artifacts, zone, protected, font_resolver, style):
+def plan_lettering(original, text, layout, raw, active, rows, artifacts, zone, protected, font_resolver, style, *, force=False):
     """Pack the verified targets together, keeping every other existing glyph fixed."""
     from . import natural, replacement
     x,y,right,bottom = zone
@@ -315,6 +315,18 @@ def plan_lettering(original, text, layout, raw, active, rows, artifacts, zone, p
                     raise
                 except ValueError:
                     pass
+        if fit is None and force:
+            # One oversized rendition used to veto the reconstruction of
+            # every neighboring copy of the same independently read effect.
+            from . import compact_lettering
+            try:
+                pos,size,origin,shaped,options,proof = compact_lettering.fit(binding['text'],font,frame,confined,
+                    lettering_style,original[y:bottom,x:right])
+            except ValueError:
+                return None
+            layer = Image.new('RGBA',size)
+            ImageDraw.Draw(layer).multiline_text(origin,shaped,fill='white',stroke_fill='black',**options)
+            fit = layer,pos,proof
         if fit is None:
             return None
         layer,(px,py),proof = fit
@@ -324,12 +336,13 @@ def plan_lettering(original, text, layout, raw, active, rows, artifacts, zone, p
         px,py = px+x,py+y
         occupied[py:py+h,px:px+w] |= alpha != 0
         stage.alpha_composite(layer,dest=(px,py))
-        proof.update(page_tile_offset=[px,py],glyph_page_origin=[px+6,py+6])
+        gl,gt,_,_ = layer.getchannel('A').getbbox()
+        proof.update(page_tile_offset=[px,py],glyph_page_origin=[px+gl,py+gt])
         placements.append((i,proof,[px,py,px+w,py+h],layer))
     return stage,occupied,backings,placements
 
 
-def finish(rgb, clean, text, layout, erase, raw, units, rows, source, backend, artifacts, font_resolver, style):
+def finish(rgb, clean, text, layout, erase, raw, units, rows, source, backend, artifacts, font_resolver, style, *, force=False):
     extra = {d['source_id']: d for d in raw if d.get('reason') == 'supplemental_rotated_sound_region'
              and d.get('ocr_metadata',{}).get(outlined_sounds.POLICY)}
     discovered = {d['source_id']:d['text'] for d in raw if d.get('reason')=='frontier_discovery'
@@ -415,7 +428,7 @@ def finish(rgb, clean, text, layout, erase, raw, units, rows, source, backend, a
             preferred = max(style['min_size'],round(.70*style['max_size']))
             for size in dict.fromkeys((preferred,style['min_size'])):
                 lettering = plan_lettering(original,text,layout,raw,group,rows,artifacts,zone,obstacle,
-                                           font_resolver,{**style,'min_size':size})
+                                           font_resolver,{**style,'min_size':size},force=force)
                 if lettering is not None:
                     return lettering
         pending = [item for item in active if rows[item[0]]['status'] != 'automatic_composed']

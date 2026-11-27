@@ -41,8 +41,13 @@ def rejection_reasons(unit):
     if unit.disposition != 'blocked':
         return ('strict_preview_available',)
     reasons = ['non_waivable:'+r for r in unit.blocking_reasons if r not in WAIVABLE]
-    reasons.extend('non_waivable_structure:'+r for r in unit.structural_reasons
-                   if r not in WAIVABLE | INFORMATIONAL_STRUCTURE)
+    permitted = WAIVABLE | INFORMATIONAL_STRUCTURE
+    # The small pronunciation guide is attached to one measured parent. Only
+    # the separately ordered main-column transcript is sent for translation.
+    if (1<len(unit.order)<len(unit.member_ids) and
+            'main_columns_with_corroborated_side_reading' in unit.lexical_reasons):
+        permitted = permitted | {'tentative_annotation_ownership'}
+    reasons.extend('non_waivable_structure:'+r for r in unit.structural_reasons if r not in permitted)
     if unit.selected.origin != 'raw_main_reading':
         reasons.append('requires_exact_raw_main_reading')
     if not 0 < len(unit.selected.text) <= 1000 or not unit.selected.text.strip():

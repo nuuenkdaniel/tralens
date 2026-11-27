@@ -628,7 +628,11 @@ def confirms_raw(record, unit, proposal, image, detections=()):
     # The independent column join must also identify this exact member sequence.
     text=unit.selected.text
     punctuation_only=(record['readings']==[text,text,text+'。'] and column_passage(evidence)==text)
-    if not punctuation_only and not all(isinstance(s,str) and normalized(s)==normalized(text) for s in record['readings']):
+    # A terminal small tsu clips the sound. Three views agreeing on that
+    # extra beat still corroborate every kana that the detector read.
+    ending_only = (len(unit.order)==1 and re.fullmatch(r'[ぁ-ゖァ-ヺー]{2,12}',text)
+                   and record['readings'] in ([text+'っ']*3,[text+'ッ']*3))
+    if not punctuation_only and not ending_only and not all(isinstance(s,str) and normalized(s)==normalized(text) for s in record['readings']):
         from .masked_lines import source_views
         weak=weak_member(evidence,record['readings']) if proposal.get('crop_safe') else None
         member=record.get('weak_member',{})

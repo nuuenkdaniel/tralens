@@ -255,7 +255,7 @@ def load_fonts(manifest):
 def break_positions(text):
     """Legal insertion offsets; preserve all original whitespace/punctuation.
 
-    Break after ordinary spaces or a single existing hyphen between letters/digits.
+    Break after ordinary or full-width spaces, or a single existing hyphen between letters/digits.
     U+2011, dash runs, leading hyphens and punctuation-only suffixes are not sites.
     """
     # An interrupted first syllable belongs to the following word. A break
@@ -263,7 +263,7 @@ def break_positions(text):
     onsets = {m.end(1) for m in re.finditer(r"(?i)(?<![A-Za-z])([a-z]{1,2})[-‐]\1[a-z]",text)}
     positions = [0]
     for i, char in enumerate(text):
-        if char == " " and i+1 < len(text) and text[i+1] != " " and text[:i+1].strip():
+        if char in (" ", "\u3000") and i+1 < len(text) and not text[i+1].isspace() and text[:i+1].strip():
             positions.append(i+1)
         elif char in ("-", "\u2010") and 0 < i < len(text)-1 and text[i-1].isalnum() and text[i+1].isalnum() and i not in onsets:
             positions.append(i+1)
@@ -369,13 +369,13 @@ class LayoutWork:
 def validate_text(text, coverage):
     """Check exact target support before cleanup backends or layout search."""
     require(type(text) is str and 0 < len(text) <= 1000 and text.strip(), "text budget/blank")
-    require(all(c in "\n♪♫♡♥" or (32 <= ord(c) < 127) or
+    require(all(c == "\n" or unicodedata.category(c) == "Zs" or (32 <= ord(c) < 127) or
                 (unicodedata.category(c)[0] in ("L", "M") and
                  (unicodedata.name(c, "").startswith(('LATIN ', 'GREEK ', 'HIRAGANA ', 'KATAKANA ', 'KATAKANA-HIRAGANA ',
                      'CJK UNIFIED IDEOGRAPH-', 'CJK COMPATIBILITY IDEOGRAPH-')) or
                   unicodedata.category(c)[0] == "M")) or
                 unicodedata.category(c)[0] == "P" or
-                (unicodedata.category(c) == "Sm" and unicodedata.bidirectional(c) == "ON")
+                (unicodedata.category(c)[0] in ("S", "N") and unicodedata.bidirectional(c) in ("ON","ET","EN","L"))
                 for c in text), "supported horizontal text required")
     require(all(ord(c) in coverage for c in text if c != "\n"), "missing glyph coverage")
 

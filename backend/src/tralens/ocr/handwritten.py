@@ -194,15 +194,22 @@ def trailing_kana(image, parent, reader, detector):
     return reading,polygon,upper,float(result[0]['rec_scores'][0])
 
 
+def small_kana_candidate(parent):
+    return (parent.confidence < .8 and re.fullmatch(r'[一-鿿]{1,2}[やゆよヤユヨ]',parent.text))
+
+
 def clipped_handwriting(image, parent, boxes, reader):
     """Recover a short kana ending below a detector line with a suspect Latin tip."""
     from .crop_readings import views
     x,y,r,b = parent.bbox
     w,h = r-x+1,b-y+1
-    if not (50<=w<=225 and 42<=h<=200 and re.fullmatch(r'[一-鿿ぁ-ゖァ-ヺ]{1,6}[A-Za-z]',parent.text)):
+    small_kana = small_kana_candidate(parent)
+    if not (50<=w<=225 and 42<=h<=200 and (small_kana or re.fullmatch(r'[一-鿿ぁ-ゖァ-ヺ]{1,6}[A-Za-z]',parent.text))):
         return
     prefix = reader(image.crop((x,y,r+1,b+1)))
-    if not isinstance(prefix,str) or not re.fullmatch(re.escape(parent.text[:-1])+r'[ぁ-ゖァ-ヺ]',prefix):
+    expected = (r'[ぁ-ゖァ-ヺ]{1,2}'+parent.text[-1].translate(str.maketrans('やゆよヤユヨ','ゃゅょャュョ'))
+                if small_kana else re.escape(parent.text[:-1])+r'[ぁ-ゖァ-ヺ]')
+    if not isinstance(prefix,str) or not re.fullmatch(expected,prefix):
         return
     left,top = max(0,x-w//8),max(0,y-h//8)
     chip = image.crop((left,top,min(image.width,r+w//2),min(image.height,b+h))).convert('L')
@@ -294,7 +301,7 @@ def discover(engine, image, reader):
         small.ocr_metadata = {'candidates':{'paddle':reading,'hayai':reading},'parent_detection':parent.box_id}
         current[current.index(parent)] = heading
         current.append(small)
-    for parent in [v for v in original if v in current and re.search(r'[一-鿿ぁ-ゖァ-ヺ][A-Za-z]$',v.text)][:6]:
+    for parent in [v for v in original if v in current and (re.search(r'[一-鿿ぁ-ゖァ-ヺ][A-Za-z]$',v.text) or small_kana_candidate(v))][:6]:
         try:
             extended = clipped_handwriting(image,parent,current,reader)
         except (ValueError,OSError,RuntimeError,cv2.error):

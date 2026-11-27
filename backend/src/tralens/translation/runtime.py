@@ -511,7 +511,8 @@ class PreviewTranslator:
                                and len({v for v in nearby if re.match(r'\[[A-Za-z]{2}',v)})>=2
                                and len({v for v in nearby if '.' in v and is_printed_literal(v)})>=2)
                 toolbar = bool(self.context_crop and (clipped_tab or disputed_toolbar_label(unit,nearby)))
-                adverb = mimetic_adverb(source) if not cue else ''
+                handwritten = 'corroborated_handwritten_ending' in unit.selected.evidence_json
+                adverb = mimetic_adverb(source,handwritten=handwritten) if handwritten or not cue else ''
                 topic = preceding_topic(source,unit,self.terminology_units)
                 expressive = positive_reaction(source)
                 connective = detached_connective(source)
@@ -590,6 +591,10 @@ class PreviewTranslator:
                 if prompt := self_contained_prompt(source,nearby):
                     message['content'] = prompt
                     rendition_evidence['self_contained_prompt'] = True
+                if handwritten and adverb and message.get('images'):
+                    message['content'] = (f'The handwritten Japanese adverb {source} labels a movement. Look at the '
+                        'nearby person or object. Give the short action effect an English comic would print. '
+                        'Use the base form for a verb. Output only the lettering.')
                 if unit.selected.origin=='raw_main_reading' and 'printed_annotation' in unit.selected.evidence_json:
                     from .rendition import annotation_guide
                     native=strict_json(unit.selected.evidence_json)
@@ -896,6 +901,8 @@ class PreviewTranslator:
                         failed=notify({'attempt':attempts,'status':'response','purpose':retry_policy,'response_json':raw})
                         if failed is not None:return failed
                         candidate=candidate.text if isinstance(candidate,Generation) else candidate
+                        if retry_policy == rendition.PRINTED_SPELLING:
+                            candidate = rendition.verified_spelling(unit.selected.text,primary,candidate)
                         if retry_policy == rendition.NOUN_LABEL:
                             label = strict_json(candidate)
                             if not isinstance(label,dict) or not isinstance(label.get('label'),str):
