@@ -3,7 +3,7 @@ const root = $("#root"),
   sheet = $("#sheet");
 const defaults = {
   translator: "local",
-  paint: "classical",
+  paint: "auto",
   protection: "all",
   direction: "rtl",
   layout: "single",
