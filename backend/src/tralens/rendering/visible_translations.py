@@ -31,7 +31,7 @@ def display_counts(rows):
     counts = {name:sum(row.get('display_status')==status for row in rows)for name,status in (
         ('clean_replacements','clean'),('patch_backed_translations','patch'),('nearby_captions','caption'),
         ('intentionally_unchanged','unchanged'),('available_not_displayed','undisplayed'),('missing_translations','missing'))}
-    if any('reconstruction' in row for row in rows):
+    if any('reconstruction' in row or row.get('display_status') == 'aggressive' for row in rows):
         counts.update(learned_reconstructions=sum(row.get('display_status')=='learned' for row in rows),
             aggressive_replacements=sum(row.get('display_status')=='aggressive' for row in rows))
     return counts
@@ -167,7 +167,153 @@ def place(rgb, source_bounds, own, blocked, text, font_data, coverage, style, *,
     return 'caption',patch,lettering,xy,proof,attempts
 
 
-def display(rgb, raw, units, rows, native_clean, native_text, native_composite, font_data, coverage, style, *, max_displays=MAX_ATTEMPTS, native_erase=None, font_resolver=None, protect_artwork=True):
+def overlap_owners(bounds, members, polygons, own, blocked, reserved):
+    """Resolve overlapping OCR boxes locally. A tighter centered box can own a glyph."""
+    x,y,r,b = bounds
+    if (r-x)*(b-y) > MAX_LOCAL_PIXELS:
+        return blocked
+    yy,xx = np.ogrid[y:b,x:r]
+    nearest = np.full((b-y,r-x),np.inf)
+    winner = np.zeros(nearest.shape,bool)
+    for identity, polygon in polygons.items():
+        xs,ys = zip(*polygon)
+        l,t,right,bottom = min(xs),min(ys),max(xs),max(ys)
+        if right<x or bottom<y or l>=r or t>=b:
+            continue
+        w,h = max(1,right-l),max(1,bottom-t)
+        cost = ((2*xx-l-right)/w)**2 + ((2*yy-t-bottom)/h)**2 + .25*math.log(w*h)
+        local = np.zeros(nearest.shape,np.uint8)
+        cv2.fillPoly(local,[np.asarray(polygon,np.int32)-[x,y]],1)
+        take = (local!=0) & (cost<nearest)
+        nearest[take] = cost[take]
+        winner[take] = identity in members
+    result = blocked.copy()
+    roi = np.s_[y:b,x:r]
+    result[roi] &= ~(winner & own[roi] & ~reserved[roi])
+    return result
+
+
+def outlined_color_plate(crop, source, protected):
+    """On dark art, infer behind white-rimmed colored strokes as whole components."""
+    if np.median(crop[source].max(1)) > 150:
+        return None
+    peak = crop.max(2)
+    bright = (peak > 150).astype(np.uint8)
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(bright,8)
+    chroma = np.ptp(crop,axis=2)
+    white = (crop.min(2)>178) & (chroma<60)
+    color = chroma>75
+    white_counts = np.bincount(labels[white], minlength=len(stats))
+    color_counts = np.bincount(labels[color], minlength=len(stats))
+    x,y,w,h,area = stats.T
+    candidates = ((area>=8) & (white_counts>.20*area) & (color_counts>.08*area) &
+                  (x>0) & (y>0) & (x+w<crop.shape[1]) & (y+h<crop.shape[0]))
+    candidates[0] = False
+    touched = np.bincount(labels[source],minlength=len(stats))
+    seeds = candidates & (touched>.18*area)
+    if not seeds.any():
+        return None
+    # Match nearby detached marks to the ink color of a confirmed stroke.
+    hue = cv2.cvtColor(crop,cv2.COLOR_RGB2HSV)[:,:,0]
+    colors = np.bincount(hue[color & seeds[labels]],minlength=180)
+    seed_hue = colors.argmax()
+    diff = abs(hue.astype(np.int16)-seed_hue)
+    same = color & (np.minimum(diff,180-diff)<13)
+    matched = np.bincount(labels[same],minlength=len(stats)) > .60*color_counts
+    candidates &= matched
+    if not (candidates & seeds).any():
+        return None
+    reach = min(28,max(6,max(int(w[seeds].max()),int(h[seeds].max()))))
+    hits = np.bincount(labels[p.dilate(source,reach)],minlength=len(stats))
+    commit = p.dilate((candidates & (hits>.25*area))[labels],2) & ~protected
+    # A detached colored mark can touch a bright panel line. Grow from its
+    # colored core through a narrow pale rim instead of absorbing the line.
+    cores = same & (peak>150)
+    _,core_ids,core_stats,_ = cv2.connectedComponentsWithStats(cores.astype(np.uint8),8)
+    in_source = np.bincount(core_ids[p.dilate(source,3)],minlength=len(core_stats))
+    attached = (in_source>.35*core_stats[:,4]) & (core_stats[:,4]>=3)
+    attached[0] = False
+    core = attached[core_ids]
+    surround = p.dilate(core,4) & white
+    rim = (p.dilate(surround,2) | p.dilate(core,2)) if surround.any() else np.zeros_like(core)
+    commit |= rim & ~protected
+    if not commit.any():
+        return None
+    # Neighboring bright strokes must not serve as samples, even where only the
+    # current source is allowed to commit pixels to the page.
+    inference = p.dilate(candidates[labels] | rim,4)
+    plate = cv2.inpaint(crop,inference.astype(np.uint8)*255,3,cv2.INPAINT_TELEA)
+    return plate,commit,'outlined_color_inpaint'
+
+
+def source_cleanplate(crop, source, protected, *, short_effect):
+    from .aggressive import cheap
+
+    erase = p.dilate(source, 2) & ~protected
+    n.require(erase.any() and (~erase).any(), 'no local source or background available')
+    outlined = outlined_color_plate(crop, source, protected) if short_effect else None
+    if outlined is not None:
+        return outlined
+    # Carry a high-contrast stroke through a clipped box edge if the connected
+    # component still fits the lettering scale and belongs mainly to this source.
+    color = np.median(crop[erase],axis=0)
+    distance = np.max(np.abs(crop.astype(np.int16)-color),axis=2)
+    ring = p.dilate(erase,4) & ~erase & ~protected
+    if ring.any() and (distance[erase]<35).mean()>.44 and (distance[ring]<35).mean()>.4:
+        _,labels,stats,_ = cv2.connectedComponentsWithStats((distance>65).astype(np.uint8),8)
+        hits = np.bincount(labels[erase],minlength=len(stats))
+        _,_,w,h = cv2.boundingRect(erase.astype(np.uint8))
+        accept = (hits>.24*stats[:,4]) & (stats[:,2]<=w+10) & (stats[:,3]<=h+10)
+        accept[0] = False
+        erase |= p.dilate(accept[labels],2) & ~protected
+        if (distance[source]<4).mean()>.45 and (distance[ring]<4).mean()>.40:
+            plate = crop.copy()
+            plate[erase] = color
+            return plate,erase,'dominant_source_surface'
+    plate,method = cheap(crop,erase,protected)
+    return plate,erase,method
+
+
+def replace_at_source(rgb, bounds, own, blocked, text, font_data, coverage, style):
+    """Last resort for replace-all: clean the owned polygons and letter the same region."""
+    left, top, right, bottom = bounds
+    width, height = right - left, bottom - top
+    # Tall Japanese columns often need a little extra horizontal room for English.
+    margin = min(64, max(8, height // 5))
+    context = max(24, min(56, max(width,height)//2))
+    x, y = max(0, left - max(context,margin)), max(0, top - context)
+    r, b = min(rgb.width, right + max(context,margin)), min(rgb.height, bottom + context)
+    n.budget_check((r-x)*(b-y) <= 4 * MAX_LOCAL_PIXELS, 'source replacement crop budget')
+    protected = blocked[y:b, x:r]
+    source = own[y:b, x:r]
+    crop = np.asarray(rgb.crop((x,y,r,b)))
+    clean, erase, method = source_cleanplate(crop, source, protected, short_effect=len(text)<=20 and max(width,height)<=200)
+    # Use the original box first. Relax the type floor only after trying a wider box.
+    paper = np.median(clean[erase], axis=0).mean() >= 128
+    lettering = {**style, 'fill': [0,0,0] if paper else [255,255,255],
+                 'outline_fill': [255,255,255] if paper else [0,0,0], 'outline': 1}
+    for extra, minimum, shift in ((0,style['min_size'],0), (margin,style['min_size'],0),
+                                  (margin,8,0), (0,8,-height//4), (0,8,height//4)):
+        room = np.zeros_like(erase)
+        room[max(0,top-y+shift):max(0,bottom-y+shift), max(0,left-x-extra):right-x+extra] = True
+        room &= ~protected
+        try:
+            layer, proof = n.layout(text, font_data, coverage, Image.fromarray(room.astype(np.uint8)*255),
+                                    {**lettering,'min_size':minimum})
+            break
+        except n.ResourceLimit:
+            raise
+        except ValueError:
+            continue
+    else:
+        raise ValueError('no exact source-local lettering fits clear of neighboring text')
+    mask = erase | (np.asarray(layer.getchannel('A')) != 0)
+    patch = Image.fromarray(clean).convert('RGBA')
+    patch.putalpha(Image.fromarray(mask.astype(np.uint8)*255))
+    return 'aggressive', patch, layer, (x,y), proof, [{'route':'source_local_replacement','cleanup':method}]
+
+
+def display(rgb, raw, units, rows, native_clean, native_text, native_composite, font_data, coverage, style, *, max_displays=MAX_ATTEMPTS, native_erase=None, font_resolver=None, protect_artwork=True, replace_all=False):
     """Independent post-clean display pass. Failures never roll back native edits."""
     started = time.monotonic()
     shape = (rgb.height,rgb.width)
@@ -176,7 +322,9 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
     footprint = np.zeros(shape,bool)
     native_alpha = np.asarray(native_text.getchannel('A')) != 0
     native_erase = np.any(np.asarray(native_clean) != np.asarray(rgb),axis=2) if native_erase is None else native_erase
-    reserved = p.dilate(native_alpha | native_erase,2)
+    reserved = native_alpha | native_erase
+    if not replace_all:
+        reserved = p.dilate(reserved,2)
     counts = np.zeros(shape,np.uint16)
     polygons = {}
     pixels = rgb.width*rgb.height
@@ -230,11 +378,23 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
             x,y,w,h = cv2.boundingRect(own.astype(np.uint8))
             n.require(w > 0 and h > 0,'missing visible translation source geometry')
             blocked = p.dilate(counts > own_count,2) | reserved
-            kind,patch,lettering,xy,proof,routes = place(rgb,(x,y,x+w,y+h),own,blocked,
-                row['binding']['text'],font_data,coverage,style,protect_artwork=protect_artwork)
+            args = (rgb,(x,y,x+w,y+h),own,blocked,row['binding']['text'],font_data,coverage,style)
+            placement = None
+            if replace_all:
+                try:
+                    source_blocked = (counts > own_count) | reserved
+                    roi = np.s_[y:y+h,x:x+w]
+                    if ((counts[roi]>own_count[roi]) & own[roi]).any():
+                        source_blocked = overlap_owners(args[1],{key(k) for k in row['binding']['member_ids']},
+                                                        polygons,own,source_blocked,reserved)
+                    placement = replace_at_source(rgb,args[1],own,source_blocked,*args[4:])
+                    blocked = source_blocked
+                except ValueError:
+                    pass
+            kind,patch,lettering,xy,proof,routes = placement or place(*args,protect_artwork=protect_artwork)
             px,py = xy;ph,pw = patch.height,patch.width
-            gx,gy = proof.get('caption_bounds',[px,py])[:2]
-            proof.update(page_tile_offset=list(xy), glyph_page_origin=[gx+PADDING,gy+PADDING])
+            ink = lettering.getchannel('A').getbbox()
+            proof.update(page_tile_offset=list(xy), glyph_page_origin=[px+ink[0],py+ink[1]])
             mask = np.asarray(patch.getchannel('A')) != 0
             alpha = np.asarray(lettering.getchannel('A')) != 0
             n.require(not (alpha & ~mask).any() and not (mask & blocked[py:py+ph,px:px+pw]).any(),
@@ -243,9 +403,9 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
             fallback_text.alpha_composite(lettering,dest=xy)
             footprint[py:py+ph,px:px+pw] |= mask
             occupied = np.zeros(shape,bool);occupied[py:py+ph,px:px+pw] = mask
-            reserved |= p.dilate(occupied,2)
+            reserved |= occupied if kind == 'aggressive' else p.dilate(occupied,2)
             tiles[i] = patch,lettering,xy
-            row.update(display_status=kind,source_visibility='source_removed_unverified' if row.get('removal_fallback',{}).get('status')=='removed'
+            row.update(display_status=kind,source_visibility='source_removed_unverified' if kind=='aggressive' or row.get('removal_fallback',{}).get('status')=='removed'
                 else 'original_retained' if kind=='caption' else 'partly_covered_source_remnants_unverified')
             attempt.update(status='displayed',kind=kind,warning=WARNING,source_bounds=[x,y,x+w,y+h],
                 bounds=[px,py,px+pw,py+ph],footprint_pixels=int(mask.sum()),
@@ -256,7 +416,7 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
                 original_dark_pixels_covered=int((mask & (np.asarray(rgb)[py:py+ph,px:px+pw].min(axis=2)<180)).sum()),
                 occlusion_scope='original contrast only; not semantic artwork classification',
                 source_polygon_pixels=int(own.sum()),source_text_removal_verified=False,
-                artwork_reconstruction=False,artwork_obscured_possible=True,routes=routes)
+                artwork_reconstruction=kind=='aggressive',artwork_obscured_possible=True,routes=routes)
         except (ValueError,OSError,KeyError,TypeError) as error:
             attempt.update(reason=str(error),reason_code='display_placement_failed')
     text = Image.alpha_composite(native_text,fallback_text)

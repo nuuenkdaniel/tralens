@@ -835,17 +835,6 @@ select:hover:not(:disabled) {
 }
 .pdf-thumb { display:grid; place-items:center; height:77px; border-radius:5px; color:var(--accent); background:var(--soft); font-weight:650 }
 
-.read-english {
-  position: absolute;
-  bottom: 0.5rem;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 1;
-  min-height: 44px;
-  white-space: nowrap;
-  background: #193d32;
-  color: white;
-}
 .reading-text { padding-left: 1.6rem; }
 .reading-text li { margin: 1rem 0; }
 .reading-text svg { display: block; height: auto; width: auto; max-height: 5rem; max-width: 100%; }
@@ -853,10 +842,6 @@ select:hover:not(:disabled) {
 
 #import details[open] > summary { margin-bottom: 1rem; }
 .import-summary { overflow-wrap: anywhere; }
-.reader.clean .imagebox:not([data-reading-fallback]) .read-english:not(:focus-visible) {
-  opacity: 0;
-  pointer-events: none;
-}
 .previous-page {
   position: absolute;
   inset: 0;

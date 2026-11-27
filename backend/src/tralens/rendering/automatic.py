@@ -1316,7 +1316,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 rgb, raw, units, report['units'], clean, native_text, native_composite, *faces.primary, style,
                 font_resolver=faces.resolve,
                 max_displays=max(0,min(visible_translations.MAX_ATTEMPTS,(MAX_ARTIFACTS-24-14*len(plans))//3)),native_erase=erase_union,
-                protect_artwork=removal_policy=='aggressive')
+                protect_artwork=removal_policy=='aggressive',
+                replace_all=removal_policy=='aggressive' and confidence_settings is None)
             report['display_summary'] = display_summary
             report['pixel_audit_scope'] = 'native clean/text before separately audited opaque display overlays'
         except (ValueError, OSError, KeyError, TypeError) as error:

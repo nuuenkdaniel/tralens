@@ -21,6 +21,29 @@ class PlacementTests(unittest.TestCase):
         blocked=np.zeros_like(own) if blocked is None else blocked
         return v.place(self.image,bounds,own,blocked,text,self.font,self.coverage,self.style)
 
+    def test_replace_all_cleans_source_and_preserves_neighbor_pixels(self):
+        art = np.full((280,360,3),247,np.uint8)
+        own = np.zeros(art.shape[:2],bool)
+        own[70:112,120:198] = True
+        art[81:99,128:191:5] = 0
+        protected = np.zeros_like(own)
+        protected[:,193:197] = True
+        art[protected] = 22
+        kind, patch_layer, letters, (x,y), proof, _ = v.replace_at_source(
+            Image.fromarray(art), (120,70,198,112), own, protected, 'Hello!', self.font,self.coverage,self.style)
+        mask = np.asarray(patch_layer.getchannel('A')) != 0
+        self.assertEqual(kind,'aggressive')
+        self.assertEqual(proof['original_text'],'Hello!')
+        self.assertIsNotNone(letters.getchannel('A').getbbox())
+        self.assertFalse((mask & protected[y:y+mask.shape[0],x:x+mask.shape[1]]).any())
+        self.assertTrue((np.asarray(patch_layer)[81-y:99-y,128-x:191-x:5,:3] == 247).all())
+
+    def test_heart_glyphs_are_subject_to_the_same_font_coverage_check(self):
+        text = 'Hello ♡♥'
+        n.validate_text(text,set(map(ord,text)))
+        with self.assertRaisesRegex(ValueError,'missing glyph'):
+            n.validate_text(text,set(map(ord,text)) - {ord('♡')})
+
     def test_opaque_patch_does_not_need_light_background_or_native_strokes(self):
         with patch('cv2.inpaint',side_effect=AssertionError('no guessed reconstruction')):
             kind,patch_layer,letters,xy,proof,_=self.place((80,60,210,180),'Hello there!')

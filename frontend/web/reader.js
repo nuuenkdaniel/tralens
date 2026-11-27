@@ -526,7 +526,6 @@ function pageImage(p, mode) {
     " · " +
     (translated ? "translated" : "original") +
     '" loading="lazy">' +
-    (reading ? '<button class="read-english" data-action="transcript" data-id="' + p.id + '">Read English</button>' : "") +
     (mode !== "original" && !p.ready
       ? '<small class="badge">Original</small>'
       : "") +
@@ -1057,7 +1056,13 @@ function menu(kind) {
         btn("delete-confirm", "Delete manga", "danger") +
         "</div>",
     );
-  if (kind === "page-menu")
+  if (kind === "page-menu") {
+    const {chapter} = current();
+    const index = chapter.pages.indexOf(page);
+    const shown = prefs.layout === "spread" && view !== "compare" ? chapter.pages.slice(index, index + 2) : [page];
+    const transcripts = shown.filter(p => p.has_text).map(p =>
+      '<button type="button" data-action="transcript" data-id="' + esc(p.id) + '">Read English' +
+      (shown.length > 1 ? ' · Page ' + (chapter.pages.indexOf(p) + 1) : '') + '</button>').join("");
     return modal(
       "Page actions",
       '<div class="menu-list"><a class="btn" href="' +
@@ -1070,10 +1075,12 @@ function menu(kind) {
             best(page) +
             '" download="translated.png">Download translation</a>'
           : "") +
+        transcripts +
         (["queued", "running", "waiting"].includes(page.status) ? btn("skip-page", "Skip translation") : btn("retry-page", "Translate again")) +
         btn("fullscreen", "Toggle full screen") +
         "</div>",
     );
+  }
 }
 async function openReading(pageId, point) {
   const page = pagesOf(current().book).find(p => p.id === pageId);

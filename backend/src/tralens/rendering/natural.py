@@ -369,7 +369,7 @@ class LayoutWork:
 def validate_text(text, coverage):
     """Check exact target support before cleanup backends or layout search."""
     require(type(text) is str and 0 < len(text) <= 1000 and text.strip(), "text budget/blank")
-    require(all(c in "\n♪♫" or (32 <= ord(c) < 127) or
+    require(all(c in "\n♪♫♡♥" or (32 <= ord(c) < 127) or
                 (unicodedata.category(c)[0] in ("L", "M") and
                  (unicodedata.name(c, "").startswith(('LATIN ', 'GREEK ', 'HIRAGANA ', 'KATAKANA ', 'KATAKANA-HIRAGANA ',
                      'CJK UNIFIED IDEOGRAPH-', 'CJK COMPATIBILITY IDEOGRAPH-')) or
