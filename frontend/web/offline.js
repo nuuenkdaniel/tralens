@@ -57,7 +57,7 @@ export class OfflineLibrary {
       if (!blob) throw Error("Page unavailable on this device.");
       latest.position = index;
       c.put(latest);
-      return blob;
+      return {blob, saved: latest.saved};
     });
   }
   remove(id) {
@@ -99,7 +99,7 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
           escape(r.title) + '</p>' + (r.originals ? '<p class="meta">' + r.originals + ' ' +
             (r.originals === 1 ? 'page uses' : 'pages use') + ' original artwork in this download.</p>' : '') +
           '<p class="meta" role="status">' + r.saved + ' of ' + r.urls.length + ' pages saved</p><div class="actions">' +
-          (r.saved ? button("read", "Read offline") : "") + (running ? button("pause", "Pause") :
+          ('<button class="btn primary" data-local="read"' + (r.saved ? '' : ' hidden') + '>Read offline</button>') + (running ? button("pause", "Pause") :
             (r.saved < r.urls.length ? button("resume", "Resume download") : "") + button("remove", "Remove download")) +
           '</div></section>';
       }).join("") : '<p>No chapters saved. Open a chapter in your library and choose Save offline.</p>');
@@ -109,19 +109,27 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
     const row = active?.id === id ? active : (await store.list()).find(r => r.id === id);
     if (!row || version !== serial || disposed) return;
     const i = index ?? row.position;
-    const blob = await store.page(row, i);
+    const {blob, saved} = await store.page(row, i);
     if (version !== serial || disposed || !dialog.open) return;
     releaseImage();
     objectURL = URL.createObjectURL(blob);
-    active = {...row, position: i};
+    active = {...row, saved, position: i};
+    const focused = dialog.querySelector(":focus");
     dialog.innerHTML = '<div class="offline-reader"><header class="line">' + button("list", "Downloads") +
       '<b>' + escape(row.title) + '</b></header><div class="offline-canvas"><img alt="Page ' + (i+1) +
       '" src="' + objectURL + '"></div><footer class="line">' +
       '<button class="btn" data-local="prev"' + (i ? '' : ' disabled') + '>Previous</button>' +
-      '<label>Page <select aria-label="Saved page">' + Array.from({length: row.saved}, (_, n) =>
-        '<option value="' + n + '"' + (n===i ? ' selected' : '') + '>' + (n+1) + '</option>').join("") +
-      '</select> / <span data-total>' + row.saved + '</span></label><button class="btn" data-local="next"' +
-      (i+1 < row.saved ? '' : ' disabled') + '>Next</button></footer></div>';
+      '<label class="offline-progress"><output>Page ' + (i+1) + ' of <span data-total>' + saved +
+      '</span></output><input type="range" aria-label="Saved page" min="1" max="' + saved + '" value="' + (i+1) +
+      '" dir="' + (direction() === "rtl" ? "rtl" : "ltr") + '"' + (saved === 1 ? ' disabled' : '') +
+      '></label><button class="btn" data-local="next"' +
+      (i+1 < saved ? '' : ' disabled') + '>Next</button></footer></div>';
+    const control = focused?.dataset.local;
+    if (focused?.type === "range") dialog.querySelector('input[type="range"]').focus({preventScroll:true});
+    else if (control === "prev" || control === "next") {
+      const target = dialog.querySelector('[data-local="' + control + '"]');
+      (target.disabled ? dialog.querySelector('input[type="range"]') : target).focus({preventScroll:true});
+    }
   }
   async function save(record) {
     if (controller) { await list(); return; }
@@ -142,10 +150,15 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
         abort.signal.throwIfAborted();
         await store.append(row, i, blob);
         const status = dialog.querySelector('[data-chapter-id="' + row.id + '"] [role=status]');
-        if (status) status.textContent = (i+1) + " of " + row.urls.length + " pages saved";
-        if (active?.generation === row.generation && active.saved === i) {
-          active.saved++;
-          dialog.querySelector("select").add(new Option(String(i+1), String(i)));
+        if (status) {
+          status.textContent = (i+1) + " of " + row.urls.length + " pages saved";
+          status.closest("section").querySelector('[data-local="read"]').hidden = false;
+        }
+        if (active?.generation === row.generation && active.saved <= i) {
+          active.saved = i+1;
+          const slider = dialog.querySelector('input[type="range"]');
+          slider.max = String(active.saved);
+          slider.disabled = false;
           dialog.querySelector("[data-total]").textContent = active.saved;
           dialog.querySelector('[data-local="next"]').disabled = false;
         }
@@ -173,9 +186,9 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
   }
   dialog.oncancel = e => { e.preventDefault(); back(); };
   dialog.onclose = () => { ++serial; active = null; releaseImage(); };
-  dialog.onchange = e => { if (active && e.target.matches("select")) read(active.id, Number(e.target.value)).catch(err => notify(errorMessage(err))); };
+  dialog.onchange = e => { if (active && e.target.matches('input[type="range"]')) read(active.id, Number(e.target.value) - 1).catch(err => notify(errorMessage(err))); };
   dialog.onkeydown = e => {
-    if (!active || e.target.matches("select")) return;
+    if (!active || e.target.matches('input[type="range"]')) return;
     if (["ArrowLeft", "ArrowRight"].includes(e.key)) {
       e.preventDefault(); e.stopPropagation();
       turn((e.key === "ArrowLeft") === (direction() === "rtl") ? 1 : -1);
