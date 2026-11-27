@@ -15,6 +15,9 @@ dependencies = [
     "paddlepaddle==3.3.1",
     "opencv-contrib-python==4.10.0.84",
     "scikit-learn>=1.7.2",
+    "fugashi>=1.5.2,<2",
+    "jaconv>=0.5,<1",
+    "unidic-lite==1.0.8",
 ]
 
 [dependency-groups]

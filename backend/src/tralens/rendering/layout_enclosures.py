@@ -13,6 +13,62 @@ POLICY = 'closed_original_flat_space_retry_v1'
 MAX_ENCLOSURE_PIXELS = 262144
 
 
+def stacked_paper(rgb, detections, member_ids, plan, reserved=None):
+    """Use the continuous paper behind stacked dialogue for lettering only."""
+    if plan.restored_pixels is not None or plan.background is None or min(plan.background) < 235:
+        return plan
+    x,y,w,h = cv2.boundingRect(plan.erase.astype(np.uint8))
+    pad = min(240,max(80,w,h//2))
+    left,top = max(0,x-pad),max(0,y-pad)
+    right,bottom = min(rgb.width,x+w+pad),min(rgb.height,y+h+pad)
+    if not w or (right-left)*(bottom-top) > 1_000_000:
+        return plan
+    area = np.s_[top:bottom,left:right]
+    pixels = np.asarray(rgb)[area]
+    ink = plan.erase[area]
+    paper = np.abs(pixels.astype(np.int16)-np.asarray(plan.background)).max(axis=2) <= 2
+    _,labels = cv2.connectedComponents((paper | ink).astype(np.uint8),connectivity=4)
+    owners = np.unique(labels[ink])
+    if len(owners) != 1:
+        return plan
+    surface = labels == owners[0]
+    if surface.sum() > MAX_ENCLOSURE_PIXELS or any(edge.any() for edge in (surface[0],surface[-1],surface[:,0],surface[:,-1])):
+        return plan
+    for detection in detections:
+        if detection['source_id'] in member_ids or not len(detection['polygon']):
+            continue
+        xs,ys = zip(*detection['polygon'])
+        x0,x1 = max(left,int(min(xs))),min(right,int(np.ceil(max(xs)))+1)
+        y0,y1 = max(top,int(min(ys))),min(bottom,int(np.ceil(max(ys)))+1)
+        if x0 < x1 and y0 < y1 and surface[y0-top:y1-top,x0-left:x1-left].any():
+            return plan
+    space = p.erode(surface,5)
+    if reserved is not None:
+        space &= ~reserved[area]
+    # The center of the bounding box can sit on the notch between two
+    # balloon lobes. Typeset in the widest continuous column of clean paper
+    # around the original passage, keeping both ends of each English line in it.
+    options = []
+    for fraction in (.95, .8, .65, .5):
+        height = round(h*fraction)
+        for offset in (0, (h-height)//2, h-height):
+            y0 = y-top+offset
+            runs = np.flatnonzero(np.diff(np.r_[False, space[y0:y0+height].all(axis=0), False]))
+            for x0,x1 in zip(runs[::2],runs[1::2]):
+                if x0 <= x-left+w/2 < x1:
+                    width = int(x1-x0)
+                    options.append((width*min(height,1.5*width),int(x0),y0,int(x1),y0+height))
+    if not options:
+        return plan
+    _,x0,y0,x1,y1 = max(options)
+    layout = np.zeros_like(plan.layout)
+    layout[top+y0:top+y1,left+x0:left+x1] = True
+    from .automatic import AutomaticPlan
+    return AutomaticPlan(plan.foreground,plan.erase,layout,plan.obstacles & ~layout,plan.background,
+                         {**plan.evidence,'stacked_paper_layout_pixels':int(layout.sum())})
+
+
+
 class Enclosures:
     def __init__(self, rgb, detections, geometry):
         n.budget_check(rgb.mode == 'RGB' and rgb.width*rgb.height <= p.MAX_PIXELS

@@ -16,6 +16,20 @@ from tralens.translation.contracts import Reading
 
 
 class ReplacementConfidenceTests(unittest.TestCase):
+    def test_weak_latin_over_hatching_requires_parallel_marks_outside_the_box(self):
+        from PIL import ImageDraw
+        image=Image.new('RGB',(60,80),'white')
+        draw=ImageDraw.Draw(image)
+        for y in (20,29,39):
+            for dy in (0,3,6):
+                draw.line((21,y+dy,25,y+dy+2),fill='black')
+        line=dict(confidence=.39,text='lli',polygon=[[18,16],[29,16],[29,50],[18,50]])
+        self.assertFalse(rc.pencil_hatching(image,line))
+        for y in (12,22,32):
+            draw.line((33,y,37,y+2),fill='black')
+        self.assertTrue(rc.pencil_hatching(image,line))
+        self.assertFalse(rc.pencil_hatching(image,dict(line,confidence=.95)))
+
     def setUp(self):
         self.f = fixtures.CommandTests()
         self.f.setUp()
@@ -33,6 +47,30 @@ class ReplacementConfidenceTests(unittest.TestCase):
         reading = Reading(''.join(row['text'] for row in rows), 'raw_main_reading', n.canonical(rows))
         return replace(self.unit, member_ids=ids, order=ids, readings=(reading,), selected_revision=reading.revision)
 
+    def test_unsupported_transcript_and_printed_literals(self):
+        def check(source, target, **kwargs):
+            reading = Reading(source, 'raw_main_reading', self.unit.selected.evidence_json)
+            unit = replace(self.unit, readings=(reading,), selected_revision=reading.revision)
+            return rc.original_lettering_reason(unit, target, [], (0,0,20,20), (100,100), **kwargs)
+        self.assertEqual(check('……', 'Something is wrong.')[0], 'uncorroborated_source')
+        self.assertEqual(check('……','...',reviewed_source='…')[0], 'replacement_unchanged_text')
+        self.assertIsNone(check('助けて！', 'Help!'))
+        self.assertEqual(check('foo_1', 'What happened to the screen?')[0], 'uncorroborated_source')
+        self.assertIsNone(check('foo_1', 'What happened to the screen?', reviewed_source='画面どうしたの？'))
+        self.assertEqual(check('case_1.pdf','Case one')[0], 'replacement_unchanged_text')
+        from tralens.ocr.types import printed_latin_lines
+        split = [dict(text=part,confidence=score,status='accepted') for part,score in [('ca',.99),('talog',.92)]]
+        self.assertTrue(printed_latin_lines('catalog',split))
+        self.assertFalse(printed_latin_lines('同log',split))
+        self.assertFalse(printed_latin_lines('catalog',[split[0],dict(split[1],confidence=.65)]))
+        self.assertEqual(check('$ ls -la | less', '$ ls -l all less')[0], 'replacement_unchanged_text')
+        self.assertEqual(check('s/犬[1-9','s/dog[1-9]')[0], 'replacement_unchanged_text')
+        self.assertEqual(check('s/質問/問題/g','replace the question')[0], 'replacement_unchanged_text')
+        self.assertIsNone(check('質問して！','Ask!'))
+        self.assertIsNone(check('参照 https://example.org', 'See https://example.org.'))
+        self.assertEqual(check('参照 https://example.org', 'See https://example.org.uk')[0], 'uncorroborated_source')
+        self.assertEqual(check('参照 https://exaωple.org', 'See https://exaωple.org')[0], 'uncorroborated_source')
+
     def test_preserve_existing_printed_labels_only_with_complete_raw_word_evidence(self):
         unit = self.unit_with_scores([.99, .99])
         rows = json.loads(unit.selected.evidence_json)
@@ -48,6 +86,21 @@ class ReplacementConfidenceTests(unittest.TestCase):
             self.assertFalse(rc.retains_printed_words(selected(), changed))
         rows[0]['confidence'] = .8
         self.assertFalse(rc.retains_printed_words(selected(), 'Open/Closed'))
+
+    def test_stacked_romanization_belongs_to_same_label(self):
+        reading = Reading('青木花', 'raw_main_reading', self.unit.selected.evidence_json)
+        unit = replace(self.unit, readings=(reading,), selected_revision=reading.revision)
+        def row(key, text, x, y):
+            return dict(source_id=key, confidence=.99, text=text,
+                        polygon=[[x,y],[x+32,y],[x+32,y+14],[x,y+14]])
+        def reason(rows,target='Aoki Hana'):
+            return rc.original_lettering_reason(unit,target,rows,(30,40,140,90),(500,500))
+        first,second=row(1,'Aoki',52,85),row(2,'Hana',53,99)
+        self.assertEqual(reason([second,first],'青木花 / Aoki Hana')[0],'replacement_unchanged_text')
+        self.assertIsNone(reason([second,first],'青木花 / Different Person'))
+        self.assertEqual(reason([second,first])[0], 'replacement_unchanged_text')
+        self.assertIsNone(reason([first,row(2,'Hana',99,99)]))
+        self.assertIsNone(reason([first,dict(second,confidence=.82)]))
 
     def test_weakest_line_not_average_and_exact_boundary(self):
         unit = self.unit_with_scores([1, 1, .69, 1])

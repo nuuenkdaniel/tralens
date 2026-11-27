@@ -10,6 +10,56 @@ from .font_fixture import synthetic_font
 
 
 class RemovalFirst(unittest.TestCase):
+    def test_compact_label_preserves_crossing_strokes_and_prior_edits(self):
+        crop = np.full((100,145,3),185,np.uint8)
+        own = np.zeros(crop.shape[:2],bool)
+        own[28:74,30:118] = True
+        for x in (43,55,69,80):
+            crop[43:58,x:x+5] = 248
+        crop[31:65,112:122] = 248  # partial glyph in an adjacent column
+        crop[68:70,10:132] = 30  # a panel rule through the detector box
+        protected = np.zeros_like(own)
+        protected[32:40,30:118] = True
+        support = np.ones_like(own)
+        report = replacement.compact_paper_label(crop,own,support,protected,
+            'NEXT',self.font,self.coverage,{'min_size':14,'max_size':24})
+        self.assertIsNotNone(report)
+        ink,tone,tile,(x,y),proof = report
+        self.assertTrue(ink[43:58,43:48].all())
+        self.assertFalse(ink[:,112:].any() or ink[68:70].any())
+        self.assertEqual(tone,185)
+        self.assertEqual(proof['original_text'],'NEXT')
+        glyph = np.zeros_like(own)
+        glyph[y:y+tile.height,x:x+tile.width] = np.asarray(tile.getchannel('A'))>0
+        self.assertFalse((glyph & (protected | ((crop[:,:,0]!=185) & ~ink))).any())
+        self.assertIsNone(replacement.compact_paper_label(crop,own,~support,protected,
+            'NEXT',self.font,self.coverage,{'min_size':14,'max_size':24}))
+
+    def test_inset_balloon_is_protected_where_a_printed_paragraph_crosses_it(self):
+        image=Image.new('RGB',(410,220),'white')
+        draw=ImageDraw.Draw(image)
+        draw.ellipse((235,45,344,157),outline='black',width=3)
+        draw.line((278,84,286,95),fill='black',width=2)
+        def row(identity,box,word):
+            l,t,r,b=box
+            return {'source_id':identity,'text':word,'polygon':[[l,t],[r,t],[r,b],[l,b]]}
+        raw=[row(i,(29,60+i*20,258,77+i*20),'ここに書かれた記事の内容') for i in range(3)]
+        raw.append(row(3,(271,78,301,108),'え'))
+        geom=aggressive.Geometry(raw,image.size,np.asarray(image))
+        bounds,_,guard=geom.local([0,1,2],np.zeros((220,410),bool),source_priority=True)
+        x,y,_,_=bounds
+        self.assertTrue(guard[100-y,236-x])
+        self.assertFalse(guard[100-y,204-x])
+        # The paragraph can stop in one spatial grid cell while the inset's
+        # text is in the next. Its left outline still crosses the paragraph.
+        clipped=aggressive.Geometry([row(i,(20,60+i*20,247,77+i*20),'ここに書かれた記事の内容')
+                                     for i in range(3)]+[raw[-1]],image.size,np.asarray(image))
+        bounds,_,guard=clipped.local([0,1,2],np.zeros((220,410),bool),margin=0,source_priority=True)
+        x,y,right,_=bounds
+        self.assertLess(right,256)
+        self.assertTrue(guard[100-y,236-x])
+        self.assertFalse(guard[100-y,204-x])
+
     def setUp(self):
         self.image=Image.new('RGB',(420,300),'white')
         draw=ImageDraw.Draw(self.image)
@@ -24,6 +74,17 @@ class RemovalFirst(unittest.TestCase):
         mask=np.zeros((300,420),bool)
         return replacement.finish(self.image,self.raw,rows or self.rows,self.image.copy(),
             Image.new('RGBA',self.image.size),mask,mask,self.font,self.coverage,self.style)
+
+    def test_vertical_effect_fits_after_a_panel_rule_takes_the_center(self):
+        room=np.zeros((98,96),bool)
+        room[10:87,32:47]=True
+        own=np.zeros_like(room)
+        own[30:65,22:45]=True
+        layer,proof=aggressive.vertical_effect_layout('Rustle',self.font,self.coverage,room,own,self.style)
+        self.assertEqual(proof['original_text'],'Rustle')
+        self.assertTrue(proof['quarter_turn_clockwise'])
+        self.assertFalse(((np.asarray(layer.getchannel('A'))>0) & ~room).any())
+
 
     def test_short_effect_shifts_clear_of_neighbor_without_losing_ink(self):
         polygon = Image.new('L',(160,100))
@@ -44,6 +105,19 @@ class RemovalFirst(unittest.TestCase):
         self.assertFalse((alpha & blocked).any())
         self.assertFalse((alpha & (np.asarray(content)==0)).any())
 
+    def test_menu_repair_preserves_frame_and_alternating_screen_shading(self):
+        crop = np.full((50,120,3),200,np.uint8)
+        crop[:,::3] = 211
+        crop[12:15] = 15
+        own = np.zeros((50,120),bool)
+        own[14:32,7:108] = True
+        original = crop.copy()
+        crop[18:28,29:32] = 20
+        repaired = aggressive.printed_menu_fill(crop,own,own)
+        np.testing.assert_array_equal(repaired,original)
+        crop[own] = (18,110,165)
+        self.assertIsNone(aggressive.printed_menu_fill(crop,own,own))
+
     def test_handwriting_placement_avoids_rule_on_clean_plate(self):
         mask = Image.new('L',(200,120),255)
         style = {**self.style,'max_size':18}
@@ -56,6 +130,18 @@ class RemovalFirst(unittest.TestCase):
         self.assertGreaterEqual(metrics['size'],style['min_size'])
         alpha = np.asarray(moved.getchannel('A')) != 0
         self.assertFalse(alpha[:,99:102].any())
+
+    def test_quarter_turn_fits_every_glyph_between_two_panel_lines(self):
+        paper = np.zeros((215,100),bool)
+        paper[12:203,36:67] = True
+        layer, metrics = aggressive.narrow_strip_layout('The gate closes at dusk!',self.font,self.coverage,paper,self.style)
+        alpha = np.asarray(layer.getchannel('A')) != 0
+        self.assertEqual(metrics['original_text'],'The gate closes at dusk!')
+        self.assertTrue(metrics['quarter_turn_clockwise'])
+        self.assertFalse((alpha & ~paper).any())
+        self.assertEqual(alpha.sum(),metrics['local_alpha_pixels'])
+        with self.assertRaises(ValueError):
+            aggressive.narrow_strip_layout('This sentence cannot fit',self.font,self.coverage,paper & False,self.style)
 
     def test_narrow_column_is_removed_and_exact_english_is_widened(self):
         rows,clean,text,composite,erase,layout,_,summary=self.finish()
@@ -134,13 +220,14 @@ class RemovalFirst(unittest.TestCase):
         self.assertTrue(np.array_equal(np.asarray(clean)[~erase], np.asarray(self.image)[~erase]))
         self.assertIsNotNone(text.getbbox())
 
-    def test_placement_failure_cannot_cancel_cleanup(self):
+    def test_placement_failure_preserves_source_pixels(self):
         with patch.object(replacement,'patch_layout',side_effect=ValueError('no room')):
             rows,clean,text,_,erase,_,_,summary=self.finish()
-        self.assertEqual(rows[0]['status'],'source_removed')
-        self.assertEqual(summary['removed'],1)
+        self.assertEqual(rows[0]['removal_fallback']['status'],'blocked')
+        self.assertEqual(summary['removed'],0)
         self.assertIsNone(text.getbbox())
-        self.assertTrue((np.asarray(clean)[90:180,198:206]==255).all())
+        self.assertFalse(erase.any())
+        self.assertTrue(np.array_equal(clean,self.image))
         self.assertTrue(np.array_equal(np.asarray(clean)[~erase],np.asarray(self.image)[~erase]))
 
     def test_large_neighbor_footprint_cannot_veto_source_but_prior_edits_can(self):
@@ -174,8 +261,8 @@ class RemovalFirst(unittest.TestCase):
         with patch.object(replacement,'patch_layout',side_effect=ValueError('no fit anywhere')):
             result=replacement.finish(self.image,self.raw,rows,clean,text,erase,layout,self.font,
                 self.coverage,self.style)
-        self.assertEqual(result[0][0]['status'],'source_removed')
-        self.assertTrue((np.asarray(result[1])[90:180,198:206]==255).all())
+        self.assertEqual(result[0][0]['removal_fallback']['status'],'blocked')
+        self.assertTrue(np.array_equal(result[1],self.image))
 
     def test_fixed_native_crop_reduces_context_instead_of_resizing_source(self):
         raw=[{'source_id':1,'polygon':[[30,20],[510,20],[510,190],[30,190]]}]

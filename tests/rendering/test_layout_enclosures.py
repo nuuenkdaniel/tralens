@@ -30,6 +30,22 @@ def fixture(color=(255,255,255), shape='ellipse'):
 
 
 class EnclosureSpaceTests(unittest.TestCase):
+    def test_stacked_paper_changes_only_placement_and_respects_neighbors(self):
+        image=Image.new('RGB',(180,200),'white')
+        draw=ImageDraw.Draw(image)
+        draw.ellipse((45,20,150,178),outline='black',width=2)
+        for y in (65,120):
+            draw.rectangle((95,y,103,y+9),fill='black')
+        raw=[{'source_id':1,'polygon':[[90,60],[110,60],[110,135],[90,135]]}]
+        plan=a.derive_plan(image,raw,[1])
+        expanded=e.stacked_paper(image,raw,[1],plan)
+        self.assertIn('stacked_paper_layout_pixels',expanded.evidence)
+        self.assertTrue(np.array_equal(expanded.erase,plan.erase))
+        self.assertFalse((expanded.obstacles & expanded.layout).any())
+        self.assertFalse(expanded.layout[20].any())
+        foreign={'source_id':2,'polygon':[[75,70],[80,70],[80,80],[75,80]]}
+        self.assertIs(e.stacked_paper(image,raw+[foreign],[1],plan),plan)
+
     def expand(self,image,raw,plan,ids=None,reserved=None):
         geometry=a.OriginalComponents(image);geometry.bind_geometry(raw)
         return e.Enclosures(image,raw,geometry).expand(image,raw,['main'] if ids is None else ids,plan,

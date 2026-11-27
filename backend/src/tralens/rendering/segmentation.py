@@ -35,7 +35,7 @@ def model_spec(path):
 
 
 class TextMask:
-    """At most one bounded CPU forward per page, only when cheap routes fail."""
+    """Bounded CPU forward reusable by the detector and the renderer for the same page."""
     def __init__(self, rgb, spec):
         n.require(rgb.mode == 'RGB' and rgb.width*rgb.height <= 16_000_000, 'text-mask source budget/mode')
         content = n.read_explicit(Path(spec['path']), 128*1024*1024)

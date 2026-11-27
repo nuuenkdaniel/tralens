@@ -54,6 +54,16 @@ class GroupingTests(unittest.TestCase):
         self.assertEqual([{b.box_id for b in g.group} for g in groups],
                          [{0, 1}, {2, 3}])
 
+    def test_slanted_vertical_fragment_must_line_up_at_the_join(self):
+        upper = box(0, (40, 10, 60, 100))
+        neighbor = box(1, (63, 12, 83, 100))
+        def slanted(left):
+            return ocr_module.Text_Box(2, .99, [(left, 101), (left+20, 99),
+                                       (left+28, 168), (left+8, 170)], '続き')
+        groups = self.group([upper, neighbor, slanted(28)])
+        self.assertEqual([[b.box_id for b in g.group] for g in groups], [[1, 0], [2]])
+        self.assertEqual(len(self.group([upper, slanted(39)])), 1)
+
     def test_horizontal_narration_top_to_bottom(self):
         boxes = [box(2, (11, 42, 121, 52)), box(0, (10, 10, 120, 20)),
                  box(1, (12, 26, 122, 36))]

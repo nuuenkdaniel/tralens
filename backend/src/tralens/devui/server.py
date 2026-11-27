@@ -167,12 +167,17 @@ def execute_job(config, job):
         from main import run_pipeline
         if (config.crop_reader_model is not None and settings['translation_policy']=='coverage-first'
                 and not settings.get('quality_reread')):
-            kwargs.update(crop_reader_model=config.crop_reader_model, reader_presentations=True)
+            kwargs.update(crop_reader_model=config.crop_reader_model, reader_presentations=not config.reader_mode)
         if config.reader_mode:
+            if model == 'local' and config.model in ('translategemma:27b','translategemma:12b'):
+                # The Ollama request can include paging a cold model into GPU memory.
+                kwargs['timeout'] = min(300, config.job_seconds)
             from PIL import Image
             with Image.open(job['image']) as page:
                 phone_size = min(144, max(16, math.ceil(page.width * 12 / 390)))
-            kwargs.update(min_size=phone_size, max_size=min(144, max(28, math.ceil(phone_size * 1.3))))
+            # Dense balloons need the option to fit smaller type. The reader already
+            # measures the actual lettering and offers a zoomable English transcript.
+            kwargs.update(max_title_size=144, min_size=max(12, phone_size // 2), max_size=min(144, max(28, math.ceil(phone_size * 1.3))))
         model_configs = {'lama': config.reconstruction_config, 'sdxl': config.sdxl_config}
         reconstruction = settings.get('reconstruction_policy', 'classical')
         return run_pipeline(job['image'], job['directory']/'run', fonts=config.fonts,

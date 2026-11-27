@@ -24,6 +24,63 @@ def box(source_id, bounds, text="字", score=.3):
 
 
 class AutomaticUnitTests(unittest.TestCase):
+    def test_negative_request_shares_a_balloon_with_its_object(self):
+        import numpy as np
+        from tralens.ocr.types import Text_Group
+        image=Image.new('RGB',(180,165),'white')
+        draw=ImageDraw.Draw(image)
+        draw.ellipse((24,12,153,147),outline='black',width=3)
+        def column(identity,x,text):
+            return Text_Group([Text_Box(identity,.95,[(x,50),(x+20,50),(x+20,108),(x,108)],text)],
+                              method='single',direction='vertical')
+        groups=[column(1,85,'電話を'),column(2,66,'しないでください')]
+        self.assertEqual(len(a.join_shared_balloon(groups,np.asarray(image),[],set())),1)
+        draw.line((86,13,86,145), fill='black',width=3)
+        self.assertEqual(a.join_shared_balloon(groups,np.asarray(image),[],set()),groups)
+
+    def test_event_noun_and_until_clause_share_a_bounded_balloon(self):
+        import numpy as np
+        from tralens.ocr.types import Text_Group
+        image=Image.new('RGB',(245,180),'white')
+        draw=ImageDraw.Draw(image)
+        draw.ellipse((29,22,215,151),outline='black',width=3)
+        def column(x,word):
+            return Text_Box(x,.96,[(x,61),(x+22,61),(x+22,110),(x,110)],word)
+        right=Text_Group([column(153,'さて'),column(129,'電車')],direction='vertical')
+        left=Text_Group([column(106,'来るまで'),column(82,'待とう')],direction='vertical')
+        merged=a.join_shared_balloon([left,right],np.asarray(image),[],set())
+        self.assertEqual([[v.text for v in g.group] for g in merged],[['さて','電車','来るまで','待とう']])
+        draw.line((128,22,128,151),fill='black',width=3)
+        self.assertEqual(a.join_shared_balloon([left,right],np.asarray(image),[],set()),[left,right])
+
+    def test_bottom_aligned_relative_clause_needs_shared_paper_and_a_matching_case(self):
+        import numpy as np
+        from tralens.ocr.types import Text_Group
+        image=Image.new('RGB',(220,220),'white')
+        draw=ImageDraw.Draw(image)
+        draw.rectangle((20,12,191,198),outline='black',width=3)
+        def column(i,x,y,word):
+            return Text_Box(i,.96,[(x,y),(x+20,y),(x+20,166),(x,166)],word)
+        head=column(1,122,31,'目的に')
+        left=Text_Group([column(2,96,94,'応じた機材を'),column(3,70,94,'選ぼう')],direction='vertical')
+        right=Text_Group([head],direction='vertical')
+        groups=[right,left]
+        self.assertEqual(len(a.join_shared_balloon(groups,np.asarray(image),[],set())),1)
+        draw.line((119,12,119,198),fill='black',width=3)
+        self.assertEqual(a.join_shared_balloon(groups,np.asarray(image),[],set()),groups)
+
+    def test_two_distinct_baselines_separate_a_slanted_heading_from_furigana(self):
+        def line(identity,y,width,height):
+            x=20
+            return Text_Box(identity,.8,[(x,y),(x+width,y-.25*width),
+                (x+width,y-.25*width+height),(x,y+height)],'印刷された文字')
+        head=line(1,130,190,30)
+        body=line(4,253,320,30)
+        middle=[line(2,171,220,30),line(3,212,260,30)]
+        self.assertTrue(a.heading_above_slanted_rows(head,body,middle))
+        self.assertFalse(a.heading_above_slanted_rows(head,body,middle[:1]))
+        self.assertFalse(a.heading_above_slanted_rows(line(5,228,120,12),body,middle))
+
     def setUp(self):
         self.image = Image.new("RGB", (160, 140), "white")
 
@@ -41,6 +98,27 @@ class AutomaticUnitTests(unittest.TestCase):
         self.assertEqual(set(ids), {r.source_id for r in batch.detections})
         parents = [child for p in batch.proposals for child, _ in p.annotation_parents]
         self.assertEqual(len(parents), len(set(parents)))
+
+    def test_mixed_script_credit_list_accepts_decorative_separators(self):
+        from tralens.ocr.types import is_credit_list
+        self.assertTrue(is_credit_list('無名 ★李林 & 王明 ★ José Soto ★ Hannah ★ Uma'))
+        self.assertTrue(is_credit_list('Aiko • Luis • María'))
+        self.assertFalse(is_credit_list('無料です ★ 会員 ★ Maria ★ Hannah'))
+
+    def test_credit_list_near_japanese_heading_is_a_separate_main_line(self):
+        heading = box('heading', [16,40,145,60], '支援ありがとうございます', .99)
+        names = box('names', [45,28,137,35], 'Åsa * Mei Lin * Pierre * Carlos', .99)
+        batch = self.propose([heading, names])
+        self.assert_partition(batch)
+        self.assertTrue(all('names' not in p.annotation_ids for p in batch.proposals))
+        self.assertFalse(any(set(p.main_ids) == {'heading','names'} for p in batch.proposals))
+
+    def test_credit_can_translate_independently_of_an_uncertain_address(self):
+        credit = box('credit', [25,25,145,44], '出版社発行', .99)
+        url = box('url', [25,47,147,66], 'https://exaωple.jp/', .93)
+        batch = self.propose([credit,url])
+        self.assert_partition(batch)
+        self.assertEqual({tuple(p.main_ids) for p in batch.proposals},{('credit',),('url',)})
 
     def test_terminal_punctuation_respects_clear_seam_and_reading_order(self):
         import numpy as np
@@ -74,6 +152,69 @@ class AutomaticUnitTests(unittest.TestCase):
         pixels[:,:59]=245
         self.assertEqual(table_rows.split([group],pixels,set()),[group])
 
+    def test_pair_of_axis_aligned_boxes_on_slanting_rule_continues_beyond_ink(self):
+        from tralens.ocr import table_rows
+        from tralens.ocr.types import Text_Group
+        import numpy as np
+        pixels = np.full((140,240,3),250,np.uint8)
+        boxes = [Text_Box(i,.9,[(155,y),(210,y),(210,y+14),(155,y+14)],'項目')
+                 for i,y in enumerate((52,73))]
+        group = Text_Group(boxes,direction='horizontal')
+        for x in range(240):
+            for y in (28,49,70,91,112):
+                pixels[y+round(.09*(x-180)),x] = 188
+        pixels[:,174:192] = 70
+        self.assertEqual([part.group for part in table_rows.split([group],pixels,set())], [[boxes[0]],[boxes[1]]])
+        pixels[:,:155] = 250
+        self.assertEqual(table_rows.split([group],pixels,set()),[group])
+
+    def test_interpolated_print_cells_require_bounding_anchors_and_skip_existing_boxes(self):
+        from types import SimpleNamespace
+        from tralens.ocr import table_rows
+        import numpy as np
+        pixels = np.full((200,240,3),250,np.uint8)
+        pixels[:,144] = 170
+        pixels[:,211:214] = 0
+        for y in range(19,180,20):
+            pixels[y:y+1] = 177
+        proposals = [SimpleNamespace(crop_bounds=(144,y+1,208,y+18),member_ids=(i,),
+            grouping_method='separate_printed_table_rows') for i,y in enumerate((19,39,59,79,139))]
+        blank = list(table_rows.missing_cells(proposals,[],pixels))
+        self.assertEqual(len(blank),2)
+        claimed = [SimpleNamespace(bbox=(145,100,205,118))]
+        self.assertEqual(len(list(table_rows.missing_cells(proposals,claimed,pixels))),1)
+        self.assertFalse(list(table_rows.missing_cells(proposals,[],np.full_like(pixels,250))))
+
+    def test_confirmed_readers_keep_one_unit_per_measured_cell(self):
+        from tralens.ocr import table_rows
+        from tralens.ocr.types import Text_Group
+        import numpy as np
+        boxes=[Text_Box(i,.9,[(20,y),(70,y),(70,y+14),(20,y+14)],'漢字')
+               for i,y in enumerate((30,45,60,75))]
+        group=Text_Group(boxes,direction='horizontal')
+        groups=table_rows.split([group],np.full((110,120,3),255,np.uint8),set(),confirmed={1,2})
+        self.assertEqual([[b.box_id for b in g.group] for g in groups],[[0],[1],[2],[3]])
+        self.assertEqual([g.method for g in groups[1:3]],['separate_printed_table_rows']*2)
+
+    def test_corroborated_cells_bind_the_corrected_text_and_keep_original_evidence(self):
+        from tralens.ocr.table_rows import corroborated_box
+        from tralens.ocr.types import OCREngine
+        original = Text_Box(4,.93,[(5,6),(77,9),(77,27),(5,24)],'ベダル')
+        corrected = corroborated_box(original,'ペダル','corroborated_printed_voicing_mark',{'hayai':'ペダル'})
+        self.assertEqual(corrected.paddle_text,'ペダル')
+        self.assertEqual(corrected.selected_engine,OCREngine.HAYAI)
+        self.assertEqual(corrected.ocr_metadata['printed_cell_readings']['original'],'ベダル')
+        self.assertEqual(original.paddle_text,'ベダル')
+
+    def test_resolving_diacritics_needs_a_second_reader_and_a_unique_known_word(self):
+        from tralens.ocr.table_rows import loanword_reading
+        known = {'プロフ','ペダル','バスケ'}.__contains__
+        self.assertEqual(loanword_reading('ブロフから','プロつから',known),'プロフから')
+        self.assertEqual(loanword_reading('ベダル','ペダル',known),'ペダル')
+        self.assertIsNone(loanword_reading('プロフから','ブロつから',known))
+        self.assertIsNone(loanword_reading('ベダル','メダル',known))
+        self.assertIsNone(loanword_reading('ブロフから','プロつです',known))
+
     def test_stacked_vertical_condition_requires_a_clear_seam_and_continuation(self):
         from tralens.ocr.types import Text_Group
         import numpy as np
@@ -87,14 +228,30 @@ class AutomaticUnitTests(unittest.TestCase):
         upper=block(0,8,['この本が','どうであろうと'])
         lower=block(2,50,['私には','関係ない'])
         groups=[upper,lower];by_id={i:(None,None,None) for i in range(4)}
-        def join():
-            return a.stacked_vertical_clauses(groups,pixels,[],{},by_id,set())
+        def join(regions=None):
+            return a.stacked_vertical_clauses(groups,pixels,[],regions or {},by_id,set())
         self.assertEqual([box.box_id for box in join()[0].group],[0,1,2,3])
         pixels[46]=0
         self.assertEqual(join(),groups)
         pixels[46]=255
         upper.group[-1].text='どうでしょう。'
         self.assertEqual(join(),groups)
+        upper.group[-1].text='先生が'
+        by_id.update({1:(None,None,1), 2:(None,None,2)})
+        self.assertEqual(join(),groups)
+        self.assertEqual(join({1:(42,),2:(38,)}),groups)
+        self.assertEqual(join({1:(42,),2:(42,)})[0].method,'stacked_vertical_subject')
+        pixels[46]=0
+        self.assertEqual(join({1:(42,),2:(42,)}),groups)
+
+    def test_upright_dialogue_and_tilted_kana_have_independent_baselines(self):
+        child = Text_Box(4,.99,[(90,20),(109,20),(109,130),(90,130)],'見ていて')
+        tilted = Text_Box(2,.79,[(10,21),(47,8),(84,118),(47,131)],'なにこれ')
+        self.assertTrue(a.upright_clause_beside_slanted_type(child,tilted))
+        tilted.text = '必殺技'
+        self.assertFalse(a.upright_clause_beside_slanted_type(child,tilted))
+        upright = Text_Box(2,.79,[(10,10),(47,10),(47,130),(10,130)],'なにこれ')
+        self.assertFalse(a.upright_clause_beside_slanted_type(child,upright))
 
     def test_vertical_order_right_to_left_with_tentative_annotation(self):
         image = self.image.copy()

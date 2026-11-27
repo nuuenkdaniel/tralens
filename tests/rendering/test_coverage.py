@@ -136,11 +136,12 @@ class CoverageRenderingTests(unittest.TestCase):
         with Image.open(self.f.image) as image:
             pixels = image.width*image.height
             preview = json.loads((self.p.root/'job/preview/preview.json').read_text())
-            plan = a.derive_plan(image, preview['ocr']['raw_detections'][0], preview['units'][1]['unit']['member_ids'])
+            raw = preview['ocr']['raw_detections'][0]
+            geometry_work = a.OriginalComponents(image).bind_geometry(raw)
+            plan = a.derive_plan(image, raw, preview['units'][1]['unit']['member_ids'])
         plan.evidence.update(cleanup_method='best_effort_native_fill', warnings=['Synthetic native hint'])
-        # Binding + geometry + strict primary + strict native = exactly 6 page
-        # rasters. Even one coverage raster scheduled too early would steal it.
-        with patch.object(a, 'MAX_WORK', 6*pixels), \
+        # Reserve the actual geometry strips and the two strict page rasters.
+        with patch.object(a, 'MAX_WORK', geometry_work+2*pixels), \
                 patch.object(a, 'derive_plan', side_effect=a.AutomaticSkip('component_spill', 'synthetic primary failure')), \
                 patch.object(best_effort, 'native_plan', return_value=plan):
             result = self.render('raster-priority', background_method='flat')

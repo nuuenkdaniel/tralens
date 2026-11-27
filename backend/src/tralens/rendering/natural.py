@@ -93,7 +93,7 @@ def integer(value, lo, hi):
     return value
 
 
-def polygon_mask(points, size, *, evidence=False):
+def validate_polygon(points, size, *, evidence=False):
     require(type(points) is list and 3 <= len(points) <= 128, "polygon vertex budget")
     for p in points:
         require(type(p) is list and len(p) == 2, "invalid polygon vertex")
@@ -124,6 +124,10 @@ def polygon_mask(points, size, *, evidence=False):
                         "self-intersecting polygon")
     area = sum(points[i][0]*points[(i+1)%n][1]-points[(i+1)%n][0]*points[i][1] for i in range(n))
     require(abs(area) >= 2, "degenerate polygon")
+
+
+def polygon_mask(points, size, *, evidence=False):
+    validate_polygon(points, size, evidence=evidence)
     mask = Image.new("L", size)
     ImageDraw.Draw(mask).polygon([tuple(p) for p in points], fill=255)
     return mask
@@ -254,11 +258,14 @@ def break_positions(text):
     Break after ordinary spaces or a single existing hyphen between letters/digits.
     U+2011, dash runs, leading hyphens and punctuation-only suffixes are not sites.
     """
+    # An interrupted first syllable belongs to the following word. A break
+    # after its hyphen can turn a two-letter reply into two apparent lines of speech.
+    onsets = {m.end(1) for m in re.finditer(r"(?i)(?<![A-Za-z])([a-z]{1,2})[-‐]\1[a-z]",text)}
     positions = [0]
     for i, char in enumerate(text):
         if char == " " and i+1 < len(text) and text[i+1] != " " and text[:i+1].strip():
             positions.append(i+1)
-        elif char in ("-", "\u2010") and 0 < i < len(text)-1 and text[i-1].isalnum() and text[i+1].isalnum():
+        elif char in ("-", "\u2010") and 0 < i < len(text)-1 and text[i-1].isalnum() and text[i+1].isalnum() and i not in onsets:
             positions.append(i+1)
     if text:
         positions.append(len(text))
@@ -362,7 +369,7 @@ class LayoutWork:
 def validate_text(text, coverage):
     """Check exact target support before cleanup backends or layout search."""
     require(type(text) is str and 0 < len(text) <= 1000 and text.strip(), "text budget/blank")
-    require(all(c == "\n" or (32 <= ord(c) < 127) or
+    require(all(c in "\n♪♫" or (32 <= ord(c) < 127) or
                 (unicodedata.category(c)[0] in ("L", "M") and
                  (unicodedata.name(c, "").startswith(('LATIN ', 'GREEK ', 'HIRAGANA ', 'KATAKANA ', 'KATAKANA-HIRAGANA ',
                      'CJK UNIFIED IDEOGRAPH-', 'CJK COMPATIBILITY IDEOGRAPH-')) or
@@ -390,7 +397,7 @@ def layout(text, font_data, coverage, mask, style, *, work=None, line_rank=None,
     fixed = None
     if fixed_breaks is not None:
         positions = break_positions(text)
-        require(0 < len(fixed_breaks) <= 15 and list(fixed_breaks)==sorted(set(fixed_breaks))
+        require(len(fixed_breaks) <= 15 and list(fixed_breaks)==sorted(set(fixed_breaks))
                 and all(i in positions[1:-1] for i in fixed_breaks),'invalid fixed line breaks')
         shaped = text
         for i in reversed(fixed_breaks):
@@ -701,7 +708,7 @@ def bind(preview, image_path, rgb, image_bytes, preview_bytes, selection, fonts_
     identities = [(type(d["source_id"]).__name__, d["source_id"]) for d in raw]
     require(all(type(d["source_id"]) in (str, int) for d in raw) and len(set(identities)) == len(raw), "invalid typed source IDs")
     for d in raw:
-        polygon_mask(d["polygon"], rgb.size, evidence=True)
+        validate_polygon(d["polygon"], rgb.size, evidence=True)
     raw_map = {(type(d["source_id"]).__name__, d["source_id"]): d for d in raw}
     require(len(raw_map) == len(batch["detections"]), "raw detection coverage drift")
     for d in batch["detections"]:

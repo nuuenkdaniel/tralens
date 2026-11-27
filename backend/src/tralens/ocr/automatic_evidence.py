@@ -194,6 +194,15 @@ class OriginalInkEvidence:
             winner = int(np.argmax(counts))
             component = int(ids[winner])
             confidence = float(counts[winner]/white.size)
+            if confidence < .92 and index in mains:
+                # White counters enclosed by individual printed glyphs are
+                # not neighboring paper surfaces. Exclude only tiny components
+                # strictly inside the column and fully sampled by its polygon.
+                others = stats[ids]
+                inside = ((others[:,0]>x) & (others[:,1]>y) &
+                          (others[:,0]+others[:,2]<=r) & (others[:,1]+others[:,3]<=b) &
+                          (others[:,-1]==counts) & (others[:,-1]<=.025*values.size))
+                confidence = float(counts[winner] / (white.size - counts[inside & (ids!=component)].sum()))
             left,top,w,h,area = stats[component]
             if (confidence < .92 or (owner is not None and owner!=component)
                     or min(left,top)<=0 or left+w>=width or top+h>=height

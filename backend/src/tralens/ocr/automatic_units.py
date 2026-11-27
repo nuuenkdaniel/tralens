@@ -2,7 +2,9 @@
 import hashlib
 import json
 import math
+import re
 import unicodedata
+from collections import Counter
 from dataclasses import asdict, dataclass
 from io import BytesIO
 from pathlib import Path
@@ -15,7 +17,7 @@ from PIL import Image
 from .grouping import GroupingMixin, analyze_manga_regions, group_manga_boxes
 from .automatic_evidence import OriginalInkEvidence
 from . import table_rows
-from .types import Text_Group
+from .types import Text_Group, is_credit_list, is_printed_literal
 from .recognition_units import (PageProvenance, _area, _intersection, _rectangle,
                                 _valid_polygon, image_fingerprint, snapshot_detections)
 
@@ -164,9 +166,55 @@ def join_reread_columns(groups, by_id):
     return result
 
 
+def join_stuttered_onsets(groups, pixels, excluded, marked=None):
+    """Bind a separately printed initial kana to the word that repeats it."""
+    result = list(groups)
+    for onset in groups:
+        first = onset.group[0]
+        if (len(onset.group)!=1 or first.box_id in excluded or (marked is not None and first.box_id not in marked) or first.confidence<.67
+                or onset.direction not in ('unknown','vertical') or not re.fullmatch('[ぁ-ゖァ-ヺ]',first.text)):
+            continue
+        x,y,r,b = first.bbox
+        candidates = []
+        for body in result:
+            word = body.group[0]
+            if (body is onset or body.direction!='vertical' or any(v.box_id in excluded for v in body.group) or word.confidence<.9
+                    or len(word.text)<2 or not word.text.startswith(first.text)):
+                continue
+            l,t,right,bottom = word.bbox
+            scale = min(r-x,right-l)
+            if (scale<6 or max(r-x,right-l)>1.55*scale or not 1<x-right<.55*scale
+                    or abs(y-t)>.4*scale or min(b,bottom)-max(y,t)<.45*scale):
+                continue
+            seam = pixels[max(y,t):min(b,bottom)+1,right+1:x]
+            if seam.size and (seam.min(2)>240).mean()>=.99:
+                candidates.append(body)
+        if len(candidates)==1 and onset in result:
+            body = candidates[0]
+            result[result.index(body)] = Text_Group(onset.group+body.group,method='stuttered_onset',direction='vertical')
+            result.remove(onset)
+    return result
+
+
 def join_shared_balloon(groups, pixels, detections, excluded):
     """Read adjacent vertical passages sharing one enclosed sheet of white paper."""
-    candidates = [g for g in groups if g.direction == 'vertical' and 2 <= len(g.group) <= 6
+    def suffix(group):
+        return len(group.group)==1 and re.fullmatch(r'し(?:て(?:た|いた|いる|る)|ました|ません|なかった|ないで(?:ください)?)[。！？…]*',group.group[0].text)
+
+    def genitive(group):
+        return len(group.group)==1 and re.fullmatch(r'[一-鿿々]{2,8}の',group.group[0].text)
+
+    def lead_in(group):
+        return len(group.group)==1 and re.fullmatch(r'(?:[ァ-ヺー一-鿿A-Za-z]{2,15}は|とっ?ても|非常に|かなり|すごく|とてつもなく)',group.group[0].text)
+
+    def dependent(group):
+        # These endings leave the subject, object, time limit or referent waiting
+        # for a predicate. A reporting と can instead point to a preceding quote.
+        return re.search(r'(?:[ぁ-ゖァ-ヺ一-鿿々](?:は|が|を|に|で|まで)|(?:^|[・.…]+)(?:これ|それ|あれ))$',
+                         group.group[-1].text)
+
+    candidates = [g for g in groups if g.direction=='vertical' and (2<=len(g.group)<=6 or
+                  suffix(g) or genitive(g) or lead_in(g) or (len(g.group)==1 and dependent(g)))
                   and all(b.box_id not in excluded for b in g.group)]
     if len(candidates) < 2 or pixels.shape[0]*pixels.shape[1]>8_000_000:
         return groups
@@ -184,12 +232,66 @@ def join_shared_balloon(groups, pixels, detections, excluded):
             lhs = max(b.bbox[2] for b in left.group)
             rhs = min(b.bbox[0] for b in right.group)
             stagger = abs(right.group[0].bbox[1]-left.group[0].bbox[1])
-            if not (0<rhs-lhs<2*scale and max(widths)<1.6*scale and .5*scale<stagger<1.4*scale):
+            attached = (suffix(left) and len(right.group)>=2 and -scale*.45<rhs-lhs<scale*.7
+                        and stagger<scale*.5 and re.search(r'[一-鿿]{2,}$',min(right.group,key=lambda v:v.bbox[0]).text))
+            modifier = (genitive(right) and len(left.group)>=2 and re.match(r'[一-鿿々]{2,}',left.group[0].text)
+                        and 0<rhs-lhs<.65*scale and stagger<.45*scale
+                        and abs(right.group[0].bbox[3]-max(v.bbox[3] for v in left.group))<scale)
+            prefix = (lead_in(right) and 2<=len(left.group)<=5 and 0<rhs-lhs<.7*scale
+                       and stagger<.4*scale and max(widths)<1.5*scale
+                       and all(abs(v.bbox[1]-right.group[0].bbox[1])<.45*scale for v in left.group))
+            # A nominalized explanation split immediately before its copula
+            # changes from an assertion to a question when translated alone.
+            explanation = (len(right.group)>=2 and re.search(r'(?:ている|てる|た|ない)の$',right.group[-1].text)
+                           and re.fullmatch(r'(?:だから|ですから|だもの|ですもの)[ー―—！!…。]*',
+                                            ''.join(v.text for v in left.group))
+                           and -.15*scale<=rhs-lhs<=.65*scale and stagger<=.4*scale)
+            clause = (dependent(right) and 2<=len(left.group)<=5 and len(boxes)<=8
+                      and min(v.confidence for v in boxes)>=.85 and max(widths)<1.50*scale
+                      and -.15*scale<rhs-lhs<.90*scale and stagger<1.1*scale
+                      and re.search(r'(?:ます|ました|ません|だった|ですが|たろ|つもり|したり|だろう)[！？!?。…ー]*$',
+                                    left.group[-1].text))
+            # A long first column can start in a narrow upper lobe and finish
+            # beside a relative clause below ("suited to ...", "based on ...").
+            aligned_modifier = (len(right.group)==1 and 2<=len(left.group)<=5
+                    and right.group[0].text.endswith('に') and re.match(r'(?:合わせ|応じ|適し|沿っ|従っ|基づい|見合っ)た',left.group[0].text)
+                    and min(v.confidence for v in boxes)>.90 and -.3*scale<rhs-lhs<.8*scale
+                    and scale<left.group[0].bbox[1]-right.group[0].bbox[1]<5*scale
+                    and abs(left.group[0].bbox[3]-right.group[0].bbox[3])<1.2*scale)
+            clause = clause or aligned_modifier
+            # A negative request can occupy its own column after a particle.
+            request = (len(right.group)==1 and dependent(right) and suffix(left)
+                       and left.group[0].text.startswith('しないで') and -.15*scale<rhs-lhs<.6*scale
+                       and stagger<.6*scale and max(widths)<2*scale)
+            # A noun and the following time clause can be split at a balloon lobe.
+            last=right.group[-1]
+            time_clause=(len(right.group)>=2 and len(left.group)>=2 and len(boxes)<=8
+                         and re.fullmatch(r'[一-鿿々]{2,6}',last.text)
+                         and re.fullmatch(r'(?:始まる|終わる|来る|戻る|帰る|届く|着く)まで(?:に)?',left.group[0].text)
+                         and -.15*scale<rhs-lhs<.55*scale
+                         and abs(last.bbox[1]-left.group[0].bbox[1])<.5*scale)
+            if (lead_in(right) or lead_in(left)) and not (prefix or clause or request):
+                continue
+            attached = attached or modifier or prefix or explanation or clause or request or time_clause
+            if (genitive(right) or genitive(left)) and not modifier:
+                continue
+            if not (clause or request) and any(len(g.group)==1 and dependent(g) and not (lead_in(g) or suffix(g) or genitive(g))
+                                  for g in (right,left)):
+                continue
+            if suffix(right) or (not attached and (suffix(left) or not
+                    (0<rhs-lhs<2*scale and max(widths)<1.6*scale and .5*scale<stagger<1.4*scale))):
                 continue
             x,y,r,b = (min(v.bbox[0] for v in boxes),min(v.bbox[1] for v in boxes),
                        max(v.bbox[2] for v in boxes),max(v.bbox[3] for v in boxes))
-            if crop_conflicts((x,y,r,b),tuple(v.box_id for v in boxes),detections):
-                continue
+            conflicts = crop_conflicts((x,y,r,b),tuple(v.box_id for v in boxes),detections)
+            if conflicts:
+                if not (explanation or time_clause) or any(c.reason=='invalid_nonmember_geometry' for c in conflicts):
+                    continue
+                # Aligned columns of different lengths can have applause in an
+                # empty corner of their rectangle. Keep it outside their hull.
+                hull = cv2.convexHull(np.float32([xy for box in boxes for xy in _rectangle(box.bbox)]))
+                if any(cv2.intersectConvexConvex(hull,np.float32(c.polygon))[0]>0 for c in conflicts):
+                    continue
             pad = min(128,3*scale)
             l,t = max(0,x-pad),max(0,y-pad)
             paper = pixels[t:b+pad+1,l:r+pad+1].min(axis=2)>240
@@ -206,13 +308,19 @@ def join_shared_balloon(groups, pixels, detections, excluded):
             if len(owners)!=1 or 0 in owners:
                 continue
             surface = labels==owners.pop()
-            if any(edge.any() for edge in (surface[0],surface[-1],surface[:,0],surface[:,-1])):
-                continue
+            open_edges = sum(bool(edge.any()) for edge in (surface[0],surface[-1],surface[:,0],surface[:,-1]))
+            if open_edges:
+                # A genitive and its noun can share a balloon clipped on one side.
+                # Require uninterrupted paper directly between their actual columns.
+                seam = surface[max(right.group[0].bbox[1],y)-t:min(right.group[0].bbox[3],b)-t,
+                               lhs-l+1:rhs-l]
+                if not (modifier or prefix or explanation) or open_edges!=1 or not seam.size or seam.mean()<.95:
+                    continue
             # Both the ceiling and floor bend inward between balloon lobes.
             top,bottom = surface.argmax(0),len(surface)-surface[::-1].argmax(0)
             ca = int(np.median([v.bbox[0]+v.bbox[2] for v in left.group])/2)-l
             cb = int(np.median([v.bbox[0]+v.bbox[2] for v in right.group])/2)-l
-            if (top[lhs-l:rhs-l+1].max()<max(top[ca],top[cb])+scale*.12
+            if not attached and (top[lhs-l:rhs-l+1].max()<max(top[ca],top[cb])+scale*.12
                     or bottom[lhs-l:rhs-l+1].min()>min(bottom[ca],bottom[cb])-scale*.12):
                 continue
             result[result.index(right)] = Text_Group(boxes,method='shared_balloon_columns',direction='vertical')
@@ -259,10 +367,11 @@ def join_terminal_marks(groups, pixels, detections, regions, by_id, excluded):
 
 
 def stacked_vertical_clauses(groups, pixels, detections, regions, by_id, excluded):
-    """Join two tiers of vertical print across a blank seam after a concessive."""
+    """Join aligned vertical tiers when grammar and paper support one passage."""
     blocks = []
     for group in groups:
-        if group.direction != 'vertical' or not 2 <= len(group.group) <= 5:
+        stammer = len(group.group)==1 and re.fullmatch(r'[ぁ-ゖァ-ヺ][っッ]',group.group[0].text)
+        if group.direction != 'vertical' or not (stammer or 2 <= len(group.group) <= 5):
             continue
         ids = tuple(box.box_id for box in group.group)
         if any(i in excluded for i in ids):
@@ -276,52 +385,81 @@ def stacked_vertical_clauses(groups, pixels, detections, regions, by_id, exclude
         blocks.append((group,ids,bounds,min(widths)))
     pairs = []
     for upper,ids,(x,y,r,b),scale in blocks:
-        if not upper.group[-1].text.rstrip().endswith(('だろうと','であろうと','であっても')):
+        ending = upper.group[-1].text.rstrip()
+        subject = bool(re.search(r'(?:のは|[一-鿿]が)$', ending))
+        stammer = len(ids)==1 and re.fullmatch(r'[ぁ-ゖァ-ヺ][っッ]',ending)
+        if not stammer and not subject and not ending.endswith(('だろうと','であろうと','であっても')):
             continue
         for lower,other,(lx,ly,lr,lb),other_scale in blocks:
+            if len(other)<2 or (stammer and not lower.group[0].text.startswith(ending[0])):
+                continue
             gap = ly-b
             left,right = max(x,lx),min(r,lr)
-            if not (2 <= gap <= scale and .75 <= other_scale/scale <= 1.33
-                    and right-left >= .8*min(r-x,lr-lx) and abs((x+r)-(lx+lr)) <= 1.5*scale):
+            if not (2 <= gap <= (1.6 if subject else 1)*scale and .75 <= other_scale/scale <= 1.33
+                    and right-left >= (.65 if subject else .8)*min(r-x,lr-lx)
+                    and abs((x+r)-(lx+lr)) <= (3.6 if subject else 1.5)*scale):
                 continue
             members=ids+other
             known={regions[by_id[i][2]][0] for i in members if by_id[i][2] in regions}
+            if subject and (len(known) != 1 or not all(any(by_id[i][2] in regions for i in tier) for tier in (ids, other))):
+                continue
             if len(known)>1 or crop_conflicts((min(x,lx),y,max(r,lr),lb),members,detections):
                 continue
             seam = pixels[b+1:ly,left:right]
             if seam.size and (seam.min(axis=2)>=245).mean() >= .98:
-                pairs.append((upper,lower))
+                method = 'stacked_stammer' if stammer else 'stacked_vertical_subject' if subject else 'stacked_vertical_concessive'
+                pairs.append((upper,lower,method))
     result=list(groups)
-    for upper,lower in pairs:
-        if any(sum(g in pair for pair in pairs)!=1 for g in (upper,lower)):
+    for upper,lower,method in pairs:
+        if any(sum(g in pair[:2] for pair in pairs)!=1 for g in (upper,lower)):
             continue
-        result[result.index(upper)]=Text_Group(upper.group+lower.group,
-            method='stacked_vertical_concessive',direction='vertical')
+        result[result.index(upper)]=Text_Group(upper.group+lower.group,method=method,direction='vertical')
         result.remove(lower)
     return result
 
 
 def join_horizontal_continuations(groups, pixels, detections, regions, by_id, excluded, clause_parents):
-    """Bind a split obligation or a caption whose emphatic last line changes scale."""
+    """Bind a grammatical continuation across aligned rows on the same paper."""
     pairs = []
     for upper in groups:
         last = upper.group[-1]
         obligation = last.text.rstrip().endswith(('ないと','なくては','なければ'))
         object_phrase = last.text.rstrip().endswith('を')
-        if upper.direction != 'horizontal' or last.confidence < .90 or not (obligation or object_phrase or last.box_id in clause_parents):
+        short_topic = len(upper.group) == 1 and re.fullmatch(r'[ぁ-ゖァ-ヺー一-鿿]{1,10}は',last.text.strip())
+        quoted_cause = (upper.group[0].text.startswith(('「','『')) and last.text.endswith(('ので','ため','から'))
+                        and not any('」' in row.text or '』' in row.text for row in upper.group))
+        presented = re.search(r'([一-鿿々])があれば[!！]$',last.text)
+        modifier = len(upper.group)>=2 and re.search(r'[一-鿿々]{2,}な$',last.text)
+        if upper.direction != 'horizontal' or last.confidence < .90 or not (obligation or object_phrase or short_topic or presented or modifier or quoted_cause or last.box_id in clause_parents):
             continue
         x,y,r,b = last.bbox
+        topic_owner = regions.get(by_id[last.box_id][2], (None,))[0] if short_topic else None
         for lower in groups:
             first = lower.group[0]
             emphatic = first.box_id in clause_parents.get(last.box_id, ())
+            # A short topic above a wider multi-line predicate is often split by
+            # the detector. Require every row to share a measured balloon interior.
+            same_topic = (topic_owner and len(lower.group) >= 2 and
+                          all(regions.get(by_id[box.box_id][2],(None,))[0] == topic_owner for box in lower.group))
+            # An attributive adjective cannot end the sentence before its noun.
+            # Require left-aligned body type of equal size across both blocks.
+            bound_noun = (modifier and len(lower.group)>=2 and re.match(r'[ァ-ヺー一-鿿々]{2,}',first.text)
+                          and all(abs(v.bbox[0]-x)<.35*(b-y) and .8*(b-y)<=v.bbox[3]-v.bbox[1]<=1.2*(b-y)
+                                  for v in upper.group+lower.group))
+            quoted_tail = (quoted_cause and lower.group[-1].text.endswith('」' if upper.group[0].text.startswith('「') else '』')
+                           and all(not any(mark in v.text for mark in '「『') for v in lower.group)
+                           and all(abs(v.bbox[0]-x)<.62*(b-y) and .78*(b-y)<=v.bbox[3]-v.bbox[1]<=1.32*(b-y)
+                                   for v in upper.group+lower.group))
+            introduction = (presented and re.search(presented[1]+r'です[!！。]*$',first.text)
+                            and len(upper.group)==len(lower.group)==1)
             if (lower is upper or lower.direction != 'horizontal' or first.confidence < .90
-                    or not (emphatic or (object_phrase and first.text.rstrip('。！').endswith(('ます','ましょう','ください'))) or (obligation and first.text.lstrip().startswith(('いけな','ならな'))))):
+                    or not (emphatic or same_topic or bound_noun or quoted_tail or introduction or (object_phrase and first.text.rstrip('。！').endswith(('ます','ましょう','ください'))) or (obligation and first.text.lstrip().startswith(('いけな','ならな'))))):
                 continue
             lx,ly,lr,lb = first.bbox
             height = b-y
             left,right = max(lx,x),min(lr,r)
-            if (not 1 <= ly-b <= height*.6 or not .75 <= (lb-ly)/height <= (1.85 if emphatic else 1.33)
-                    or right-left < .8*min(r-x,lr-lx) or abs((lx+lr)-(x+r)) > height):
+            if (not 1 <= ly-b <= height*.6 or not .75 <= (lb-ly)/height <= (1.85 if emphatic or introduction else 1.33)
+                    or right-left < .8*min(r-x,lr-lx) or (not (bound_noun or quoted_tail) and abs((lx+lr)-(x+r)) > height and not (introduction and abs(lr-r)<=height*.4))):
                 continue
             boxes = upper.group+lower.group
             ids = tuple(box.box_id for box in boxes)
@@ -368,6 +506,19 @@ def horizontal_rule_between(first, second, pixels):
     return False
 
 
+def upright_clause_beside_slanted_type(child, parent):
+    # Small upright dialogue can abut much larger hand lettering on a slant.
+    # A kana-only parent and two different baselines give no support for ruby.
+    if (child.confidence<.90 or len(child.text)<3 or not re.search(r'[ぁ-ゖァ-ヺ]',child.text)
+            or not re.fullmatch(r'[ぁ-ゖァ-ヺー]+',parent.text)):
+        return False
+    def tilt(box):
+        edges = np.roll(box.poly,-1,axis=0)-box.poly
+        dx,dy = edges[np.linalg.norm(edges,axis=1).argmax()]
+        return math.degrees(math.atan2(abs(dx),abs(dy)))
+    return tilt(child)<7 and 12<=tilt(parent)<=44
+
+
 def _annotation_geometry(child, parent):
     direction = GroupingMixin._manga_direction(parent)
     # Short one/two-glyph reading runs need not have the parent's aspect ratio.
@@ -391,6 +542,30 @@ def _annotation_geometry(child, parent):
         side = (a[1]+a[3])/2 <= b[1]+.4*minor_parent
     return (.15 <= minor_child/minor_parent <= .65 and -.65*minor_parent <= gap <= .8*minor_parent
             and extent_child <= 1.1*extent_parent and overlap/extent_child >= .8 and contained and side)
+
+
+def heading_above_slanted_rows(child, parent, boxes):
+    """Two intervening baselines rule out a phonetic gloss on the proposed parent."""
+    if len(parent.poly)!=4 or len(child.poly)!=4 or GroupingMixin._manga_direction(parent)!='horizontal':
+        return False
+    edges=np.roll(parent.poly,-1,axis=0)-parent.poly
+    dx,dy=max(edges,key=lambda edge:abs(edge[0]))
+    if not .12*abs(dx)<abs(dy)<.5*abs(dx):
+        return False
+    normal=np.array([-dy/dx,1.])
+    main,head=parent.poly@normal,child.poly@normal
+    height=np.ptp(main)
+    if main.min()-head.max()<1.3*height or not .65*height<np.ptp(head)<1.5*height:
+        return False
+    between=[]
+    for row in boxes:
+        if row is child or row is parent or len(row.poly)!=4 or abs(row.bbox[0]-child.bbox[0])>height:
+            continue
+        projected=row.poly@normal
+        if (row.bbox[2]-row.bbox[0]>2.8*height and .55*height<np.ptp(projected)<1.6*height
+                and head.mean()+.5*height<projected.mean()<main.mean()-.5*height):
+            between.append(projected.mean())
+    return len(between)>=2 and max(between)-min(between)>.65*height
 
 
 def _singleton_companion_evidence(first, second, regions, by_id, glyphs, ink, annotations,
@@ -689,10 +864,25 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
     possibilities, relationship_reasons, rejected_relationships = {}, {}, []
     relation_evidence = {}
     single_context, single_supports = None, {}
+    credit_rows = {raw.source_id for raw, _ in ordered if policy == POLICY and is_credit_list(raw.text)}
+    literal_rows = {raw.source_id for raw, _ in ordered if policy == POLICY and is_printed_literal(raw.text)}
+    # A separately discovered beat in a repeated trail can be small enough
+    # to resemble a reading gloss above the next sound.
+    beats = {raw.source_id:raw.text for raw, _ in ordered if policy == POLICY
+             and raw.reason == 'frontier_discovery' and re.fullmatch(r'[ァ-ヺぁ-ゖ]', raw.text)}
+    frequencies = Counter(beats.values())
+    separate_rows = (literal_rows | {raw.source_id for raw,_ in ordered if policy==POLICY and raw.reason in ('confirmed_tab_label','confirmed_checkbox_item')}
+                     | {i for i, text in beats.items() if frequencies[text] >= 4}
+                     | {raw.source_id for raw,_ in ordered if raw.reason in ('confirmed_trailing_kana','confirmed_handwritten_line','corroborated_repeated_effect','corroborated_printed_twin','corroborated_mask_line','corroborated_native_line')})
+    independent_rows = credit_rows | separate_rows
     for child, child_box in ordered:
         options, rejected_options, evidence_rows = [], [], []
         for parent, parent_box in ordered:
+            if child.source_id in independent_rows or parent.source_id in independent_rows:
+                continue
             if child.source_id == parent.source_id or not _annotation_geometry(child_box, parent_box):
+                continue
+            if policy==POLICY and upright_clause_beside_slanted_type(child_box,parent_box):
                 continue
             ci, pi = by_id[child.source_id][2], by_id[parent.source_id][2]
             child_glyphs, parent_glyphs = glyphs[child.source_id], glyphs[parent.source_id]
@@ -803,7 +993,20 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
             for possible_parent in options:
                 relationship_reasons[possible_parent] = tuple(dict.fromkeys(
                     relationship_reasons.get(possible_parent, ()) + ("unresolved_annotation_relationship",)))
-    mains = [pair for pair in ordered if pair[0].source_id not in annotations]
+    headings={}
+    if policy==POLICY:
+        for raw,_ in ordered:
+            if 'forum_post' in raw.metadata_json:
+                note=json.loads(raw.metadata_json)['forum_post']
+                if note.get('heading') and note.get('body_id') in by_id:
+                    headings[raw.source_id]=note['body_id']
+        for child,parent in list(annotations.items()):
+            if heading_above_slanted_rows(by_id[child][1],by_id[parent][1],boxes):
+                headings[child]=annotations.pop(child)
+                relationships=[RelationshipProposal(child,None,(parent,),'rejected_annotation_candidate',
+                    ('intervening_printed_rows',),'separate_baselines',r.image_evidence)
+                    if r.source_id==child and r.parent_id==parent else r for r in relationships]
+    mains = [pair for pair in ordered if pair[0].source_id not in annotations and pair[0].source_id not in headings]
     main_regions = {i: regions[by_id[raw.source_id][2]] for i, (raw, _) in enumerate(mains)
                     if by_id[raw.source_id][2] in regions}
     rejected_merges = {}
@@ -812,6 +1015,8 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
     def merge_guard(first,second):
         members = tuple(sorted((box.box_id for box in first+second),key=_key))
         reasons, barriers = [], []
+        if separate_rows.intersection(members) or (credit_rows.intersection(members) and not credit_rows.issuperset(members)):
+            return False
         if any(i in dark_runs for i in members) and not all(i in dark_runs for i in members):
             return False
         unsupported = [i for i in members if glyphs[i].component_count < 2
@@ -861,28 +1066,31 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
                 tuple(by_id[child][2] for child in sorted(
                     (child for child,parent in annotations.items() if parent in group_ids),key=_key))))
         regions,ownership_repairs = ink.complementary_ownership(boxes,member_groups,regions)
+    if complementary_ownership and policy==POLICY:
         for mains, children in member_groups:
-            missing = tuple(i for i in children if i not in regions)
-            if (len(missing)!=1 or len(children)!=1 or len(mains)<3 or any(i not in regions for i in mains)
-                    or len({regions[i][0] for i in mains+children if i in regions})!=1
+            known = {regions[i][0] for i in mains if i in regions}
+            if (len(children)!=1 or children[0] in regions or len(mains)<3
+                    or len(known)>1 or (known and any(i not in regions for i in mains))
                     or any(boxes[i].confidence < .90 for i in mains)
-                    or any(len(possibilities[boxes[i].box_id])!=1 for i in missing)):
+                    or len(possibilities[boxes[children[0]].box_id])!=1):
                 continue
-            child = boxes[missing[0]]
+            child = boxes[children[0]]
             parent = by_id[annotations[child.box_id]][1]
             x,y,r,b = child.bbox
             px,py,pr,pb = parent.bbox
-            if (len(child.text.strip())!=1 or child.confidence>=.85 or parent.confidence<.9
+            if (len(child.text.strip())!=1 or parent.confidence<.9
                     or not (px<x<pr and py<=y<b<=pb and r-x <= .5*(pr-px))):
                 continue
             if single_context is None:
                 single_context = ink.single_glyph_context()
             support = ink.enclosed_annotation_support(boxes,mains,children,single_context)
             if support:
-                owner = regions[mains[0]][0]
+                # A discovery polygon can break the mask used to assign regions
+                # even though the unmodified page still encloses every column.
+                owner = next(iter(known)) if known else -2_000_000-support[0][1]
                 confidence = min(row[2] for row in support)
-                for i in missing:
-                    regions[i] = (owner,confidence)
+                for i in mains + children:
+                    regions.setdefault(i,(owner,confidence))
                 ownership_repairs += ({"method":"shared_original_annotation_enclosure",
                     "main_ids":tuple(boxes[i].box_id for i in mains),
                     "member_ids":tuple(boxes[i].box_id for i in mains+children),
@@ -893,9 +1101,25 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
         groups,companion_regroupings,companion_rejections = _regroup_companions(
             groups,regions,by_id,glyphs,ink,annotations,detections,relationships,single_context)
     if not unassigned:
+        handwriting = {}
+        for group in groups:
+            if len(group.group)==1:
+                box = group.group[0]
+                raw = by_id[box.box_id][0]
+                if raw.reason=='confirmed_handwritten_line':
+                    evidence = json.loads(raw.metadata_json)
+                    handwriting.setdefault(evidence['handwritten_anchor'],[]).append((evidence['line_index'],group))
+        for sequence in handwriting.values():
+            ordered_lines = [g for index,g in sorted(sequence,key=lambda pair:pair[0])]
+            if len(ordered_lines)>1:
+                groups = [g for g in groups if g not in ordered_lines]
+                groups.append(Text_Group([g.group[0] for g in ordered_lines],method='corroborated_handwritten_lines',direction='horizontal'))
         excluded=set(annotations) | set(annotations.values()) | set(relationship_reasons) | set(dark_runs)
-        groups=table_rows.split(groups,bgr,excluded)
+        groups=table_rows.split(groups,bgr,excluded,confirmed={d.source_id for d in detections if d.reason in ('confirmed_printed_cell','confirmed_tab_label')})
         groups=join_reread_columns(groups,by_id)
+        marked = {d.source_id for d in detections if 'printed_onset' in d.metadata_json}
+        if marked:
+            groups=join_stuttered_onsets(groups,bgr,excluded,marked)
         groups=join_shared_balloon(groups,bgr,detections,excluded)
         groups=join_terminal_marks(groups,bgr,detections,regions,by_id,excluded)
         groups=stacked_vertical_clauses(groups,bgr,detections,regions,by_id,excluded)
@@ -903,6 +1127,23 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
                 if row["rejected_reasons"] == ("horizontal_clause_with_case_particle",))
             for child,rows in relation_evidence.items() if relationship_reasons.get(child)==("horizontal_clause_with_case_particle",)}
         groups=join_horizontal_continuations(groups,bgr,detections,regions,by_id,excluded,clause_parents)
+        for raw,_ in ordered:
+            if not any(key in raw.metadata_json for key in ('corroborated_columns','curved_repeat','masked_passage')):
+                continue
+            metadata = json.loads(raw.metadata_json)
+            curved = metadata.get('curved_repeat')
+            masked = metadata.get('masked_passage')
+            evidence = curved or masked or metadata.get('corroborated_columns')
+            ids = evidence.get('ids',[]) if isinstance(evidence,dict) else evidence
+            if not ids or len(set(ids))!=len(ids) or ids[0]!=raw.source_id or not set(ids).isdisjoint(annotations):
+                continue
+            matched = [g for g in groups if any(b.box_id in ids for b in g.group)]
+            if {b.box_id for g in matched for b in g.group}==set(ids):
+                position = groups.index(matched[0])
+                groups = [g for g in groups if g not in matched]
+                groups.insert(position,Text_Group([by_id[i][1] for i in ids],
+                                         method='curved_repeat' if curved else 'corroborated_mask_lines' if masked else 'corroborated_handwritten_columns',
+                                         direction='horizontal' if curved or (masked and masked.get('direction')=='horizontal') else 'vertical'))
     # A newly discovered effect beside an already lettered logo needs its own erase region.
     independent = []
     for group in groups:
@@ -917,6 +1158,9 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
                                    for box in group.group)
                 continue
         independent.append(group)
+    for child,parent in headings.items():
+        position=next((i for i,g in enumerate(independent) if any(b.box_id==parent for b in g.group)),len(independent))
+        independent.insert(position,Text_Group([by_id[child][1]],method='singleton',direction='horizontal'))
     proposals = []
     for group in independent:
         main_ids = tuple(box.box_id for box in group.group)

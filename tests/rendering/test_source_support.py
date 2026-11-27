@@ -7,6 +7,156 @@ from tralens.rendering import source_support
 
 
 class SourceSupport(unittest.TestCase):
+    def test_white_keyline_on_striped_paint_uses_only_matching_sides(self):
+        ground=np.full((125,90,3),[174,191,213],np.uint8)
+        ground[::9]=[192,209,230]
+        ink=np.zeros(ground.shape[:2],np.uint8)
+        for y in (24,54,84):
+            cv2.ellipse(ink,(43,y),(8,10),0,0,360,1,-1)
+        ink=ink.astype(bool)
+        protected=np.zeros_like(ink)
+        protected[:,60:62]=True
+        ground[protected]=10
+        printed=ground.copy()
+        printed[ink]=250
+        printed[cv2.erode(np.uint8(ink),np.ones((5,5),np.uint8))!=0]=55
+        mask,repair=source_support.painted_keyline_fill(printed,ink,protected)
+        self.assertFalse((mask&protected).any())
+        np.testing.assert_array_equal(repair[mask],ground[mask])
+        printed[ink]=55
+        self.assertIsNone(source_support.painted_keyline_fill(printed,ink,protected))
+
+    def test_touching_glyph_releases_its_stem_and_preserves_the_crossing_contour(self):
+        from tralens.rendering.aggressive import crossing_ink,split_touching_glyph
+        crop = np.full((70,92,3),255,np.uint8)
+        cv2.line(crop,(5,48),(88,48),(0,0,0),2)
+        cv2.line(crop,(45,27),(45,47),(0,0,0),3)
+        own = np.zeros(crop.shape[:2],bool)
+        own[23:49,39:50] = True
+        guard = crossing_ink(crop,own)
+        kept = split_touching_glyph(crop,guard,own,np.zeros_like(own))
+        self.assertTrue(kept[48,45])
+        self.assertFalse(kept[34,45])
+        self.assertTrue(kept[48,14])
+
+    def test_pale_effect_style_requires_strokes_across_a_colored_baseline(self):
+        from tralens.rendering.aggressive import light_effect_style
+        polygon = np.array([[15,30],[145,30],[145,62],[15,62]])
+        own = np.zeros((90,160),np.uint8)
+        cv2.fillPoly(own,[polygon],1)
+        art = np.full((90,160,3),[90,134,152],np.uint8)
+        for x in [27,54,91,119]:
+            cv2.line(art,(x,37),(x+5,56),(28,28,28),8)
+            cv2.line(art,(x,37),(x+5,56),(252,252,252),4)
+        style = light_effect_style(art,own!=0,polygon,'ガタン')
+        self.assertEqual(style['outline'],2)
+        self.assertEqual(style['rotation'],0)
+        self.assertIsNone(light_effect_style(art,own!=0,polygon,'今日は晴れ'))
+        art[:]=255
+        self.assertIsNone(light_effect_style(art,own!=0,polygon,'ガタン'))
+
+    def test_light_painted_letters_need_a_common_surface_and_local_text_support(self):
+        art=np.full((100,160,3),[149,118,85],np.uint8)
+        own=np.zeros((100,160),bool)
+        own[32:66,23:135]=True
+        probability=np.zeros(own.shape,np.uint8)
+        probability[39:61,33:39]=160
+        for x in (33,65,104):
+            art[38:61,x:x+6]=[240,235,231]
+        blocked=np.zeros_like(own)
+        blocked[40:42,34]=True
+        mask,_=source_support.pale_sign_strokes(art,own,blocked,probability)
+        self.assertTrue(mask[47,106])
+        self.assertFalse(mask[40,34])
+        self.assertFalse(mask[28,32])
+        self.assertIsNone(source_support.pale_sign_strokes(art,own,blocked,probability*0))
+        plate=source_support.painted_stroke_fill(art,mask,blocked,pale_ink=True)
+        self.assertLess(np.abs(plate[47,106].astype(int)-art[34,78]).max(),3)
+
+    def test_gray_band_needs_matching_print_on_both_sides_and_respects_ink(self):
+        paper = np.full((100,105,3),255,np.uint8)
+        paper[39:49] = 194
+        own = np.zeros(paper.shape[:2],bool)
+        own[16:84,40:65] = True
+        mask = np.zeros_like(own)
+        mask[20:77,48:55] = True
+        paper[39:49,44:60] = 255
+        paper[39:49,47] = 23
+        protected = np.zeros_like(own)
+        protected[41:44,45] = True
+        plate = paper.copy()
+        plate[mask] = 255
+        support = source_support.restore_paper_band(paper,plate,own,mask,protected)
+        self.assertEqual(plate[43,50,0],194)
+        self.assertEqual(plate[43,44,0],194)
+        self.assertFalse(support[43,45])
+        self.assertEqual(plate[43,47,0],23)
+        self.assertFalse(support[43,47])
+        paper[39:49,65:] = 255
+        np.testing.assert_array_equal(source_support.restore_paper_band(paper,plate,own,mask,protected),mask)
+
+    def test_hollow_effect_preserves_rim_art_and_requires_multiple_supported_strokes(self):
+        crop = np.full((110,180,3),255,np.uint8)
+        own = np.ones(crop.shape[:2],bool)
+        prob = np.zeros(own.shape,np.uint8)
+        for x in (35,74,112):
+            cv2.line(crop,(x,26),(x,81),(0,0,0),15)
+            cv2.line(crop,(x,26),(x,81),(255,255,255),7)
+            cv2.line(prob,(x,26),(x,81),225,8)
+        cv2.line(crop,(125,50),(160,50),(0,0,0),1)
+        protected = np.zeros_like(own)
+        protected[46:52,25:39] = True
+        commit,inference = source_support.hollow_effect_masks(crop,own,protected,prob)
+        self.assertTrue(commit[60,74])
+        self.assertFalse(commit[protected].any())
+        self.assertFalse(commit[50,125])
+        self.assertFalse((commit & ~inference).any())
+        prob[:,95:] = 0
+        self.assertIsNone(source_support.hollow_effect_masks(crop,own,protected,prob))
+
+    def test_solid_external_ink_is_protected_but_separate_type_is_erasable(self):
+        crop=np.full((150,160,3),255,np.uint8)
+        cv2.fillPoly(crop,[np.array([(0,12),(60,25),(84,125),(0,120)])],(0,0,0))
+        cv2.line(crop,(93,35),(105,105),(0,0,0),4)
+        own=np.zeros(crop.shape[:2],bool)
+        own[22:127,54:130]=True
+        probability=np.zeros(own.shape,np.uint8)
+        probability[:,90:]=230
+        guard=source_support.adjoining_solid_ink(crop,own,own,probability)
+        self.assertIsNotNone(guard)
+        self.assertTrue(guard[91,64])
+        self.assertFalse(guard[77,100])
+        self.assertFalse((guard&~own).any())
+        self.assertIsNone(source_support.adjoining_solid_ink(crop,own,own,np.full_like(probability,230)))
+
+    def test_white_stroke_tip_needs_dark_rim_and_model_support(self):
+        crop = np.full((100,140,3),180,np.uint8)
+        cv2.line(crop,(20,40),(104,55),(0,0,0),15)
+        cv2.line(crop,(20,40),(104,55),(255,255,255),7)
+        own = np.ones(crop.shape[:2],bool)
+        prob = np.zeros(own.shape,np.uint8)
+        prob[:,:91] = 200
+        guard = np.zeros_like(own)
+        guard[:,107:] = True
+        mask = source_support.outlined_interiors(crop,own,guard,prob)
+        self.assertTrue(mask[54,101])
+        self.assertFalse(mask[guard].any())
+        crop[np.all(crop==0,axis=2)] = 160
+        self.assertFalse(source_support.outlined_interiors(crop,own,guard,prob).any())
+
+    def test_wide_credit_strip_respects_visible_paper_grain(self):
+        y,x = np.indices((64,700))
+        shade = (193 + x//45 + (x+y)%3).astype(np.uint8)
+        paper = np.stack([shade+9,shade+5,shade],axis=-1)
+        ink = (x%32>9)&(x%32<17)&(y>22)&(y<41)
+        page = paper.copy()
+        page[ink] = 20
+        mask = (x>18)&(x<680)&(y>14)&(y<50)
+        restored = source_support.painted_stroke_fill(page,mask,np.zeros_like(mask))
+        self.assertIsNotNone(restored)
+        np.testing.assert_array_equal(restored[mask & ~ink],paper[mask & ~ink])
+        self.assertLess(np.abs(restored[ink & mask].astype(float)-paper[ink & mask]).max(),5)
+
     def test_painted_stroke_fill_continues_gradient_without_changing_art(self):
         y,x = np.indices((80,100))
         original = np.stack((150+x//2,170+x//2,190+x//2), axis=2).astype(np.uint8)

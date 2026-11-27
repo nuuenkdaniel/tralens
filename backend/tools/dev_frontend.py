@@ -93,7 +93,7 @@ def main(argv=None, *, reader=False):
                 parser.error(f'OCR model exports unavailable at {args.model_root}. Run the Compose setup service. {error}')
             try:
                 manifest = json.loads(args.fonts.read_text())
-                font_id = args.font_id
+                font_id = args.font_id if args.font_id is not None else manifest.get('default_font_id')
                 if font_id is None and len(manifest['fonts']) == 1:
                     font_id = manifest['fonts'][0]['id']
                 ApprovedFaces(manifest, font_id)
@@ -120,7 +120,7 @@ def main(argv=None, *, reader=False):
         reread_model=args.reread_model,reconstruction_config=args.reconstruction_config,
         crop_reader_model=args.crop_reader_model.expanduser().absolute() if args.crop_reader_model else None,
         text_mask_model=args.text_mask_model.expanduser().absolute() if args.text_mask_model else None,isolated_workers=True,
-        job_seconds=300 if reader else 1800, sdxl_config=args.sdxl_config,reader_mode=reader,frontier_provider=provider))
+        sdxl_config=args.sdxl_config,reader_mode=reader,frontier_provider=provider))
     with create_server(app, args.port, host=host, **reader_options) as server:
         print(f'{"Tralens reader" if reader else "Pipeline viewer"}: http://{host}:{args.port}', flush=True)
         if host != '127.0.0.1':

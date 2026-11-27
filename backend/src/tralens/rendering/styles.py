@@ -16,6 +16,7 @@ PRESETS = {
     'thought': dict(fill=[55, 55, 70], outline_fill=[255, 255, 255], outline=1,
                     leading=.3, align='center', rotation=0, requested_weight='regular'),
 }
+PRESETS['handwriting'] = dict(PRESETS['dialogue'])
 
 
 def check(condition, message):

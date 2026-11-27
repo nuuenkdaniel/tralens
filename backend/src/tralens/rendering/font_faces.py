@@ -1,4 +1,5 @@
 """Explicit collection faces and whole-target fallback; never system font lookup."""
+import math
 import struct
 
 from . import natural as n
@@ -52,6 +53,28 @@ def standalone(data, face_index=None):
         raise ValueError('malformed font collection') from error
 
 
+def handwritten_columns(detections):
+    """Look for independently leaning vertical columns in a single utterance."""
+    if not 2 <= len(detections) <= 4:
+        return False
+    widths, angles = [], []
+    for detection in detections:
+        points = detection['polygon']
+        if len(points) != 4:
+            return False
+        x, y = zip(*points)
+        width = max(x) - min(x)
+        if width < 17 or max(y) - min(y) < 1.6 * width:
+            return False
+        top_left, top_right, bottom_right, bottom_left = points
+        dx = bottom_right[0] + bottom_left[0] - top_right[0] - top_left[0]
+        dy = bottom_right[1] + bottom_left[1] - top_right[1] - top_left[1]
+        widths.append(width)
+        angles.append(math.degrees(math.atan2(dx, dy)))
+    return (5 <= max(map(abs, angles)) <= 16 and max(angles) - min(angles) >= 4.5
+            and max(widths) <= 2 * min(widths))
+
+
 class ApprovedFaces:
     """Use the requested face unless it lacks glyphs; fallback order is explicit."""
     def __init__(self, manifest, requested_id):
@@ -66,15 +89,17 @@ class ApprovedFaces:
                 and len(set(values))==len(values),'invalid explicit font fallback list')
         self.requested=requested_id;self.ids=[requested_id,*fallbacks.get(requested_id,[])]
         self.primary=self.fonts[requested_id];self.cache={}
-        self.thought = [face['id'] for face in manifest['fonts']
-                        if face['role']=='thought' and face['weight']=='regular']
+        self.role_faces = {role:[face['id'] for face in manifest['fonts']
+                                 if face['role']==role and face['weight']==weight]
+                           for role,weight in (('thought','regular'),('shout','bold'),('handwriting','regular'))}
 
     def resolve(self,row):
         text=row['binding']['text']
-        thought = row.get('lettering_role')=='thought'
-        key = thought,text
+        role = row.get('lettering_role')
+        preferred = self.role_faces.get(role,[])
+        key = role,text
         if key not in self.cache:
-            for identity in (self.thought+self.ids if thought else self.ids):
+            for identity in preferred+self.ids:
                 font=self.fonts[identity]
                 if isinstance(font,n.ResourceLimit):continue
                 if all(ord(c) in font[1] for c in text if c!='\n'):
@@ -83,6 +108,6 @@ class ApprovedFaces:
             n.require(key in self.cache,'missing glyph coverage in requested and explicit fallback faces')
         identity=self.cache[key];font=self.fonts[identity]
         row['font_selection']={'requested_id':self.requested,'selected_id':identity,
-            'reason':'requested_complete_coverage' if identity==self.requested else 'thought_face' if thought and identity in self.thought else 'explicit_fallback_complete_coverage',
+            'reason':'requested_complete_coverage' if identity==self.requested else role+'_face' if identity in preferred else 'explicit_fallback_complete_coverage',
             'font_sha256':n.digest(font[0]),'exact_target_preserved':True}
         return font

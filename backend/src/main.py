@@ -381,12 +381,41 @@ def crop_reader_refiner(model_path, *, ink_column_groups=False, ink_boundary_gro
             with Image.open(BytesIO(original)) as source:
                 image=source.convert('RGB')
                 if hasattr(engine,'raw_detections') and hasattr(engine,'ocr'):
-                    from tralens.ocr import handwritten
+                    from tralens.ocr import handwritten, handwritten_lines, table_rows
+                    from tralens.ocr.display_readings import annotated_passages, clipped_repetitions, colored_word, diagonal_effects, nameplates, quoted_footnotes, split_interjections
+                    from tralens.ocr.automatic_units import propose_page_from_boxes
+                    corrected = colored_word(image,engine.raw_detections[0],reader)
+                    current = engine.raw_detections[0]
+                    corrected = nameplates(image, corrected if corrected is not None else current, reader)
+                    corrected = diagonal_effects(image,corrected,reader)
+                    from tralens.ocr import outlined_sounds
+                    corrected = outlined_sounds.read_outlined_words(image,corrected,reader)
+                    corrected = clipped_repetitions(image,corrected,reader)
+                    corrected = handwritten_lines.missing_middle_column(image,corrected,reader)
+                    corrected = handwritten_lines.small_stacked_labels(image,corrected,reader)
+                    corrected = table_rows.checkbox_headings(image,corrected,reader)
+                    corrected = table_rows.split_tab_labels(image,corrected,reader)
+                    corrected = split_interjections(image,corrected)
+                    if corrected != current:
+                        engine.automatic_unit_proposals = [propose_page_from_boxes(corrected,engine.image_path,
+                            complementary_ownership=True,regroup_companions=True)]
+                        engine.raw_detections = [corrected]
+                    table_rows.discover(engine,image,reader)
                     handwritten.discover(engine,image,reader)
-                    from tralens.ocr import outlined_sounds
+                    handwritten_lines.split_tiers(engine,image,reader)
+                    handwritten_lines.discover(engine,image,reader)
+                    handwritten_lines.full_width_annotation(engine,image,reader)
+                    handwritten_lines.printed_fields(engine,image,reader)
+                    handwritten_lines.magazine_headings(engine,image,reader)
+                    handwritten_lines.command_lists(engine,image,reader)
+                    handwritten_lines.emphatic_ending(engine,image,reader)
+                    handwritten_lines.join_slanted_columns(engine,image,reader)
+                    handwritten_lines.printed_balloon_columns(engine,image,reader)
+                    annotated_passages(engine,image,reader)
+                    quoted_footnotes(engine,image,reader)
+                    handwritten_lines.printed_hesitations(engine,image)
+                    handwritten_lines.mark_terminal_kana(engine,image,reader)
                     outlined_sounds.refine_outlined_kana(engine,image,reader)
-                if reader_presentations and hasattr(engine,'raw_detections') and hasattr(engine,'ocr'):
-                    from tralens.ocr import outlined_sounds
                     outlined_sounds.discover(engine,image,reader)
                 if ink_column_groups or ink_boundary_groups:
                     from tralens.ocr import ink_groups
@@ -402,7 +431,7 @@ def crop_reader_refiner(model_path, *, ink_column_groups=False, ink_boundary_gro
 
 
 @serialized
-def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28,
+def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28, max_title_size=None,
                  max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort',
                  replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', quality_reread=False,
                  reread_model='qwen3.8:latest', manga_reread_model=None, source_localization=False,
@@ -422,7 +451,7 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
     if (output.exists() or output.is_symlink() or not output.parent.is_dir()
             or any(path.is_symlink() for path in output.parents)):
         raise ValueError('pipeline output must be fresh with an existing parent and no symlinks')
-    from tralens.rendering.automatic import preflight_automatic, retained_artwork, run_automatic
+    from tralens.rendering.automatic import preflight_automatic, retained_artwork, retained_label, run_automatic
     from tralens.translation.workflow import run_preview, _atomic_json
     from tralens.translation.luna import MODELS
     from tralens.translation.coverage import validate_policy
@@ -449,11 +478,37 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
         raise ValueError('choose one ink grouping policy with the explicit local crop reader')
     if type(reader_presentations) is not bool or (reader_presentations and crop_reader_model is None):
         raise ValueError('reader presentations requires the explicit local crop reader')
+    page_mask = None
+    def detect_masked_lines(engine):
+        nonlocal page_mask
+        from PIL import Image
+        import cv2
+        from tralens.ocr import masked_lines
+        from tralens.ocr.hayai_adapter import HayaiReader
+        from tralens.rendering.segmentation import TextMask
+
+        if not getattr(engine,'ocr',None) or not getattr(engine,'raw_detections',None):
+            return
+        with Image.open(engine.image_path) as source:
+            if max(source.size)>3000 or source.width*source.height>4_000_000:
+                return
+            image = source.convert('RGB')
+        reader = HayaiReader(crop_reader_model)
+        try:
+            page_mask = TextMask(image,checked['text_mask_model'])
+            masked_lines.discover(engine,image,reader,page_mask.raw)
+        except (OSError,ValueError,RuntimeError,cv2.error) as error:
+            engine.masked_detection_error = type(error).__name__
+        finally:
+            reader.close()
+
     if crop_reader_model is not None:
         if quality_reread or manga_reread_model is not None or 'ocr_refine' in preview_options or translation_policy!='coverage-first':
             raise ValueError('crop reader requires coverage-first and one explicit refinement callback')
         preview_options['ocr_refine']=crop_reader_refiner(crop_reader_model,ink_column_groups=ink_column_groups,
             ink_boundary_groups=ink_boundary_groups,reader_presentations=reader_presentations)
+        if text_mask_model is not None:
+            preview_options['ocr_detect'] = detect_masked_lines
     if quality_reread:
         if manga_reread_model is None or translation_policy != 'coverage-first':
             raise ValueError('quality reread requires explicit local Manga OCR snapshot and coverage-first translation')
@@ -554,7 +609,9 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                 and preview['ocr'].get('raw_detections') == [[]])
             artwork_only = (preview['status'] == 'complete'
                             and bool(records) and all(retained_artwork(row) for row in records))
-            if not empty_page and not artwork_only and not strict_count and not (coverage_count and (render_policy == 'best-effort' or visibility_policy == 'always-show')):
+            original_labels = (preview['status'] == 'complete' and bool(records)
+                               and all(retained_artwork(row) or retained_label(row) for row in records))
+            if not empty_page and not original_labels and not strict_count and not (coverage_count and (render_policy == 'best-effort' or visibility_policy == 'always-show')):
                 report['status'] = 'partial'
                 report['rendering'] = {'status': 'skipped', 'reason': 'coverage_requires_best_effort' if coverage_count else 'no_strict_translations',
                     'note': 'No composite was produced; original image and preview evidence remain unchanged.'}
@@ -564,8 +621,12 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                 persist()
                 render_preview = output/'preview/preview.json'
                 render_options = dict(rendering_options)
+                if max_title_size is not None:
+                    render_options['max_title_size'] = max_title_size
+                if page_mask is not None:
+                    render_options['prepared_text_mask'] = page_mask
                 if source_localization and not empty_page:
-                    native_options = {**rendering_options, 'cleanup_policy': 'native', 'visibility_policy':'replacement-only',
+                    native_options = {**render_options, 'cleanup_policy': 'native', 'visibility_policy':'replacement-only',
                         'removal_policy':'preserve','reconstruction_policy':'classical','reconstruction_config':None}
                     started = time.monotonic()
                     native = run_automatic(preview=render_preview, output=output/'rendering-native',
@@ -614,6 +675,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                      'quality_summary': rendered['quality_summary']}
                 if artwork_only:
                     report['rendering']['outcome'] = 'original_artwork_retained'
+                elif original_labels:
+                    report['rendering']['outcome'] = 'original_lettering_retained'
                 if empty_page:
                     report['rendering']['outcome'] = 'no_text_detected'
                 if 'replacement_confidence' in rendered:
