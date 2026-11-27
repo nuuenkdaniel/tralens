@@ -1585,7 +1585,7 @@ function showAccountForm(message = "") {
   if (selectedServer === location.origin) showCredentials(message);
   else showServerForm(message);
 }
-function showCredentials(message = "") {
+function showCredentials(message = "", setupToken = "") {
   accountCard("Sign in", "Open your manga library.", `
     <div class="account-server"><span>${esc(location.origin)}</span><button type="button" id="change-server" aria-label="Change server">Change</button></div>
     <form id="account-form" method="post">
@@ -1598,22 +1598,37 @@ function showCredentials(message = "") {
   const submit = form.querySelector("button"), toggle = $(".account-switch"), alert = form.querySelector('[role="alert"]');
   const change = $("#change-server");
   change.onclick = () => { showServerForm(); $(".account-card h1").focus(); };
-  let register = false;
+  let action = "login";
+  function setMode(next) {
+    action = next;
+    const creating = next !== "login", owner = next === "setup";
+    password.value = "";
+    password.autocomplete = creating ? "new-password" : "current-password";
+    password.minLength = creating ? 15 : 1;
+    form.elements.username.pattern = creating ? "[a-zA-Z0-9][a-zA-Z0-9._\\-]{2,31}" : ".*";
+    $(".account-guidance").hidden = !creating;
+    submit.textContent = owner ? "Create owner account" : creating ? "Create account" : "Sign in";
+    $(".account-card h1").textContent = owner ? "Create your owner account" : creating ? "Create an account" : "Sign in";
+    document.title = $(".account-card h1").textContent + " · Tralens";
+    $(".account-intro").textContent = owner ? "As owner, you can connect ChatGPT. Each reader gets a separate library." :
+      creating ? "Start a private library on this server." : "Open your manga library.";
+    toggle.textContent = creating ? "Back to sign in" : "Create an account";
+  }
   fetch("/api/auth/settings", {redirect:"error"}).then(r => r.ok ? r.json() : null).then(data => {
-    if (form.isConnected) toggle.hidden = data?.registration !== true;
+    if (!form.isConnected || !data) return;
+    if (data.setup_required) {
+      setMode("setup");
+      if (data.setup_link_required && !setupToken) {
+        form.hidden = true;
+        $(".account-intro").textContent = "Open the private setup link from your server to create its owner account.";
+      }
+    } else {
+      toggle.hidden = !data.registration;
+      if (setupToken) alert.textContent = "This server already has an owner. Sign in to continue.";
+    }
   }).catch(() => {});
   toggle.onclick = () => {
-    register = !register;
-    password.value = "";
-    password.autocomplete = register ? "new-password" : "current-password";
-    password.minLength = register ? 15 : 1;
-    form.elements.username.pattern = register ? "[a-zA-Z0-9][a-zA-Z0-9._\\-]{2,31}" : ".*";
-    $(".account-guidance").hidden = !register;
-    submit.textContent = register ? "Create account" : "Sign in";
-    $(".account-card h1").textContent = register ? "Create an account" : "Sign in";
-    document.title = $(".account-card h1").textContent + " · Tralens";
-    $(".account-intro").textContent = register ? "Start a private library on this server." : "Open your manga library.";
-    toggle.textContent = register ? "Back to sign in" : "Create an account";
+    setMode(action === "register" ? "login" : "register");
     alert.textContent = "";
     form.elements.username.focus();
   };
@@ -1623,11 +1638,19 @@ function showCredentials(message = "") {
     submit.disabled = toggle.disabled = change.disabled = true;
     alert.textContent = "";
     try {
-      const response = await fetch("/api/auth/" + (register ? "register" : "login"), {
+      const response = await fetch("/api/auth/" + action, {
         method: "POST", redirect: "error", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({username: form.elements.username.value, password: password.value}),
+        body: JSON.stringify({username: form.elements.username.value, password: password.value,
+          ...(action === "setup" && setupToken ? {setup_token: setupToken} : {})}),
       });
-      if (!response.ok) throw Error((await response.json()).error || "Sign-in failed.");
+      if (!response.ok) {
+        const reason = (await response.json()).error || "Sign-in failed.";
+        if (action === "setup" && response.status === 409) {
+          showCredentials(reason);
+          return;
+        }
+        throw Error(reason);
+      }
       password.value = "";
       rememberServer(location.origin);
       accountChanged();
@@ -1662,7 +1685,12 @@ async function init() {
     showAccountForm("Could not open this server. Check its address and try again.");
   }
 }
-if (location.hash === "#verify-server") {
+if (location.hash.startsWith("#setup=")) {
+  const token = location.hash.slice(7);
+  history.replaceState(null, "", location.pathname);
+  rememberServer(location.origin);
+  showCredentials("", token);
+} else if (location.hash === "#verify-server") {
   history.replaceState(null, "", location.pathname);
   try {
     await verifyServer(location.origin);

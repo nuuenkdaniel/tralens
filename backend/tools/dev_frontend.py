@@ -67,8 +67,8 @@ def main(argv=None, *, reader=False):
         if args.host != '127.0.0.1':
             parser.error('The reader binds to loopback. Use a tunnel or an HTTPS reverse proxy.')
         reader_options["registration"] = os.environ.get("TRALENS_REGISTRATION", "open") == "open"
-        if bool(args.public_origin) != bool(args.owner_key_file):
-            parser.error('--owner-key-file and --public-origin must be supplied together')
+        if args.owner_key_file and not args.public_origin:
+            parser.error('--owner-key-file requires --public-origin')
         if args.public_origin:
             from tralens.devui.owner import Owner
             try:

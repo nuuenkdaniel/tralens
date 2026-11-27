@@ -50,7 +50,7 @@ docker compose up -d --wait --pull never
 
 Open [http://127.0.0.1:7871](http://127.0.0.1:7871) on the host. From another
 computer, use `ssh -N -L 7871:127.0.0.1:7871 user@server` and open that same URL.
-Sign in as `owner` using the key in `tralens-data/library/owner.key`. For HTTPS access and registration settings, follow the [deployment guide](docs/self-hosted-reader.md#remote-access-over-https).
+On a fresh server, verify the address and choose a username and password for the first owner. The owner can connect ChatGPT. Each additional reader gets a private library. Existing owner-key installations keep their current sign-in. For first-time setup from a phone over HTTPS, follow the [deployment guide](docs/self-hosted-reader.md#remote-access-over-https).
 
 Choose a model under **Settings → Translation**, then **Add manga**. Try one page
 to check speed and quality on your hardware.

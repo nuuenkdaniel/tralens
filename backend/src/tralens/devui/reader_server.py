@@ -48,7 +48,9 @@ class ReaderHandler(Handler):
                 file = WEB / ("index.html" if path == "/" else path[1:])
                 self.respond(200, file.read_bytes(), mimetypes.guess_type(file.name)[0])
             elif path == "/api/auth/settings":
-                self.json(200, {"registration": self.server.accounts.registration})
+                accounts = self.server.accounts
+                self.json(200, {"registration": accounts.registration, "setup_required": accounts.setup_pending(),
+                                "setup_link_required": bool(accounts.origin)})
             else:
                 ticket = self.headers.get("X-Tralens-Download")
                 if ticket and DOWNLOAD_PATH.fullmatch(path):
@@ -64,7 +66,7 @@ class ReaderHandler(Handler):
             if path == "/api/config":
                 config = self.server.app.public_config()
                 config['owner_mode'] = bool(self.server.owner)
-                config['username'] = self.account
+                config['username'] = self.server.accounts.owner_username() if self.account == 'owner' else self.account
                 config['token'] = self.request_token()
                 if self.account != "owner":
                     config = {k:config[k] for k in ("token", "username", "model", "render_enabled", "max_upload_bytes",
@@ -128,7 +130,7 @@ class ReaderHandler(Handler):
         path = urlsplit(self.path).path
         try:
             self.local_request()
-            paths = {"/api/auth/login": "login", "/api/auth/register": "register", "/api/auth/logout": "logout",
+            paths = {"/api/auth/setup": "setup", "/api/auth/login": "login", "/api/auth/register": "register", "/api/auth/logout": "logout",
                      "/api/owner/login": "owner", "/api/owner/logout": "logout"}
             if path in paths:
                 return self.server.accounts.handle(self, paths[path])
@@ -268,8 +270,9 @@ def create_reader_server(app, port, *, host, owner=None, registration=True):
     server.upload_slot = threading.BoundedSemaphore(1)
     server.app = app
     try:
+        fresh = not any(app.root.iterdir())
         server.library = Library(app)
-        server.accounts = Accounts(server.library, owner, registration)
+        server.accounts = Accounts(server.library, owner, registration, fresh=fresh)
     except BaseException:
         server.server_close()
         raise

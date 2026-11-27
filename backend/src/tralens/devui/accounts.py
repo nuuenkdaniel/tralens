@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import sqlite3
+import tempfile
 import threading
 import time
 
@@ -51,9 +52,8 @@ def validate_new_password(password, username):
 class Accounts:
     lifetime = 7 * 86400
 
-    def __init__(self, library, owner, registration=True):
+    def __init__(self, library, owner, registration=True, *, fresh=False):
         self.db = library.db
-        self.owner_digest = owner.digest if owner else local_owner_digest(library.app.root)
         self.origin = owner.origin if owner else None
         self.cookie_name = "__Host-tralens" if owner else "tralens-local"
         self.registration = registration
@@ -64,7 +64,40 @@ class Accounts:
         self.attempts = {}
         self.dummy_salt = secrets.token_bytes(16)
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute("CREATE TABLE IF NOT EXISTS accounts(username TEXT PRIMARY KEY, salt BLOB NOT NULL, verifier BLOB NOT NULL)")
+
+            db.execute("""CREATE TABLE IF NOT EXISTS reader_owner(
+                slot INTEGER PRIMARY KEY CHECK(slot=1), username TEXT REFERENCES accounts(username))""")
+            if fresh and (owner is None or owner.digest is None):
+                db.execute("INSERT INTO reader_owner(slot) VALUES(1)")
+            # A missing singleton is an existing key-owned installation. A NULL
+            # username reserves first-time setup until the owner chooses credentials.
+            named_setup = db.execute("SELECT 1 FROM reader_owner").fetchone() is not None
+        self.owner_digest = None
+        if not named_setup:
+            if owner and owner.digest is None:
+                raise ValueError("Restore the configured owner key for this existing HTTPS reader.")
+            self.owner_digest = owner.digest if owner else local_owner_digest(library.app.root)
+
+        self.setup_link = library.app.root / "owner-setup.url"
+        self.setup_token = None
+        if self.origin and self.setup_pending():
+            self.setup_token = secrets.token_urlsafe(32)
+            with tempfile.NamedTemporaryFile(mode="w", dir=library.app.root, delete=False) as link:
+                link.write(f"{self.origin}/#setup={self.setup_token}\n")
+            os.replace(link.name, self.setup_link)
+        else:
+            self.setup_link.unlink(missing_ok=True)
+
+    def setup_pending(self):
+        with self.db() as db:
+            return db.execute("SELECT 1 FROM reader_owner WHERE username IS NULL").fetchone() is not None
+
+    def owner_username(self):
+        with self.db() as db:
+            row = db.execute("SELECT username FROM reader_owner").fetchone()
+        return row[0] if row else "owner"
 
     @staticmethod
     def derive(password, salt):
@@ -112,7 +145,7 @@ class Accounts:
         with self.lock:
             self.attempts = {k:v for k,v in self.attempts.items() if v[1] > now}
             # Legacy and current sign-in share a budget, separate from enrollment.
-            group = "register" if action == "register" else "login"
+            group = "register" if action in ("register", "setup") else "login"
             pending = {}
             for key, maximum in (((group, username), 12), ((group, None), 120)):
                 count, until = self.attempts.get(key, (0, now + 60))
@@ -172,26 +205,44 @@ class Accounts:
         if not self.hash_slots.acquire(blocking=False):
             raise RequestError("Sign-in is busy. Try again shortly.", 429)
         try:
-            if action == "register":
+            if action in ("register", "setup"):
+                if action == "setup" and self.origin:
+                    token = data.get("setup_token")
+                    if not self.setup_token or not isinstance(token, str) or not secrets.compare_digest(token.encode(), self.setup_token.encode()):
+                        raise RequestError("Open the private setup link from your server.", 403)
                 validate_new_password(password.decode(), username)
                 salt = secrets.token_bytes(16)
                 verifier = self.derive(password, salt)
                 try:
                     with self.db() as db:
-                        if username == "owner":
+                        db.execute("BEGIN IMMEDIATE")
+                        pending = db.execute("SELECT 1 FROM reader_owner WHERE username IS NULL").fetchone()
+                        if action == "setup" and not pending:
+                            raise RequestError("The owner is already configured. Sign in to continue.", 409)
+                        if action == "register" and pending:
+                            raise RequestError("Finish setting up the server owner first.", 409)
+                        if action == "register" and username == "owner":
                             raise sqlite3.IntegrityError
                         db.execute("INSERT INTO accounts VALUES(?,?,?)", (username, salt, verifier))
+                        if action == "setup":
+                            db.execute("UPDATE reader_owner SET username=? WHERE slot=1", (username,))
+                    if action == "setup":
+                        self.setup_link.unlink(missing_ok=True)
+                        username = "owner"
                 except sqlite3.IntegrityError:
                     raise RequestError("Choose another username.", 409) from None
-            elif username == "owner":
-                if not secrets.compare_digest(hashlib.sha256(password).digest(), self.owner_digest):
+            elif action == "owner" or (username == "owner" and self.owner_digest is not None):
+                if self.owner_digest is None or not secrets.compare_digest(hashlib.sha256(password).digest(), self.owner_digest):
                     raise RequestError("Incorrect username or password.", 401)
             else:
                 with self.db() as db:
-                    row = db.execute("SELECT salt,verifier FROM accounts WHERE username=?", (username,)).fetchone()
+                    row = db.execute("""SELECT salt, verifier, reader_owner.slot AS owner_slot FROM accounts
+                        LEFT JOIN reader_owner USING(username) WHERE accounts.username=?""", (username,)).fetchone()
                 actual = self.derive(password, row["salt"] if row else self.dummy_salt)
                 if not secrets.compare_digest(actual, row["verifier"] if row else bytes(len(actual))) or not row:
                     raise RequestError("Incorrect username or password.", 401)
+                if row["owner_slot"] is not None:
+                    username = "owner"
         finally:
             self.hash_slots.release()
         self.respond(handler, username)

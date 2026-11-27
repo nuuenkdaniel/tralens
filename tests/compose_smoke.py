@@ -44,13 +44,16 @@ def sign_in(action, username, password):
         assert "; Secure" in cookie
     return cookie
 
-key = Path("/config/owner.key" if origin else "/library/owner.key").read_text().strip()
-cookie = sign_in("login", "owner", key)
+owner_password = Path("/state/tmp/smoke-owner")
+if not origin:
+    owner_password.write_text(token_urlsafe(32))
+cookie = sign_in("login" if origin else "setup", "smoke-owner", owner_password.read_text())
 headers["Cookie"] = cookie.split(";", 1)[0]
 assert request("GET", "/api/library")[0] == 200
 status, _, body = request("GET", "/api/config")
 assert status == 200
 config = json.loads(body)
+assert config["username"] == "smoke-owner"
 assert config["render_enabled"] and config["worker_mode"] == "isolated_process"
 
 if not origin:
