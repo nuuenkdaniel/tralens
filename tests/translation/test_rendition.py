@@ -56,6 +56,8 @@ class SingleRendition(unittest.TestCase):
 
     def test_effect_envelope_keeps_only_single_printable_field(self):
         self.assertEqual(rendition.effect_field('{"effect":"Swish!"}'),'Swish!')
+        self.assertEqual(rendition.effect_field('{"action":"Someone is moving.", "lettering":"Rustle!"}',
+                                               depicted=True), 'Rustle!')
         for bad in ('{"effect":"swish","explanation":"a fan"}','{"effect":"first\\nsecond"}','{}',None):
             with self.assertRaises(ValueError):
                 rendition.effect_field(bad)

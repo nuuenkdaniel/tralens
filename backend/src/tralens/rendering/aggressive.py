@@ -928,9 +928,12 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                         ladder = [('verified_diagonal_aside', strokes)]*2
                         evidence = {'policy':'verified_diagonal_aside','source_removal_verified':False}
                         row['lettering_role'] = 'handwriting'
-                if probability is not None and detection.get('ocr_metadata',{}).get('drawn_kana'):
-                    from .printed_contours import drawn_kana_outline
-                    rim = drawn_kana_outline(crop,bounds,probability[y:b,x:r],detection,protected)
+                if probability is not None and (metadata.get('drawn_kana') or metadata.get('detached_kana')):
+                    from .printed_contours import detached_letter_outline, drawn_kana_outline
+                    if metadata.get('detached_kana'):
+                        rim = detached_letter_outline(crop, bounds, probability[y:b,x:r], metadata['detached_kana'], protected)
+                    else:
+                        rim = drawn_kana_outline(crop,bounds,probability[y:b,x:r],detection,protected)
                     if rim is not None:
                         predicted = hollow_inference = rim
                         ladder = [('bound_drawn_outline',rim)]*2

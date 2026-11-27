@@ -93,7 +93,7 @@ def _panel_bounds(page, target, fallback):
     return tuple(round(v) for v in (np.array([left, top, end, base]) / scale))
 
 
-def _translation_crop(image, image_hash, detections, unit, *, panel=False, toolbar=False):
+def _translation_crop(image, image_hash, detections, unit, *, panel=False, toolbar=False, adjacent=False):
     """A bounded view around the original target. Neighboring lettering is context only."""
     from PIL import Image
     content = _read_image(image)
@@ -118,6 +118,8 @@ def _translation_crop(image, image_hash, detections, unit, *, panel=False, toolb
             break
     with Image.open(BytesIO(content)) as page:
         pad = min(320, max(72, round(min(page.size)*.15)))
+        if adjacent:
+            pad = max(55, int(max(max(xs)-min(xs), max(ys)-min(ys)))+1)
         bounds = (max(0, int(min(xs))-pad), max(0, int(min(ys))-pad),
                   min(page.width, int(max(xs))+pad+1), min(page.height, int(max(ys))+pad+1))
         if panel:

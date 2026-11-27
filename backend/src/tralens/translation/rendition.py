@@ -123,14 +123,15 @@ def quoted_response_body(source, english):
     return english
 
 
-def effect_field(response):
+def effect_field(response, *, depicted=False):
     """Only the printable effect from a structured visual answer enters the page."""
     from .contracts import strict_json
     if not isinstance(response,str):
         raise ValueError('invalid comic effect response')
     data=strict_json(response)
-    word=data.get('effect') if isinstance(data,dict) and set(data)=={'effect'} else None
-    if not isinstance(word,str) or not word.strip() or not word.isprintable() or len(word)>32 or len(word.split())>4:
+    fields = {'action', 'lettering'} if depicted else {'effect'}
+    word = data.get('lettering' if depicted else 'effect') if isinstance(data, dict) and set(data) == fields else None
+    if not isinstance(word,str) or not word.strip() or not word.isprintable() or len(word)>32 or (not depicted and len(word.split())>4):
         raise ValueError('invalid short comic effect')
     return word.strip()
 

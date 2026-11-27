@@ -14,6 +14,44 @@ def rectangle(x,y,w,h):
 
 
 class MaskedLinesTests(unittest.TestCase):
+    def test_detached_lettering_requires_separate_strokes_and_agreement(self):
+        from tralens.ocr.detached_kana import readings
+        probability = np.zeros((80, 80), np.uint8)
+        for top in (20, 29, 38):
+            probability[top:top+5, 25:40] = 220
+        page = Image.fromarray(255 - probability).convert('RGB')
+        def recover(words, polygons=()):
+            return list(readings(page, probability, polygons, Mock(side_effect=words)))
+
+        self.assertEqual(recover(['あれ', 'あれ', '', ''])[0][:2], ('あれ', (25, 20, 40, 43)))
+        self.assertFalse(recover(['あれ', 'それ']))
+        self.assertFalse(recover(['あれ', 'あれ', '', 'DATA']))
+        self.assertFalse(recover([], [rectangle(24, 19, 17, 25)]))
+        engine = SimpleNamespace(raw_detections=[[]], automatic_unit_proposals=[None],
+                                 image_path='/sample.png', ocr=Mock())
+        engine.ocr.predict.return_value = []
+        with patch.object(masked_lines, 'propose_page_from_boxes', return_value='rebuilt'):
+            masked_lines.discover(engine, page, Mock(side_effect=['あれ', 'あれ', '', '']), probability)
+        recovered, = engine.raw_detections[0]
+        self.assertEqual((recovered.box_id, recovered.text), (0, 'あれ'))
+        self.assertEqual(engine.automatic_unit_proposals, ['rebuilt'])
+        probability[38:] = 0
+        self.assertFalse(recover([]))
+
+    def test_detached_dot_must_be_below_the_hook_and_change_the_reading(self):
+        from PIL import ImageDraw
+        from tralens.ocr.detached_kana import terminal_dot
+        page = Image.new('RGB', (75, 85), 'white')
+        draw = ImageDraw.Draw(page)
+        draw.line((35, 30, 33, 48), fill='black', width=3)
+        draw.ellipse((32, 53, 34, 55), fill='black')
+        bounds = (15, 15, 41, 49)
+        self.assertEqual(terminal_dot(page, bounds, 'えっ', Mock(return_value='え？')),
+                         ('え?', (15, 15, 41, 56), (32, 53, 35, 56)))
+        self.assertIsNone(terminal_dot(page, bounds, 'えっ', Mock(side_effect=['え?', 'えっ'])))
+        draw.ellipse((23, 53, 25, 55), fill='black')
+        self.assertIsNone(terminal_dot(page, bounds, 'えっ', Mock()))
+
     def test_sign_header_needs_local_and_whole_sign_agreement_and_an_empty_location(self):
         from tralens.ocr.handwritten_lines import painted_sign_headers
         page=Image.new('RGB',(200,160),(140,96,65))
