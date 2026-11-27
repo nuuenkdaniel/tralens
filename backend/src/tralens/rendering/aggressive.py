@@ -602,6 +602,26 @@ def printed_effect_color(crop, own, predicted, source, target):
     return None
 
 
+def caption_band(plate, own, blocked):
+    """Find the continuous face of a ribbon or narrow sign around a printed line."""
+    _, _, sw, sh = cv2.boundingRect(own.astype(np.uint8))
+    if sw < 1.8*sh or sh < 8:
+        return None
+    lab = cv2.cvtColor(plate, cv2.COLOR_RGB2LAB).astype(np.int16)
+    center = np.median(lab[own], axis=0)
+    close = np.linalg.norm(lab-center, axis=2) <= 27
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(close.astype(np.uint8), connectivity=4)
+    counts = np.bincount(labels[own], minlength=len(stats))
+    if len(counts) < 2:
+        return None
+    label = 1 + counts[1:].argmax()
+    _, top, w, h, area = stats[label]
+    if (counts[label] < .8*own.sum() or top == 0 or top+h == plate.shape[0] or
+            w < max(1.5*sw, 3*h) or h > 2*sh or area < .8*w*h):
+        return None
+    return p.erode(labels == label, max(2, round(h*.08))) & ~blocked
+
+
 def narrow_strip_layout(text, font_data, coverage, paper, style):
     """Fit a rotated caption inside the clean vertical paper left by its source."""
     # Work horizontally during shaping so breaks follow the long axis. A
@@ -1417,6 +1437,29 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                         ladder = [(name,mask & ~guard & p.dilate(own,3)) for name,mask in ladder]
                         content = mask
                         entry['placement_frame'] = 'small_ink_aside'
+            if (layer is None and backend is not None and len(ids) in (2,3)
+                    and entry.get('placement_failure','').startswith('overflow:')
+                    and probability is not None and predicted[own].any() and np.median(np.ptp(crop[own],axis=1)) > 24
+                    and len(row['binding']['text'].split()) <= 6):
+                # Compact stacked lettering on a painted sign can fit at its
+                # printed height. Establish a layout before requesting inpainting.
+                boxes = [cv2.boundingRect(np.int32(geometry.raw[(type(k).__name__,k)]['polygon'])) for k in ids]
+                if all(w >= 1.35*h for _,_,w,h in boxes):
+                    room = p.dilate(own,3) & ~placement_protected
+                    ink = 255 if np.median(crop[own] @ [.2126,.7152,.0722]) < 116 else 0
+                    floor = max(10, min(style['min_size'],round(min(h for _,_,_,h in boxes)*.55)))
+                    frame = Image.fromarray(np.uint8(room)*255)
+                    try:
+                        layer,proof = n.layout(row['binding']['text'],font_data,coverage,frame,
+                            {**style,'min_size':floor,'max_size':max(floor,style['min_size']),
+                             'leading':.08,'fill':[ink]*3,'outline':1,'outline_fill':[255-ink]*3})
+                    except n.ResourceLimit:
+                        raise
+                    except ValueError:
+                        pass
+                    else:
+                        content = frame
+                        entry['placement_frame'] = 'stacked_painted_label'
             entry.update(bounds=bounds,layout=proof,mask_evidence=evidence)
             artifacts[f'recovery-{i:03d}-original.png']=Image.fromarray(crop)
             artifacts[f'recovery-{i:03d}-lettering-evidence.png']=Image.fromarray(predicted.astype(np.uint8)*255)
@@ -1828,6 +1871,42 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                     layer = alternative
                     entry['layout'] = job['proof'] = metrics
                     entry['placement_frame'] = 'restored_dialogue_surface'
+        if (layer is not None and len(ids)==1 and not row.get('effect_style')
+                and not style.get('rotation') and '\n' in job['proof']['draw_text']
+                and '\n' not in row['binding']['text'] and 1 < len(row['binding']['text'].split()) <= 6):
+            band = caption_band(candidate, job['own'], job['protected'] | clearance[y:b,x:r])
+            if band is not None and band.any():
+                if font_resolver is not None:
+                    font_data,coverage = font_resolver(row)
+                ink = 0 if np.median(candidate[band] @ [.2126,.7152,.0722]) >= 116 else 255
+                size = job['proof']['size']
+                try:
+                    alternative,metrics = n.layout(row['binding']['text'],font_data,coverage,
+                        Image.fromarray(np.uint8(band)*255),{**style,'min_size':max(8,round(.75*size)),
+                        'max_size':size,'fill':[ink]*3,'outline':0},fixed_breaks=())
+                except n.ResourceLimit:
+                    raise
+                except ValueError:
+                    pass
+                else:
+                    layer,job['proof'] = alternative,metrics
+                    entry.update(layout=metrics,placement_frame='single_line_caption_band')
+        if (layer is not None and method in ('dominant_surface_fill','measured_uniform_fill')
+                and re.search(r'[-‐]\n',job['proof']['draw_text']) and not row.get('effect_style')):
+            # Try the restored paper between adjacent figures before splitting
+            # a name at the narrow boundary of its original vertical columns.
+            room = (p.dilate(job['own'], max(3,style['min_size']//2)) & (candidate.min(2)>=244)
+                    & ~job['protected'] & ~clearance[y:b,x:r])
+            if room.any():
+                if font_resolver is not None:
+                    font_data,coverage = font_resolver(row)
+                ink_style = job['proof']['resolved_style']
+                lettering = {**style, **{k:ink_style[k] for k in ('min_size','fill','outline','outline_fill','leading')}}
+                alternative = n.unbroken_compounds(row['binding']['text'],font_data,coverage,
+                    Image.fromarray(np.uint8(room)*255),lettering,job['proof'],n.LayoutWork())
+                if alternative:
+                    layer,job['proof'] = alternative
+                    entry.update(layout=job['proof'],placement_frame='restored_paper_compound')
         local_alpha=np.asarray(layer.getchannel('A'))!=0 if layer is not None else np.zeros_like(mask)
         small_balloon = (len(row['binding']['member_ids'])==1 and sh>1.3*sw and
                          1 <= len(row['binding']['text'].split()) <= 5)

@@ -380,6 +380,26 @@ def validate_text(text, coverage):
     require(all(ord(c) in coverage for c in text if c != "\n"), "missing glyph coverage")
 
 
+def unbroken_compounds(text,font_data,coverage,mask,style,proof,work):
+    """Retry a short caption without breaking a word at its printed hyphen."""
+    breaks = proof['inserted_break_offsets']
+    if not breaks or len(text.split())>6 or '\n' in text:
+        return None
+    hyphens = {m.end(1) for m in re.finditer(r"(?<![A-Za-z])([A-Za-z]{2,12}[-‐])[A-Za-z]{2,9}(?![A-Za-z])",text)}
+    if not hyphens.intersection(breaks):
+        return None
+    try:
+        return layout(text,font_data,coverage,mask,
+            {**style,'min_size':max(style['min_size'],round(proof['size']*.75)),'max_size':proof['size']},
+            work=work,fixed_breaks=[i for i in breaks if i not in hyphens])
+    except ResourceLimit:
+        raise
+    except ValueError as error:
+        if not str(error).startswith('overflow:'):
+            raise
+        return None
+
+
 def layout(text, font_data, coverage, mask, style, *, work=None, line_rank=None, fixed_breaks=None):
     budget_check(mask.mode == "L" and mask.width*mask.height <= MAX_PAGE_PIXELS, "layout page pixel budget")
     validate_text(text, coverage)

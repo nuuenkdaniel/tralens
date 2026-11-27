@@ -10,6 +10,12 @@ from tralens.translation import rendition
 
 
 class SingleRendition(unittest.TestCase):
+    @unittest.skipUnless(all(importlib.util.find_spec(k) for k in ('fugashi','unidic_lite','jaconv')),'local dictionary unavailable')
+    def test_affectionate_suffix_requires_a_personal_name(self):
+        self.assertEqual(rendition.affectionate_name('お願い、健太たん'),('健太','Kenta'))
+        self.assertIsNone(rendition.affectionate_name('それを見てたんだ'))
+        self.assertIn('Kenta-tan',rendition.self_contained_prompt('お願い、健太たん'))
+
     def test_playful_retraction_needs_the_standalone_interjection_and_neighboring_joke(self):
         self.assertIn('冗談だよ',rendition.playful_retraction('なんちゃって！',['冗談だよ']))
         self.assertFalse(rendition.playful_retraction('なんて素敵だ',['冗談だよ']))
@@ -416,6 +422,14 @@ class SingleRendition(unittest.TestCase):
         self.assertEqual(rendition.visual_retry('力千','Rikisen'),rendition.CLICK)
         self.assertIsNone(rendition.visual_retry('千人','A thousand people'))
 
+    def test_facial_effect_rechecks_contact_only_when_the_first_reading_implies_a_bite(self):
+        self.assertEqual(rendition.visual_retry('クワッ','*chomp*'),rendition.FACIAL_MOTION)
+        self.assertIsNone(rendition.visual_retry('クワッ','Gasp!'))
+        self.assertIsNone(rendition.visual_retry('もぐもぐ','munch'))
+        observed={'object_between_teeth':'none','visible_motion':'eyes wide','lettering':'Gasp!'}
+        self.assertEqual(rendition.facial_lettering(observed),'Gasp!')
+        self.assertIsNone(rendition.facial_lettering({**observed,'object_between_teeth':'sandwich'}))
+        self.assertFalse(rendition.candidate_matches(rendition.FACIAL_MOTION,'chomp','Kwahh','くわっ'))
     def test_visual_retry_is_selective_and_keeps_valid_localizations(self):
         for source, primary, policy in [
                 ('ピーッ', 'Sproing!', rendition.VISUAL_TONE), ('ピーッ', 'Whistle!', None),

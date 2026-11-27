@@ -91,6 +91,7 @@ BIRD_SOUND = re.compile(r'ピ[ーイ]?チク|パ[ーア]?チク|ポッポ')
 VISUAL_ACTOR = 'unstated_actor_in_question'
 VISUAL_OWNER = 'unmarked_part_owner'
 VISUAL_TONE = 'sound_source_mismatch'
+FACIAL_MOTION = 'ambiguous_facial_motion'
 VISUAL_REACTION = 'spoken_reaction_mismatch'
 UNMARKED_PART = re.compile(r'(?<![一-鿿の])(?:目|眼|耳|口|手|足|腕|顔|首|頭|背中|羽|尾|翼)を')
 URGENT = 'colloquial_urgency'
@@ -181,7 +182,7 @@ PRINTED_SPELLING = "printed_latin_spelling"
 # Exclude numeric dimensions and product names on either side of a crossover.
 SPELLING_TOKEN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]{3,}×[a-z]*(?![A-Za-z0-9×])")
 
-VISUAL_POLICIES = (PRINTED_SPELLING, VISUAL_PERMISSION, VISUAL_SOUND, VISUAL_ACTOR, VISUAL_OWNER, VISUAL_TONE, VISUAL_REACTION, CLICK)
+VISUAL_POLICIES = (FACIAL_MOTION, PRINTED_SPELLING, VISUAL_PERMISSION, VISUAL_SOUND, VISUAL_ACTOR, VISUAL_OWNER, VISUAL_TONE, VISUAL_REACTION, CLICK)
 
 
 def visual_guide(policy, source, punctuation):
@@ -220,6 +221,9 @@ def visual_retry(source, primary):
     token = SPELLING_TOKEN.search(source)
     if token and token[0] in primary and len(SPELLING_TOKEN.findall(source))==1:
         return PRINTED_SPELLING
+    if (re.fullmatch(r'(?:く[わゎ]|ク[ワヮ])[っッ][!！…]*',source.strip())
+            and re.fullmatch(r'(?:chomp|crunch|bite|munch)[.!…]*',primary.strip().strip('*_'),re.I)):
+        return FACIAL_MOTION
     if positive_reaction(source) and re.match(r'^\W*(?:ugh|yuck|eww?)\b',primary,re.I):
         return VISUAL_REACTION
     if UNMARKED_PART.search(source) and re.search(r'\b(?:my|your|his|her|our|their)\s+(?:eyes?|ears?|mouth|hands?|feet|foot|arms?|face|neck|head|back|wings?|tail)\b',primary,re.I):
@@ -459,6 +463,14 @@ def verified_spelling(source, primary, response):
     return primary
 
 
+def facial_lettering(review):
+    # An actual bite or an ambiguous image keeps its original translation.
+    if (str(review.get('object_between_teeth','')).strip(' .').lower() in ('none','nothing','empty','no object')
+            and isinstance(review.get('visible_motion'),str) and review['visible_motion'].strip()):
+        return review.get('lettering')
+    return None
+
+
 def candidate_matches(policy, primary, candidate, source='', *, term=None):
     if ' / ' in candidate:
         return False
@@ -490,7 +502,9 @@ def candidate_matches(policy, primary, candidate, source='', *, term=None):
             return 0 < len(candidate.split()) <= 2*len(primary.split())+4 and '\n' not in candidate
         if policy == VISUAL_REACTION:
             return '\n' not in candidate and 2<=len(candidate.split())<=2*len(primary.split())+4
-        if policy == VISUAL_TONE:
+        if policy == FACIAL_MOTION and re.match(r'k(?:u?w|v)a',candidate,re.I):
+            return False
+        if policy in (VISUAL_TONE, FACIAL_MOTION):
             return bool(re.fullmatch(r"[A-Za-z][A-Za-z'-]*(?: [A-Za-z'-]+)?[!….]*", printed_cadence(source,candidate)))
         if policy == VISUAL_PERMISSION:
             verb = PERMISSION_COMMAND.match(re.sub(r"^did you\s+", "", primary.strip(), flags=re.I))
@@ -552,6 +566,14 @@ def payload(original, policy=POLICY, source='', *, term=None, punctuation='', sc
         raise ValueError('single-rendition retry requires one native specialist user message')
     text=messages[0]['content']
     marker='Please translate the following '
+    if policy == FACIAL_MOTION:
+        messages[0]['content'] = ('Identify what, if anything, is between the teeth. If the mouth is empty, '
+            'render the sudden facial reaction rather than chewing. The Japanese effect '+source+
+            ' marks a sudden widening of eyes or mouth. For lettering, use one idiomatic English comic effect. '
+            'Do not transliterate the kana.')
+        fields = ('object_between_teeth','visible_motion','lettering')
+        result['format']={'type':'object','properties':{f:{'type':'string'} for f in fields},'required':list(fields)}
+        return result
     if marker not in text:raise ValueError('unknown specialist prompt structure')
     if policy == PRINTED_SPELLING:
         word = SPELLING_TOKEN.search(source)[0]
@@ -1054,7 +1076,30 @@ def announced_item_effect(source, nearby):
     return ''
 
 
+def affectionate_name(source):
+    """Separate a diminutive suffix from a dictionary-confirmed personal name."""
+    if 'たん' not in source:
+        return None
+    try:
+        from fugashi import Tagger
+        import unidic_lite
+        import jaconv
+        words = list(Tagger(f'-d "{unidic_lite.DICDIR}"')(source))
+    except (ImportError, RuntimeError):
+        return None
+    for name, suffix in zip(words, words[1:]):
+        if (suffix.surface == 'たん' and suffix.feature.pos1 == '接尾辞' and
+                name.feature.pos3 == '人名' and name.feature.kana):
+            return name.surface, jaconv.kata2alphabet(name.feature.kana).capitalize()
+    return None
+
+
 def self_contained_prompt(source, nearby=()):
+    if named := affectionate_name(source):
+        name, reading = named
+        return (f'Translate this manga dialogue. The personal name {name} and affectionate suffix たん '
+                f'are two parts. Write the form of address as {reading}-tan. Translate the rest naturally. '
+                'Output only the English line. '+source)
     if (re.search(r'[てで]おいて(?:ね|よ)?[。！!]*$',source)
             and not re.search(r'勝手に|無断で|くせに|[私僕俺]が|わたしが',source)):
         return ('Translate the standalone Japanese line into natural dialogue. The final te-oite form asks '

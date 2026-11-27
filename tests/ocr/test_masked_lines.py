@@ -14,6 +14,45 @@ def rectangle(x,y,w,h):
 
 
 class MaskedLinesTests(unittest.TestCase):
+    def test_sign_header_needs_local_and_whole_sign_agreement_and_an_empty_location(self):
+        from tralens.ocr.handwritten_lines import painted_sign_headers
+        page=Image.new('RGB',(200,160),(140,96,65))
+        top=Text_Box(1,.98,rectangle(66,72,64,28),'森の')
+        base=Text_Box(2,.98,rectangle(81,95,34,18),'入口')
+        boxes=[top,base]
+        whole='案内森の入口'
+        trial=painted_sign_headers(page,boxes,Mock(side_effect=['案内']*3+[whole]*3))
+        self.assertEqual([v.text for v in trial],['案内','森の','入口'])
+        self.assertEqual(trial[0].ocr_metadata['masked_passage']['ids'],[3,1,2])
+        self.assertEqual(painted_sign_headers(page,boxes,Mock(side_effect=['案内','注意'])),boxes)
+        occupied=[*boxes,Text_Box(3,.99,rectangle(80,54,30,16),'別館')]
+        self.assertEqual(painted_sign_headers(page,occupied,Mock(side_effect=AssertionError)),occupied)
+
+    def test_slanted_note_requires_the_punctuation_to_be_visible_in_isolation(self):
+        from tralens.ocr.handwritten_lines import annotated_note
+        page=Image.new('RGB',(220,120),'white')
+        columns=[Text_Box(i,.9,rectangle(x,20,25,64),word) for i,(x,word) in
+                 enumerate([(146,'そして'),(110,'学校'),(74,'に行く')])]
+        weak=Text_Box(3,.5,rectangle(39,20,22,64),'二')
+        whole='そして学校に行く!!'
+        reads=[whole]*3+[v.text for v in columns for _ in range(3)]
+        self.assertIsNone(annotated_note(page,columns,[weak],Mock(side_effect=reads+['い']*3)))
+        result=annotated_note(page,columns,[weak],Mock(side_effect=reads+['!!']))
+        self.assertEqual(result[1][0].ocr_metadata['masked_passage']['reading'],whole)
+        self.assertEqual(result[1][-1].text,'!!')
+
+    def test_handwritten_noun_preserves_the_separate_particle_and_rejects_a_disputed_ending(self):
+        from tralens.ocr.handwritten_lines import fragmented_noun
+        page=Image.new('RGB',(180,180),'white')
+        top=Text_Box(1,.95,rectangle(78,31,30,31),'美')
+        base=Text_Box(2,.75,rectangle(82,57,35,39),'術')
+        tail=Text_Box(3,.95,rectangle(55,73,22,36),'を')
+        boxes=[top,base,tail]
+        reads=['美術館を']*2+['美術館']*2+['を']*3
+        result=fragmented_noun(page,tail,boxes,Mock(side_effect=reads))
+        self.assertEqual([v.text for v in result[1]],['美','術館','を'])
+        self.assertIsNone(fragmented_noun(page,tail,boxes,Mock(side_effect=['美術館を','美術館で'])))
+
     def test_handwritten_repeat_needs_the_same_opening_beat_when_read_separately(self):
         from PIL import ImageDraw
         page=Image.new('RGB',(240,230),'white')

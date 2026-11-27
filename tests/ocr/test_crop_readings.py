@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import asdict,replace
 import json
+import importlib.util
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -18,6 +19,13 @@ from tralens.translation.contracts import automatic_units,canonical
 
 
 class CropReadings(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec('fugashi') and importlib.util.find_spec('unidic_lite'),'local dictionary unavailable')
+    def test_unanimous_label_repairs_a_split_compound_but_preserves_valid_words(self):
+        for source,target in [('魔女の楼家','魔女の棲家'),('祭の歓客','祭の観客')]:
+            self.assertTrue(c.selection(source,[target]*3,[.99,.98],'horizontal'))
+            self.assertFalse(c.selection(source,[target,source,target],[.99,.98],'horizontal'))
+        self.assertFalse(c.selection('町の書家',['町の画家']*3,[.99,.98],'horizontal'))
+
     def test_sound_ending_requires_agreement_and_current_source_pixels(self):
         poly=[[4,4],[26,4],[26,30],[4,30]]
         evidence=[dict(source_id=1,polygon=poly,text='どばん',reason='neighbor_overlap')]

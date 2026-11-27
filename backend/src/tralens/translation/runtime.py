@@ -885,7 +885,7 @@ class PreviewTranslator:
                     try:
                         punctuation = ''
                         if retry_policy in rendition.VISUAL_POLICIES:
-                            if retry_policy in (rendition.VISUAL_OWNER, rendition.VISUAL_TONE, rendition.VISUAL_REACTION):
+                            if retry_policy in (rendition.VISUAL_OWNER, rendition.VISUAL_TONE, rendition.VISUAL_REACTION, rendition.FACIAL_MOTION):
                                 png, bounds, punctuation = self.context_crop(request.units[0], panel=True)
                             else:
                                 png, bounds, punctuation = self.context_crop(request.units[0])
@@ -901,6 +901,8 @@ class PreviewTranslator:
                         failed=notify({'attempt':attempts,'status':'response','purpose':retry_policy,'response_json':raw})
                         if failed is not None:return failed
                         candidate=candidate.text if isinstance(candidate,Generation) else candidate
+                        if retry_policy == rendition.FACIAL_MOTION:
+                            candidate = rendition.facial_lettering(strict_json(candidate))
                         if retry_policy == rendition.PRINTED_SPELLING:
                             candidate = rendition.verified_spelling(unit.selected.text,primary,candidate)
                         if retry_policy == rendition.NOUN_LABEL:

@@ -79,6 +79,12 @@ class TypographyTests(unittest.TestCase):
         self.assertIn('\n',narrow['draw_text'])
         self.assertGreaterEqual(narrow['size'],self.style['min_size'])
 
+    def test_short_address_keeps_its_hyphenated_name_on_one_line_when_room_permits(self):
+        text = 'Listen, Nina-san.'
+        _,meta,_ = self.layout(text,Image.new('L',(135,150),255))
+        self.assertIn('Nina-san.',meta['draw_text'])
+        self.assertEqual(meta['draw_text'].replace('\n',''),text)
+
     def test_comfortable_fit_is_inset_and_does_not_always_maximize_font(self):
         mask = Image.new('L', (180, 160), 255)
         layer, meta, content = self.layout('Hello there!', mask)

@@ -212,6 +212,9 @@ def fit(text, font_data, coverage, mask, style, *, work=None):
     for mode, current in modes:
         try:
             layer, provenance = n.layout(text, font_data, coverage, mask, current, work=work)
+            alternative = n.unbroken_compounds(text,font_data,coverage,mask,current,provenance,work)
+            if alternative:
+                layer,provenance = alternative
             attempts.append({'method': mode, 'status': 'fit', 'size': provenance['size']})
             break
         except n.ResourceLimit:
