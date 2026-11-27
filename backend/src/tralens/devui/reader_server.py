@@ -24,6 +24,12 @@ DOWNLOAD_PATH = re.compile(rf"/api/library/(?:books/{ID}/(?:original|translated|
 
 
 class ReaderHandler(Handler):
+    def end_headers(self):
+        if getattr(self, "renewed_cookie", None):
+            self.send_header("Set-Cookie", self.renewed_cookie)
+            self.renewed_cookie = None
+        super().end_headers()
+
     def request_token(self):
         return hmac.digest(self.server.app.token.encode(), self.server.accounts.session_id(self), "sha256").hex()
 

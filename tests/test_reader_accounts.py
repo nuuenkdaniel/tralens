@@ -7,6 +7,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 from PIL import Image
@@ -77,6 +78,41 @@ class AccountTests(unittest.TestCase):
         status, fresh, _ = self.call("/api/auth/login", data)
         self.assertEqual(status, 204)
         self.assertNotEqual(cookie, fresh.split(";")[0])
+
+    def test_remembered_devices_renew_and_revoke_independently(self):
+        first, _ = self.register("reader")
+        status, header, _ = self.call("/api/auth/login", {"username": "reader", "password": "a long test passphrase"})
+        self.assertEqual(status, 204)
+        second = header.split(";")[0]
+        self.assertIn("Max-Age=7776000", header)
+        self.stop()
+        self.start()
+        self.assertEqual(self.call("/api/library", cookie=first)[:2], (200, ""))
+        with self.http.library.db() as db:
+            db.execute("UPDATE reader_sessions SET expires=?", (int(time.time()) + 100,))
+        status, renewal, _ = self.call("/api/config", cookie=first)
+        self.assertEqual(status, 200)
+        self.assertTrue(renewal.startswith(first + ";"))
+        self.assertIn("Max-Age=7776000", renewal)
+        with self.http.library.db() as db:
+            expiry = db.execute("SELECT MAX(expires) FROM reader_sessions").fetchone()[0]
+            self.assertGreater(expiry, time.time() + 89 * 86400)
+        status, deletion, _ = self.call("/api/auth/logout", {}, first)
+        self.assertEqual(status, 204)
+        self.assertIn("Max-Age=0", deletion)
+        self.stop()
+        self.start()
+        self.assertEqual(self.call("/api/config", cookie=first)[0], 401)
+        self.assertEqual(json.loads(self.call("/api/config", cookie=second)[2])["username"], "reader")
+
+    def test_rotating_legacy_owner_key_invalidates_remembered_session(self):
+        _, header, _ = self.call("/api/owner/login", (self.root / "owner.key").read_bytes())
+        cookie = header.split(";")[0]
+        self.assertEqual(self.call("/api/config", cookie=cookie)[0], 200)
+        self.stop()
+        (self.root / "owner.key").write_text("r" * 48)
+        self.start()
+        self.assertEqual(self.call("/api/config", cookie=cookie)[0], 401)
 
     def stop(self):
         # Keep the temporary library for the restart.
@@ -194,6 +230,7 @@ class AccountTests(unittest.TestCase):
         self.stop()
         self.start()
         self.assertFalse(json.loads(self.call("/api/auth/settings")[2])["setup_required"])
+        self.assertEqual(json.loads(self.call("/api/config", cookie=owner)[2])["username"], name)
         status, cookie, _ = self.call("/api/auth/login", {"username": name, "password": "a long test passphrase"})
         self.assertEqual(status, 204)
         owner = cookie.split(";")[0]
@@ -267,7 +304,6 @@ class AccountTests(unittest.TestCase):
             self.assertEqual(self.call("/api/auth/login", data)[0], 401)
         self.assertEqual(self.call("/api/auth/login", data)[0], 429)
         self.assertEqual(self.http.accounts.attempts[("login", None)][0], 12)
-        sessions = self.http.accounts.sessions
-        key = next(iter(sessions))
-        sessions[key] = ("one", 0)
+        with self.http.library.db() as db:
+            db.execute("UPDATE reader_sessions SET expires=0")
         self.assertEqual(self.call("/api/library", cookie=cookie)[0], 401)

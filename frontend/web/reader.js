@@ -1727,7 +1727,11 @@ async function init() {
   } catch (err) {
     if ($("#account-form")) return;
     config = null;
-    showAccountForm("Could not open this server. Check its address and try again.");
+    accountCard("Server unavailable", "Check your connection to " + location.host + " and try again.",
+      '<button type="button" class="primary" id="retry-server">Retry connection</button>' +
+      '<button type="button" class="account-switch" id="choose-server">Change server</button>');
+    $("#retry-server").onclick = init;
+    $("#choose-server").onclick = () => showServerForm();
   }
 }
 if (location.hash.startsWith("#setup=")) {

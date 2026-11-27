@@ -28,7 +28,7 @@ docker compose exec reader cat /library/owner-setup.url
 
 Open that link on your phone or computer to choose the owner's credentials. The link expires when setup succeeds or the reader restarts. After a restart during setup, read the file again. Future sign-ins use the chosen username and password.
 
-Existing owner-key installations continue to use the username `owner` and the same key. Keep the library and key together when restoring backups. Browser sessions expire after seven days or a server restart.
+Existing owner-key installations continue to use the username `owner` and the same key. Keep the library and key together when restoring backups. The reader remembers each signed-in browser or app across restarts. Active devices renew their sessions daily, and a session expires after about 90 days of inactivity. On a shared device, use **Settings → Sign out** to revoke its session. Other devices stay signed in.
 
 Set up a local reverse proxy that preserves the original Host header. For example, configure DNS and use Caddy.
 
@@ -72,7 +72,7 @@ Disconnect in Tralens Settings or run `docker compose exec reader python backend
 
 The default upload and job storage budget is 8 GiB, with up to 2 GiB reserved per job. Keep free disk space beyond that budget for temporary files, models, and backups. Deleting a book in the reader removes its library entries. To reclaim older job artifacts, stop the service and back up the tree before archiving selected job directories. Removing a job directory also removes its job history and can affect saved transcript or diagnostic access.
 
-Stop the reader before backing up. Protect backups as they may contain owner keys and OAuth credentials. Restore into an empty directory while the reader is stopped, preserving ownership and permissions. Use the same image version for the first start after restoring. Store the data on a local filesystem with file locks and atomic renames.
+Stop the reader before backing up. Protect backups as they may contain owner keys and OAuth credentials. Restore into an empty directory while the reader is stopped, preserving ownership and permissions. On a backup containing the reader_sessions table, run `DELETE FROM reader_sessions;` in the restored `reader.sqlite3` before starting the reader to discard saved logins, including any revoked since the backup. Use the same image version for the first start after restoring. Store the data on a local filesystem with file locks and atomic renames.
 
 Before upgrading, save the current digest-pinned `TRALENS_IMAGE` and take a stopped backup. Change `TRALENS_IMAGE` to the new release digest, check the release notes, and run:
 
