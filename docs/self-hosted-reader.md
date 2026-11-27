@@ -4,6 +4,8 @@ Start with the [Docker Compose quick start](../README.md#quick-start) on Linux x
 
 ## Local models
 
+The optional `ollama` Compose profile runs CPU inference and stores models in `tralens-data/ollama`. Use `TRALENS_OLLAMA_PORT` to change its loopback port. For GPU inference, point `TRALENS_OLLAMA` at your GPU-enabled Ollama service.
+
 Keep Ollama on the same host at `http://127.0.0.1:11434` or set `TRALENS_OLLAMA` to a private IP address you control. Use [Ollama's local-only mode](https://docs.ollama.com/faq) if you want Ollama to avoid cloud features. Verify the service and model before adding pages.
 
 ```sh
@@ -11,11 +13,11 @@ curl -fsS http://127.0.0.1:11434/api/tags
 ollama list
 ```
 
-Compose defaults to `translategemma:4b`. For the 12B or 27B model, pull the specific tag and set `TRALENS_MODEL` to match. If you configure a different local model family, use `TRALENS_MODEL_PROFILE=generalist`. Restart with `docker compose up -d --wait`. Choose **Local** in reader Settings. Set `TRALENS_FRONTIER_PROVIDER=disabled` to hide GPT models and disable the ChatGPT integration.
+Compose defaults to `translategemma:12b`. For 27B, pull `translategemma:27b` and set `TRALENS_MODEL` to match. If you configure a different local model family, use `TRALENS_MODEL_PROFILE=generalist`. Restart with `docker compose up -d --wait`. Choose **Local** in reader Settings. Set `TRALENS_FRONTIER_PROVIDER=disabled` to hide GPT models and disable the ChatGPT integration.
 
 ## Remote access over HTTPS
 
-For personal access, an SSH tunnel from your computer can reach the loopback reader as shown in the README. Keep the remote end of the tunnel private. On a shared host, every user who can connect to loopback can reach an unauthenticated reader. Enable owner mode in that case.
+For personal access, an SSH tunnel from your computer can reach the loopback reader as shown in the README. Keep the remote end of the tunnel private. The local reader generates `tralens-data/library/owner.key` on first start. Sign in as `owner` with that key. By default anyone who can reach the reader can register, create their own library and use local inference. For an owner-only install, set `TRALENS_REGISTRATION=closed` before first start. Closing registration later preserves existing accounts.
 
 For direct access from your own devices, set `TRALENS_ORIGIN=https://manga.example.com` in `.env`. Use the exact browser origin and omit the trailing slash. Generate the owner key once, using the same account that owns the configuration directory.
 
@@ -24,7 +26,7 @@ For direct access from your own devices, set `TRALENS_ORIGIN=https://manga.examp
 docker compose up -d --wait
 ```
 
-Save the key securely and enter it at the HTTPS reader. Sessions expire after seven days or a restart. Restart after replacing the key to invalidate all sessions. If the upgrade comes from an older Compose config that mounted a separate key file, place that existing key at `owner.key` under the configured `TRALENS_CONFIG` directory with mode 0600.
+Save the key securely and use it as the password for `owner` at the HTTPS reader. Sessions expire after seven days or a restart. Restart after replacing the key to invalidate all sessions. If the upgrade comes from an older Compose config that mounted a separate key file, place that existing key at `owner.key` under the configured `TRALENS_CONFIG` directory with mode 0600.
 
 Set up a local reverse proxy that preserves the original Host header. For example, configure DNS and use Caddy.
 
@@ -58,10 +60,10 @@ Disconnect in Tralens Settings or run `docker compose exec reader python backend
 
 | Default path | Contents |
 | --- | --- |
-| `tralens-data/library` | SQLite library, originals, translated pages, and per-job evidence |
+| `tralens-data/library` | Account names and password verifiers, local owner key, SQLite library, originals, translated pages, and per-job evidence |
 | `tralens-data/config` | Owner key for HTTPS and protected ChatGPT configuration |
 | `tralens-data/state` | Runtime and inference state, caches, and upload scratch space |
-| `tralens-data/models` | Downloaded PaddleOCR models |
+| `tralens-data/models` | Optional external OCR exports |
 | `tralens-data/assets` | Optional operator-supplied assets |
 
 The default upload and job storage budget is 8 GiB, with up to 2 GiB reserved per job. Keep free disk space beyond that budget for temporary files, models, and backups. Deleting a book in the reader removes its library entries. To reclaim older job artifacts, stop the service and back up the tree before archiving selected job directories. Removing a job directory also removes its job history and can affect saved transcript or diagnostic access.
@@ -72,7 +74,6 @@ Before upgrading, save the current digest-pinned `TRALENS_IMAGE` and take a stop
 
 ```sh
 docker compose pull reader
-docker compose run --rm --pull never setup
 docker compose up -d --wait --pull never
 ```
 
@@ -95,8 +96,7 @@ Clone the release tag or branch you want. Follow the README for `.env` and direc
 
 ```sh
 docker compose -f compose.yml -f compose.build.yml build reader
-docker compose run --rm --pull never setup
 docker compose up -d --wait --pull never
 ```
 
-The image includes a DejaVu Sans font manifest for English lettering. To use a licensed custom static font, place it and its license under `tralens-data/assets` and point `TRALENS_FONTS` at its manifest under `/assets`. Use the [manifest format](../DEVELOPMENT.md#explicit-font-manifest), with container paths and hashes. The default Compose command expects one face. More advanced startup arguments and a native developer install are in the [development guide](../DEVELOPMENT.md).
+The image includes DejaVu Sans and Comic Neue. It uses the pinned PaddleOCR detector and recognizer under `/opt/tralens/ocr`. To use an external copy, set `TRALENS_OCR_ROOT=/models` and place the exports in `TRALENS_MODELS`. The optional `docker compose run --rm setup` command copies the bundled exports into that directory. To use a licensed custom static font, place it and its license under `tralens-data/assets` and point `TRALENS_FONTS` at its manifest under `/assets`. Use the [manifest format](../DEVELOPMENT.md#explicit-font-manifest), with container paths and hashes. Set `default_font_id` in a manifest with multiple faces. Classical inpainting runs on CPU. Auto uses the inpainting backends configured on the server. The base image supplies classical inpainting. GPU SDXL requires a compatible GPU runtime and local weights. The pinned LaMa checkpoint is supported for private noncommercial evaluation only. See the [model notices](../THIRD_PARTY_NOTICES.md#model-and-evaluation-assets) before adding checkpoints. More advanced startup arguments and a native developer install are in the [development guide](../DEVELOPMENT.md).

@@ -14,13 +14,18 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 
-COPY pyproject.toml uv.lock README.md LICENSE THIRD_PARTY_NOTICES.md PRIVACY.md ./
+COPY pyproject.toml uv.lock ./
 RUN --mount=type=bind,from=uv,source=/uv,target=/bin/uv \
     uv sync --locked --no-dev --group inpainting --python /usr/local/bin/python
 RUN python -c "import paddle; from PIL import features; assert features.check_feature('raqm')"
+COPY deploy/download-models.sh deploy/
+RUN HF_HUB_DISABLE_TELEMETRY=1 sh deploy/download-models.sh /opt/tralens/ocr \
+    && chmod -R a+rX /opt/tralens/ocr \
+    && rm -rf /root/.cache/huggingface
 COPY deploy/ deploy/
 RUN python deploy/font-manifest.py \
     && dpkg-query -W -f='${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n' > /app/debian-sources.tsv
+COPY README.md LICENSE THIRD_PARTY_NOTICES.md PRIVACY.md ./
 COPY backend/ backend/
 COPY frontend/web/ frontend/web/
 

@@ -25,14 +25,14 @@ jobs:
           persist-credentials: false
       - name: Build the Linux image
         run: |
-          docker compose config --quiet
+          docker compose --profile ollama --profile setup config --quiet
           docker build --pull --platform linux/amd64 \
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --label "org.opencontainers.image.documentation=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/tree/$GITHUB_SHA" \
             --label "org.opencontainers.image.licenses=GPL-3.0-or-later" \
             --tag "$TRALENS_IMAGE" .
-      - name: Test model setup, owner sign-in, CPU OCR, and restore
+      - name: Test bundled OCR, reader accounts, and backup restoration
         run: bash deploy/smoke-compose.sh
       - name: Publish verified image
         if: inputs.publish
