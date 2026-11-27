@@ -32,6 +32,21 @@ def box(source_id, bounds):
 
 
 class ComplementaryOwnershipTests(unittest.TestCase):
+    def test_small_enclosed_counters_belong_to_print_inside_the_balloon(self):
+        page = np.zeros((240,260,3),np.uint8)
+        page[35:127,30:94] = 255
+        parent = box('main',(43,49,72,110))
+        child = box('reading',(76,56,84,65))
+        for y in range(55,102,9):
+            for x in (47,58):
+                cv2.rectangle(page,(x,y),(x+7,y+6),(0,0,0),1)
+        evidence = OriginalInkEvidence(page)
+        result = evidence.enclosed_annotation_support([parent,child],(0,),(1,),evidence.single_glyph_context())
+        self.assertEqual([r[0] for r in result],['main','reading'])
+        page[:,73:75] = 0
+        evidence = OriginalInkEvidence(page)
+        self.assertFalse(evidence.enclosed_annotation_support([parent,child],(0,),(1,),evidence.single_glyph_context()))
+
     def setUp(self):
         self.image = np.zeros((240,260,3),dtype=np.uint8)
         cv2.rectangle(self.image,(30,40),(100,140),(255,255,255),-1)

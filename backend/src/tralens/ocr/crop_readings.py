@@ -5,6 +5,7 @@ hypothesis, not independent-reader verification. Raw evidence, existing
 alternatives and all failed/disagreeing trials remain available.
 """
 from dataclasses import asdict,is_dataclass
+from difflib import SequenceMatcher
 from io import BytesIO
 import hashlib
 import json
@@ -20,6 +21,7 @@ from . import display_readings,outlined_sounds,sideways_sound,sound_readings,upr
 from .automatic_recognition import AutomaticRecognitionResult
 from .manga_dialogue import valid_bounds
 from .recognition_units import image_fingerprint
+from .types import menu_shortcuts
 from ..translation.contracts import canonical,strict_json
 
 
@@ -35,6 +37,32 @@ def require(value,message):
 def normalized(text):return ''.join(c for c in unicodedata.normalize('NFKC',text) if not c.isspace())
 
 
+def weak_member(lines, readings):
+    """Locate one weak line corroborated in a paragraph whose only dispute is another kanji."""
+    if not 2<=len(lines)<=8 or len(readings)!=3:
+        return None
+    weak=[i for i,v in enumerate(lines) if v['confidence']<.70]
+    if len(weak)!=1 or any(v['confidence']<.95 for i,v in enumerate(lines) if i!=weak[0]):
+        return None
+    words=[normalized(v['text']) for v in lines]
+    i=weak[0]
+    if lines[i]['confidence']<.35 or japanese_count(words[i])<2:
+        return None
+    source=''.join(words)
+    if len(source)<8 or any(not isinstance(s,str) or len(normalized(s))!=len(source) for s in readings):
+        return None
+    alternatives=[normalized(s) for s in readings]
+    differences=[pos for pos,char in enumerate(source) if any(s[pos]!=char for s in alternatives)]
+    if len(differences)!=1:
+        return None
+    pos=differences[0]
+    start=sum(map(len,words[:i]))
+    if (start<=pos<start+len(words[i]) or len({s[pos] for s in alternatives})<2
+            or not all('一'<=s[pos]<='鿿' for s in [source,*alternatives])):
+        return None
+    return i
+
+
 def japanese_count(text):
     return sum(unicodedata.name(c,'').startswith(('HIRAGANA LETTER ','KATAKANA LETTER ',
         'CJK UNIFIED IDEOGRAPH-','CJK COMPATIBILITY IDEOGRAPH-')) for c in text)
@@ -47,13 +75,37 @@ def selection(source,readings,scores,direction):
         return False
     if any(unicodedata.category(c).startswith('C') and c!='\n' for text in readings for c in text):return False
     raw=normalized(source);first=normalized(readings[0])
-    if (raw==first or any(normalized(s)!=first for s in readings[1:]) or japanese_count(first)<1
+    agreed = all(normalized(s)==first for s in readings[1:])
+    if (not agreed and len(scores)==2 and max(scores)>=.90 and normalized(readings[1])==first
+            and re.fullmatch(r'([ぁ-ゖァ-ヺー]{2,4})\1',first)
+            and raw!=first and first.translate(str.maketrans('ゃゅょャュョ','やゆよヤユヨ'))==raw):
+        # Two printed beats support the same small kana. A padded view may
+        # pick up the first stroke again just outside their source polygons.
+        agreed = normalized(readings[2])==first+first[0]
+    if not agreed and normalized(readings[1]) == first and len(first) >= 8:
+        # An interjection can contain an extra small tsu. All lexical content
+        # must agree, including the presence of at least one small tsu there.
+        agreed = re.sub(r'([っッ])\1+',r'\1',first) == re.sub(r'([っッ])\1+',r'\1',normalized(readings[2]))
+    if not agreed and direction=='horizontal' and normalized(readings[1])==first:
+        # Native and isolated menus agree on both labels. Padding the crop
+        # can destroy the visible shortcut boundaries in the third reading.
+        keys = menu_shortcuts(raw)
+        agreed = len(keys)>=2 and keys==menu_shortcuts(first) and keys!=menu_shortcuts(normalized(readings[2]))
+    if (raw==first or not agreed or japanese_count(first)<1
             or sum(c.isalpha() for c in first)<2):
         return False
+    if first in ('「'+raw+'」','『'+raw+'』') and japanese_count(raw)>=2:
+        return True
     # A stable newer reader still misreads Latin names. Do not replace only an
     # ASCII spelling on that model's self-consistency; retain it as an alternative.
     without_latin=lambda s:''.join(c for c in s if not ('a'<=c<='z' or 'A'<=c<='Z'))
     if without_latin(raw)==without_latin(first):return False
+    # A small ッ immediately before the prolonged-vowel mark is easily
+    # confused with full-size ツ. Keep the correction inside a phrase and
+    # require identical readings of all the other characters in every view.
+    if (len(raw)>=5 and raw.count('ッー')==1 and raw.replace('ッー','ツー')==first
+            and all(normalized(s)==first for s in readings)):
+        return True
     # Strong existing readings need independent support. A wholly different
     # detected script can trigger an opt-in hypothesis even at a high raw score.
     return min(scores)<.92 or (japanese_count(raw)==0 and japanese_count(first)>=1)
@@ -169,7 +221,138 @@ def clipped_kana_text(record):
     return None
 
 
+def clipped_column_pair(record):
+    """Padding can drop the shorter left-hand column of a handwritten reply."""
+    reads=record['readings']
+    if (record.get('view_policy') or record['direction']!='vertical' or len(record['polygons'])!=2
+            or len(reads)!=3 or not all(isinstance(v,str) for v in reads) or reads[0]!=reads[1]
+            or not re.fullmatch(r'[ぁ-ゖァ-ヺ一-鿿々ー]{3,14}',reads[0]) or not 1<=len(reads[2])<len(reads[0])
+            or not reads[0].startswith(reads[2]) or reads[0]==record['source'] or max(record['scores'])>=.92):
+        return False
+    bounds=[]
+    for poly in record['polygons']:
+        x,y=zip(*poly)
+        bounds.append((min(x),min(y),max(x),max(y)))
+    (x,t,r,b),(left,top,right,bottom)=bounds
+    return (left<x and abs(t-top)<=.45*(r-x) and bottom<b and -.25*(r-x)<=x-right<.9*(r-x))
+
+
+def column_pair_views(image, record):
+    crops=[]
+    for poly in record['polygons']:
+        x,y=zip(*poly)
+        crops.append(image.crop((int(min(x)),int(min(y)),int(max(x))+1,int(max(y))+1)))
+    return crops
+
+
+def isolated_passage_text(record):
+    """Repeated ink outside the isolated polygons can append part of a nearby line."""
+    reads = record['readings']
+    if (record.get('view_policy') or len(record.get('polygons',()))<2 or len(reads)!=3
+            or not 5<=len(record['source'])<=96 or not record['scores'] or min(record['scores'])>=.92):
+        return None
+    native,isolated,padded = map(normalized,reads)
+    raw = normalized(record['source'])
+    if (isolated!=padded or len(raw)!=len(isolated) or sum(a!=b for a,b in zip(raw,isolated))>1
+            or japanese_count(raw)<5 or not native.startswith(isolated)):
+        return None
+    extra = native[len(isolated):]
+    # A long vowel or small tsu may extend beyond the last polygon of
+    # hand lettering. All three views must still agree on the correction.
+    trailing_emphasis=(len(record['polygons'])>=3 and extra in ('ー','っ','ッ')
+                       and raw[-2:]==isolated[-2:])
+    if 1<=len(extra)<=5 and (extra in isolated or trailing_emphasis) and reads[1]!=record['source']:
+        return reads[1]
+    return None
+
+
+def shared_line_edits(record):
+    """Keep only edits seen in all three presentations of the same multiline sign."""
+    source, views = record['source'], record['readings']
+    if (record.get('view_policy') or record['direction'] != 'horizontal'
+            or len(record['polygons']) < 3 or not 15 <= len(source) <= 128
+            or len(views) != 3 or len(set(views)) != 2 or views[0] != views[1]
+            or min(record['scores']) >= .92 or re.search('[A-Za-z0-9]', source)):
+        return None
+    edits = None
+    for view in (views[0], views[2]):
+        match = SequenceMatcher(None, source, view, autojunk=False)
+        if match.ratio() < .72:
+            return None
+        spans = {(a,b,view[c:d]) for tag,a,b,c,d in match.get_opcodes() if tag != 'equal'}
+        edits = spans if edits is None else edits & spans
+    # At least two independent locations must agree; preserve disputed source ink.
+    if len(edits) < 2:
+        return None
+    for a,b,text in sorted(edits, reverse=True):
+        if max(b-a, len(text)) > 3 or not text or re.search(r'[^ぁ-ゖァ-ヺー一-鿿々!！?？。、]',text):
+            return None
+        source = source[:a]+text+source[b:]
+    return source
+
+
+def anchored_columns(record, columns):
+    """Allow a padded crop to disagree only inside independently legible columns."""
+    reads = record['readings']
+    if (record.get('view_policy') or len(reads)!=3 or not 2<=len(columns)<=8
+            or len(columns)!=len(record['scores']) or ''.join(columns)!=record['source']):
+        return False
+    raw = ''.join(map(normalized,columns))
+    first,second,third = map(normalized,reads)
+    if (first!=second or first==third or raw==first or not 5<=len(first)<=80
+            or min(record['scores'])>.70 or not all(japanese_count(s)>=2 for s in (first,third))):
+        return False
+    confirmed = set()
+    for column,score in zip(columns,record['scores']):
+        word = normalized(column)
+        if score>=.94 and japanese_count(word)>=2 and first.count(word)==1 and raw.count(word)==1:
+            pos = first.index(word)
+            confirmed.update(range(pos,pos+len(word)))
+        if score>.70 and (not word or first.count(word)!=1):
+            return False
+    changes = [(b,c,d,e) for kind,b,c,d,e in SequenceMatcher(None,first,third,autojunk=False).get_opcodes()
+               if kind!='equal']
+    return (len(changes)==1 and 0<changes[0][1]-changes[0][0]<=2
+            and changes[0][1]-changes[0][0]==changes[0][3]-changes[0][2]
+            and set(range(*changes[0][:2]))<=confirmed
+            and selection(record['source'],[first]*3,record['scores'],record['direction']))
+
+
+def column_passage(detections):
+    if not detections:
+        return None
+    anchor = strict_json(detections[0]['metadata_json']).get('corroborated_columns')
+    if isinstance(anchor,dict) and anchor.get('ids')==[v['source_id'] for v in detections]:
+        return anchor.get('reading')
+
+
+def quoted_literal_tail(record):
+    """Keep the original spelling of a quoted Latin literal and reread its Japanese suffix."""
+    if (record.get('view_policy') or record.get('direction')!='horizontal'
+            or len(record.get('scores',[]))!=1 or not .55<=record['scores'][0]<.95
+            or len(record.get('readings',[]))!=3):
+        return
+    pattern = r'["“]([A-Za-z0-9][A-Za-z0-9 ._+/:-]{2,64})["”](.+)'
+    raw=re.fullmatch(pattern,record['source'])
+    if not raw or not raw[2].isascii() or not 2<=len(raw[2])<=24:
+        return
+    tails=[]
+    for value in record['readings']:
+        other=re.fullmatch(pattern,value) if isinstance(value,str) else None
+        if not other or normalized(other[1])!=normalized(raw[1]) or not re.fullmatch(r'[ぁ-ゖァ-ヺー一-鿿々]{3,20}[。！!？?]{0,2}',other[2]):
+            return
+        tails.append(other[2])
+    if all(normalized(t)==normalized(tails[0]) for t in tails):
+        return record['source'][:raw.start(2)]+tails[0]
+
+
 def candidate_text(record):
+    if record.get('quoted_literal_tail'):
+        return quoted_literal_tail(record)
+    if record.get('isolated_passage'):
+        return isolated_passage_text(record)
+    if record.get('shared_line_edits'):
+        return shared_line_edits(record)
     if text := clipped_kana_text(record):
         return text
     if record.get('view_policy')==outlined_sounds.POLICY:
@@ -181,6 +364,22 @@ def candidate_text(record):
 
 
 def select_record(record):
+    if record.get('quoted_literal_tail'):
+        return quoted_literal_tail(record) is not None
+    if pair := record.get('clipped_column_pair'):
+        return (clipped_column_pair(record) and len(pair['readings'])==2 and len(pair['view_hashes'])==2
+                and pair['readings'][0]==record['readings'][2] and ''.join(pair['readings'])==record['readings'][0])
+    if record.get('column_passage'):
+        reads = record['readings']
+        return (len(reads)==3 and reads[0]==reads[1]==record['column_passage']
+                and reads[2] in (reads[0],record['source'])
+                and selection(record['source'],[reads[0]]*3,record['scores'],record['direction']))
+    if record.get('anchored_columns'):
+        return anchored_columns(record,record['column_texts'])
+    if record.get('isolated_passage'):
+        return isolated_passage_text(record) is not None
+    if record.get('shared_line_edits'):
+        return shared_line_edits(record) is not None
     if 'clipped_kana' in record:
         return clipped_kana_text(record) is not None
     if record.get('view_policy')==sideways_sound.POLICY:
@@ -239,6 +438,7 @@ def refine(engine,image,original,*,reader,model_identity,output,max_regions=MAX_
     require(hashlib.sha256(original).hexdigest()==batch['page']['image_sha256']
         and image_fingerprint(image)==batch['page']['pixels_sha256'],'crop reader source binding')
     from ..translation.contracts import automatic_units
+    from .types import is_credit_list
     prior=tuple(getattr(engine,'automatic_recognition_results',()) or ())
     before=prior[0] if prior else [AutomaticRecognitionResult(p['proposal_id']) for p in batch['proposals']]
     results=[AutomaticRecognitionResult(**strict_json(canonical(asdict(r) if is_dataclass(r) else r))) for r in before]
@@ -257,7 +457,15 @@ def refine(engine,image,original,*,reader,model_identity,output,max_regions=MAX_
         if (proposal['annotation_ids'] or ids!=proposal['member_ids'] or not 1<=len(ids)<=8
                 or not (valid_bounds(bounds,image.size) or oversized) or attempted>=max_regions):continue
         detections=[raw[i] for i in ids];source=''.join(d['text'] for d in detections)
-        if not 0<len(source)<=512 or any(d['status'] not in ('accepted','review') for d in detections):continue
+        if len(detections)==1 and detections[0]['reason']=='corroborated_native_line':
+            # The full printed menu and its account field were already
+            # independently read inside their own rows. A larger crop also
+            # includes the neighboring screen rule.
+            metadata=strict_json(detections[0]['metadata_json'])
+            if any(k in metadata for k in ('screen_field','outlined_ellipsis','hollow_print')) or metadata.get('forum_post',{}).get('heading'):
+                continue
+        if (not 0<len(source)<=512 or is_credit_list(source) or
+                any(d['status'] not in ('accepted','review') for d in detections)):continue
         attempted+=1
         record={'proposal_id':proposal['proposal_id'],'source':source,'bounds':bounds,'main_ids':ids,
             'polygons':[d['polygon'] for d in detections],'scores':[d['confidence'] for d in detections],
@@ -291,6 +499,24 @@ def refine(engine,image,original,*,reader,model_identity,output,max_regions=MAX_
                     require(type(value) is str and len(value)<=512,'crop reader output bound/type')
                     target['readings'].append(value)
             read_views(record,display_views if oversized else record_views(image,record))
+            if proposal.get('crop_safe') and (weak:=weak_member(detections,record['readings'])) is not None:
+                from .masked_lines import source_views
+                member=record['weak_member']={'readings':[],'view_hashes':[]}
+                read_views(member,source_views(image,[np.asarray(detections[weak]['polygon'])]),'-weak')
+            passage = column_passage(detections)
+            if passage and not record.get('view_policy') and record['readings'][:2]==[passage,passage]:
+                record['column_passage'] = passage
+            elif quoted_literal_tail(record):
+                record['quoted_literal_tail'] = True
+            elif anchored_columns(record,columns):
+                record.update(anchored_columns=True,column_texts=columns)
+            elif clipped_column_pair(record):
+                pair=record['clipped_column_pair']={'readings':[], 'view_hashes':[]}
+                read_views(pair,column_pair_views(image,record),'-short-columns')
+            elif isolated_passage_text(record):
+                record['isolated_passage'] = True
+            elif shared_line_edits(record):
+                record['shared_line_edits'] = True
             if not select_record(record):
                 windows=sound_readings.presentations(image,record)
                 if windows is not None:
@@ -344,7 +570,8 @@ def validate_candidate(candidate,batch):
         and crop['checked_neighbor_ids']==[d['source_id'] for d in batch['detections'] if d['source_id'] not in proposal['main_ids']]
         and record['proposal_id']==proposal['proposal_id'] and record['main_ids']==proposal['main_ids']
         and record['polygons']==[d['polygon'] for d in main] and record['scores']==[d['confidence'] for d in main]
-        and (record.get('view_policy')!=upright_latin.POLICY or record['column_texts']==[d['text'] for d in main])
+        and (not (record.get('view_policy')==upright_latin.POLICY or record.get('anchored_columns')) or record['column_texts']==[d['text'] for d in main])
+        and (not record.get('column_passage') or record['column_passage']==column_passage(main))
         and record['direction']==proposal['direction'] and record['bounds']==crop['bounds']
         and record['source']==candidate['reference_main_text']==''.join(d['text'] for d in main)
         and candidate['text']==candidate_text(record) and candidate['reviewed'] is False
@@ -354,15 +581,62 @@ def validate_candidate(candidate,batch):
         'crop reading candidate evidence drift')
 
 
-def confirms_raw(record, unit, proposal, image):
-    """Three independently presented crops agree with the raw main reading."""
+def confirms_raw(record, unit, proposal, image, detections=()):
+    """Corroborate bound native lettering from the source pixels."""
+    evidence = strict_json(unit.selected.evidence_json)
+    if (isinstance(evidence,list) and evidence and all(r['reason'] in ('corroborated_mask_line','corroborated_native_line') for r in evidence)):
+        metadata = strict_json(evidence[0]['metadata_json'])
+        peer = metadata.get('repeated_kana')
+        if peer:
+            box=peer.get('peer_bounds',[])
+            if (len(box)!=4 or not all(type(v) is int for v in box) or not valid_bounds(box,image.size)
+                    or image_fingerprint(image.crop(tuple(box)))!=peer.get('peer_digest')):
+                return False
+        color = metadata.get('colored_word') or metadata.get('painted_effect') or peer
+        if len(evidence)==1 and isinstance(color,dict) and color.get('reads')==[unit.selected.text]*3:
+            bounds = color.get('source_bounds',color.get('bounds',[]))
+            if (len(bounds)==4 and all(type(v) is int for v in bounds) and
+                    0<=bounds[0]<bounds[2]<=image.width and 0<=bounds[1]<bounds[3]<=image.height and
+                    (bounds[2]-bounds[0])*(bounds[3]-bounds[1])<=1500000):
+                return color.get('source_digest')==image_fingerprint(image.crop(tuple(bounds)))
+        passage = metadata.get('masked_passage',{})
+        if passage.get('ids')==list(unit.order) and passage.get('reading')==unit.selected.text:
+            if len(evidence)==1 and (note:=metadata.get('outlined_ellipsis')):
+                bounds=note.get('bounds',[])
+                if not valid_bounds(bounds,image.size) or max(bounds[2]-bounds[0],bounds[3]-bounds[1])>640:
+                    return False
+                native=image.crop(tuple(bounds))
+                if image_fingerprint(native)!=note.get('digest'):
+                    return False
+                found=outlined_sounds.outlined_ellipsis(np.asarray(native.convert('L')))
+                return found is not None and passage.get('view_hashes')==[
+                    image_fingerprint(v) for v in outlined_sounds.ellipsis_views(*found)]
+            polygons = [v['polygon'] for v in evidence]
+            from .masked_lines import source_views
+            return passage.get('view_hashes')==[image_fingerprint(v) for v in source_views(image,polygons)]
+    if isinstance(evidence,list) and evidence and all(r['reason']=='corroborated_repeated_effect' for r in evidence):
+        from .repeated_effects import bound_pair
+        return bound_pair(evidence,image,detections)
     if (not record or record.get('error') or record.get('proposal_id') != unit.unit_id
             or record.get('main_ids') != list(unit.order) or record.get('bounds') != proposal['crop_bounds']
-            or record.get('source') != unit.selected.text or record.get('readings') != [unit.selected.text] * 3):
+            or record.get('source') != unit.selected.text
+            or len(record.get('readings',[])) != 3):
         return False
-    evidence = strict_json(unit.selected.evidence_json)
     if record.get('polygons') != [line['polygon'] for line in evidence]:
         return False
+    # Padding sometimes admits one final full stop from outside the native crop.
+    # The independent column join must also identify this exact member sequence.
+    text=unit.selected.text
+    punctuation_only=(record['readings']==[text,text,text+'。'] and column_passage(evidence)==text)
+    if not punctuation_only and not all(isinstance(s,str) and normalized(s)==normalized(text) for s in record['readings']):
+        from .masked_lines import source_views
+        weak=weak_member(evidence,record['readings']) if proposal.get('crop_safe') else None
+        member=record.get('weak_member',{})
+        if weak is None or member.get('readings')!=[evidence[weak]['text']]*3:
+            return False
+        chips=source_views(image,[np.asarray(evidence[weak]['polygon'])])
+        if member.get('view_hashes')!=[image_fingerprint(view) for view in chips]:
+            return False
     return record.get('view_hashes') == [image_fingerprint(view) for view in record_views(image, record)]
 
 
@@ -385,7 +659,8 @@ def preferred_reading(unit):
             and candidate['reference_main_text']==unit.selected.text and record['selected'] is True
             and candidate['text']==reading.text==candidate_text(record)
             and record['source']==unit.selected.text and record['main_ids']==list(unit.order)
-            and (record.get('view_policy')!=upright_latin.POLICY or record['column_texts']==[d['text'] for d in raw])
+            and (not (record.get('view_policy')==upright_latin.POLICY or record.get('anchored_columns')) or record['column_texts']==[d['text'] for d in raw])
+            and (not record.get('column_passage') or record['column_passage']==column_passage(raw))
             and (record.get('view_policy')!=outlined_sounds.POLICY or (len(raw)==1 and raw[0]['reason']=='supplemental_rotated_sound_region'
                 and strict_json(raw[0]['metadata_json'])[outlined_sounds.POLICY]['readings']==record['readings']))
             and record['scores']==[d['confidence'] for d in raw]
@@ -402,6 +677,9 @@ def validate_pixels(candidate,image):
     require(record['bounds']==candidate['crop']['bounds'] and proof['source_pixels_sha256']==image_fingerprint(image)
         and record['view_hashes']==[image_fingerprint(v) for v in record_views(image,record)],
         'crop reading pixels changed')
+    if 'clipped_column_pair' in record:
+        require(record['clipped_column_pair']['view_hashes']==[image_fingerprint(v) for v in column_pair_views(image,record)],
+                'separate column pixels changed')
     if 'clipped_kana' in record:
         extra = clipped_kana_views(image, record)
         require(extra is not None and record['clipped_kana']['view_hashes']==[image_fingerprint(v) for v in extra],

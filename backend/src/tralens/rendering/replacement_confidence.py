@@ -7,6 +7,8 @@ script, source ID, visual-review label or expected word is special-cased here.
 """
 import math
 import re
+import unicodedata
+from urllib.parse import urlsplit
 from dataclasses import replace
 
 from ..translation.contracts import canonical, strict_json
@@ -14,6 +16,42 @@ from ..translation.contracts import canonical, strict_json
 
 POLICY = 'weakest_raw_line_native_cleanup_v1'
 DEFAULT_MINIMUM = .70
+
+
+def pencil_hatching(image, line):
+    """Tiny parallel strokes continuing outside a weak OCR box are drawn texture."""
+    if line.get('confidence',1)>=.55 or not re.fullmatch('[A-Za-z0-9]{1,4}',line.get('text','')):
+        return False
+    import cv2
+    import numpy as np
+    points=np.asarray(line['polygon'])
+    (l,t),(r,b)=points.min(0).astype(int),points.max(0).astype(int)
+    w,h=r-l+1,b-t+1
+    if not (8<=w<=36 and 14<=h<=64):
+        return False
+    pad=min(24,max(10,w))
+    x,y=max(0,l-pad),max(0,t-pad)
+    tile=np.asarray(image.crop((x,y,min(image.width,r+pad+1),min(image.height,b+pad+1))).convert('L'))
+    ink=np.uint8(tile<155)
+    _,labels,stats,centers=cv2.connectedComponentsWithStats(ink)
+    inside_area=ink[t-y:b-y+1,l-x:r-x+1].sum()
+    if inside_area<16:
+        return False
+    inside=outside=covered=0
+    for j,(_,_,width,height,area) in enumerate(stats[1:],1):
+        if not (3<=width<=12 and 1<=height<=width and 3<=area<=26):
+            continue
+        yy,xx=np.nonzero(labels==j)
+        vx,vy,*_=cv2.fitLine(np.float32(np.column_stack((xx,yy))),cv2.DIST_L2,0,.01,.01).ravel()
+        if abs(vx)<.65 or not .15<vy/vx<1.35 or np.std(xx*vy-yy*vx)>.65:
+            continue
+        cx,cy=centers[j]
+        if l<=cx+x<=r and t<=cy+y<=b:
+            inside+=1
+            covered+=area
+        else:
+            outside+=1
+    return inside>=6 and outside>=3 and covered>=.67*inside_area
 
 
 def settings(policy='all', minimum=None):
@@ -38,6 +76,8 @@ def retains_printed_words(unit, target):
     reading = unit.selected
     if reading.origin != 'raw_main_reading' or not re.fullmatch(r'[A-Za-z]{2,128}', reading.text):
         return False
+    if reading.text.isascii() and reading.text.casefold() == target.casefold():
+        return True
     if len(target) > 256 or not re.fullmatch(r'[A-Za-z]+(?:[ ,/]+[A-Za-z]+)*[.]?', target):
         return False
     lines = strict_json(reading.evidence_json)
@@ -60,6 +100,82 @@ def retains_printed_words(unit, target):
         elif not (source in exact_words and source.istitle() and word == source.lower()):
             return False
     return ''.join(line['text'] for line in lines) == reading.text
+
+
+def original_lettering_reason(unit, target, detections, bounds, page_size, *, reviewed_source=None):
+    """Retain literal/bilingual type, and quarantine readings with insufficient evidence."""
+    from ..ocr.types import is_credit_list, is_printed_literal, is_printed_number, is_printed_punctuation, printed_latin_lines
+    source = unit.selected.text.strip()
+    if len(unit.member_ids)==1 and source.isascii() and any(
+            z['source_id']==unit.member_ids[0] and z.get('reason')=='confirmed_checkbox_item' for z in detections):
+        return 'replacement_unchanged_text', 'Preserve the printed software identifier beside its checkbox.'
+    if is_credit_list(source):
+        return 'replacement_unchanged_text', 'Preserve the printed list of names.'
+    if is_printed_literal(source):
+        return 'replacement_unchanged_text', 'Preserve the original technical literal.'
+    evidence = reviewed_source.strip() if reviewed_source and reviewed_source.strip() else source
+    if evidence.isascii() and source.isascii() and unit.selected.origin=='raw_main_reading':
+        ids = set(unit.member_ids)
+        lines = [line for line in detections if line['source_id'] in ids]
+        if len(lines)>=2 and printed_latin_lines(source,lines):
+            return 'replacement_unchanged_text', 'The corroborated Latin lines are already printed on the page.'
+    if all(re.fullmatch(r'[. …・]+', value) for value in (source,evidence,target)):
+        return 'replacement_unchanged_text', 'Preserve the original typeset pause and its orientation.'
+    if is_printed_number(evidence) and is_printed_number(source):
+        return 'replacement_unchanged_text', 'Keep the printed numeric label.'
+    if evidence in ('を','へ','に') and not reviewed_source and unit.selected.origin == 'raw_main_reading':
+        return 'uncorroborated_source', 'A detached grammatical particle does not establish an independent caption.'
+    if is_printed_punctuation(evidence) and any(c.isalnum() for c in target):
+        return 'uncorroborated_source', 'Punctuation or an arrow alone does not establish dialogue.'
+    url_pattern = r'https?://[^\s<>()「」『』、。]+'
+    urls = [url.rstrip('.,') for url in re.findall(url_pattern, source)]
+    if urls != [url.rstrip('.,') for url in re.findall(url_pattern, target)]:
+        return 'uncorroborated_source', 'The proposed translation changes a printed URL.'
+    for url in urls:
+        try:
+            hostname = urlsplit(url).hostname or ''
+        except ValueError:
+            hostname = ''
+        if not hostname or any(len({unicodedata.name(c, '').split(' ')[0] for c in label if c.isalpha()}
+                                  & {'LATIN', 'GREEK', 'CYRILLIC'}) > 1 for label in hostname.split('.')):
+            return 'uncorroborated_source', 'The domain contains an ambiguous OCR reading. Preserve the printed address.'
+    from ..translation.rendition import expanded_short_label
+    if expanded_short_label(evidence,target):
+        return 'uncorroborated_source', 'The short source label does not support a full sentence.'
+    if evidence == '第' and re.search(r'\d', target):
+        return 'uncorroborated_source', 'The isolated ordinal marker supplies no number.'
+    left, top, right, bottom = bounds
+    width, height = page_size
+    compact_name = ' '.join(target.casefold().split())
+    pair = [word.strip() for word in compact_name.split('/')]
+    if len(pair)==2 and source.casefold() in pair:
+        compact_name = pair[1-pair.index(source.casefold())]
+    if re.fullmatch(r'[a-z]+(?: [a-z]+){1,3}', compact_name) and re.search(r'[一-鿿]', source):
+        nearby_words = []
+        for detection in detections:
+            if detection['source_id'] in unit.member_ids or detection['confidence'] < .90:
+                continue
+            xs, ys = zip(*detection['polygon'])
+            if (max(xs) >= left and min(xs) <= right and min(ys) <= bottom + (bottom-top)
+                    and max(ys) >= top - (bottom-top)):
+                word = ' '.join(detection['text'].casefold().split())
+                if word == compact_name:
+                    return 'replacement_unchanged_text', 'The adjacent bilingual label already prints this name.'
+                if re.fullmatch('[a-z]+', word) and left <= (min(xs)+max(xs))/2 <= right:
+                    nearby_words.append((min(ys), min(xs), max(ys), word))
+        # A narrow card may stack the romanization below the native name.
+        words = sorted(nearby_words)
+        if (' '.join(w[3] for w in words) == compact_name
+                and all(0 < b[0]-a[0] <= 1.5*(a[2]-a[0]) and abs(b[1]-a[1]) <= a[2]-a[0]
+                        for a,b in zip(words,words[1:]))):
+            return 'replacement_unchanged_text', 'The adjacent bilingual label already prints this name.'
+    confirmed_display = reviewed_source and all(d.get('reason')=='corroborated_repeated_effect'
+        or any(d.get('ocr_metadata',{}).get(k,{}).get('reading')==reviewed_source for k in ('colored_word','outlined_display'))
+        for d in detections if d['source_id'] in unit.member_ids)
+    if (not confirmed_display and (right-left) > .34*width and bottom-top > .11*height and len(source) <= 12
+            and all(d['confidence'] < .82 for d in detections if d['source_id'] in unit.member_ids)):
+        return 'uncorroborated_source', 'Large display lettering has no reliable original reading.'
+    return None
 
 
 def assess_source(unit, target, minimum):

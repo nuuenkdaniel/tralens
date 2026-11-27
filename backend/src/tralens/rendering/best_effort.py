@@ -236,3 +236,34 @@ def fit(text, font_data, coverage, mask, style, *, work=None):
         'probes': attempts, 'below_requested_minimum': provenance['size'] < style['min_size'],
         'requested_minimum': style['min_size'], 'quality': 'degraded_best_effort'}
     return layer, provenance, mask.copy()
+
+def inset_retained_ink(layer, proof, content, plate, font_data, coverage, style, work):
+    """Refit dialogue close to surviving dark linework on a light clean plate."""
+    x,y,r,b = content.getbbox()
+    if (r-x)*(b-y)>MAX_LOCAL_PIXELS:
+        return layer,proof,content
+    owned = np.asarray(content)[y:b,x:r]!=0
+    crop = plate[y:b,x:r].min(2)
+    alpha = np.asarray(layer.getchannel('A'))[y:b,x:r]!=0
+    if not alpha.any() or np.mean(crop[owned]>=235)<.83:
+        return layer,proof,content
+    radius = min(9,max(3,round(.18*proof['size'])))
+    edge = cv2.dilate(np.uint8(crop<170),cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                      (2*radius+1,2*radius+1))).astype(bool)
+    if not (edge & alpha).any():
+        return layer,proof,content
+    safe = content.copy()
+    safe.paste(Image.fromarray(np.uint8(owned & ~edge)*255),(x,y))
+    if not safe.getbbox():
+        return layer,proof,content
+    try:
+        fit_layer,fit_proof,fit_content = fit(proof['original_text'],font_data,coverage,safe,
+            {**style,'max_size':proof['size']},work=work)
+    except n.ResourceLimit:
+        raise
+    except ValueError:
+        return layer,proof,content
+    if fit_proof['size']<max(style['min_size'],round(.8*proof['size'])):
+        return layer,proof,content
+    fit_proof['typography']['retained_ink_clearance'] = radius
+    return fit_layer,fit_proof,fit_content

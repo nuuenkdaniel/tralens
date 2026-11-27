@@ -21,6 +21,8 @@ The image includes Debian packages from the official Python base image and from 
 | pypdfium2 4.30.0 | Apache-2.0 or BSD-3-Clause, with PDFium and third-party notices in the wheel. [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) |
 | SentencePiece 0.2.1 and Tokenizers 0.21.4 | Apache-2.0. [SentencePiece](https://github.com/google/sentencepiece/tree/v0.2.1) · [Tokenizers](https://github.com/huggingface/tokenizers/tree/v0.21.4) |
 | DejaVu Sans | The container uses Debian's unmodified `fonts-dejavu-core` package. The package includes Bitstream Vera and Arev license texts. [Debian package and source](https://packages.debian.org/bookworm/fonts-dejavu-core) |
+| Comic Neue | Shouts and handwriting use Debian’s packaged faces. The package includes the SIL Open Font License 1.1 text. |
+| Fugashi, jaconv, and UniDic Lite | The Japanese reader uses the packaged tokenizer, kana converter, and dictionary for word readings. Their license files are included with the installed Python distributions. |
 
 Optional native Android builds pull Capacitor and Android dependencies separately. Their pinned npm versions are in `frontend/android/package-lock.json`. The beta container does not include Android build tools or APKs.
 

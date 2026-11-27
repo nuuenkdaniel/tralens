@@ -12,7 +12,7 @@ import re
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from . import natural as n
 from . import preparation as p
@@ -43,6 +43,17 @@ def retained_artwork(record):
             and outcomes[0].get('reasons') in (['visual_non_text'], ('visual_non_text',)))
 
 
+def retained_label(record):
+    if record['status'] != 'abstained' or record.get('luna_review_error'):
+        return False
+    decisions = record.get('luna_decision') or {}
+    if decisions.get('category') == 'already_english':
+        return True
+    outcomes = (record.get('result') or {}).get('outcomes') or []
+    return len(outcomes) == 1 and any(reason in ('original_lettering', 'already_latin_lettering')
+                                      for reason in outcomes[0].get('reasons', ()))
+
+
 def check(condition, code, message, evidence=None):
     if not condition:
         raise AutomaticSkip(code, message, evidence)
@@ -60,21 +71,32 @@ class OriginalComponents:
         self.source_counts = None
         self.source_polygons = None
 
-    def bind_geometry(self, detections):
+    def bind_geometry(self, detections, *, remaining_work=MAX_WORK):
         revision = n.revision([(type(d['source_id']).__name__, d['source_id'], d['polygon']) for d in detections])
         if self.geometry_revision is not None:
             n.require(revision == self.geometry_revision, 'source geometry changed since raster snapshot')
-            return
-        n.budget_check(len(detections)*self.pixels.shape[0]*self.pixels.shape[1] <= MAX_WORK,
-                       'automatic source geometry raster budget')
-        counts = np.zeros(self.pixels.shape[:2], np.uint16)
+            return 0
+        height,width = self.pixels.shape[:2]
+        work = height*width
+        n.budget_check(work <= remaining_work, 'automatic source geometry raster budget')
+        counts = np.zeros((height,width), np.uint16)
         polygons = {}
         for detection in detections:
+            points = detection['polygon']
+            n.validate_polygon(points,(width,height),evidence=True)
+            # Pillow rounds scan-line intersections at absolute x coordinates.
+            # Keeping the page width preserves its exact boundary pixels.
+            ys = [py for _,py in points]
+            y,b = max(0,int(min(ys))-1),min(height,int(max(ys))+2)
+            work += width*(b-y)
+            n.budget_check(work <= remaining_work, 'automatic source geometry raster budget')
+            tile = Image.new('L',(width,b-y))
+            ImageDraw.Draw(tile).polygon([(px,py-y) for px,py in points],fill=1)
+            counts[y:b] += np.asarray(tile)
             key = (type(detection['source_id']).__name__, detection['source_id'])
-            mask = np.asarray(n.polygon_mask(detection['polygon'], (counts.shape[1], counts.shape[0]), evidence=True)) != 0
-            counts += mask
-            polygons[key] = detection['polygon']
+            polygons[key] = points
         self.source_counts, self.source_polygons, self.geometry_revision = counts, polygons, revision
+        return work
 
 
 @dataclass
@@ -248,8 +270,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
     n.require(type(member_ids) is list and 1 <= len(member_ids) <= 32
               and all(type(i) in (int, str) and i != '' for i in member_ids) and len(set(member_ids)) == len(member_ids),
               'typed unique members required')
-    n.budget_check(len(member_ids)*rgb.width*rgb.height <= n.MAX_UNIT_PIXELS
-                   and len(detections)*rgb.width*rgb.height <= MAX_WORK, 'automatic raster work budget')
+    n.budget_check(len(member_ids)*rgb.width*rgb.height <= n.MAX_UNIT_PIXELS, 'automatic raster work budget')
     keys = [(type(d['source_id']).__name__, d['source_id']) for d in detections]
     n.require(all(type(d['source_id']) in (int, str) and d['source_id'] != '' for d in detections)
               and len(set(keys)) == len(keys), 'typed unique detection IDs required')
@@ -346,7 +367,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent.resolve()/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'font_faces.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'source_support.py', 'source_extents.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'printed_contours.py', 'outlined_sound_cleanup.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/crop_readings.py', '../ocr/upright_latin.py', '../ocr/sound_readings.py', '../ocr/outlined_sounds.py', '../ocr/handwritten.py', '../ocr/sideways_sound.py', '../ocr/display_readings.py', '../ocr/ink_groups.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
+                       for name in ('automatic.py', 'natural.py', 'font_faces.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'source_support.py', 'source_extents.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'printed_contours.py', 'outlined_sound_cleanup.py', 'table_cells.py', 'repeated_strokes.py', '../ocr/table_rows.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/crop_readings.py', '../ocr/upright_latin.py', '../ocr/sound_readings.py', '../ocr/outlined_sounds.py', '../ocr/handwritten.py', '../ocr/handwritten_lines.py', '../ocr/repeated_effects.py', '../ocr/masked_lines.py', '../ocr/sideways_sound.py', '../ocr/display_readings.py', '../ocr/ink_groups.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
 
 
 def _report_html(report):
@@ -414,6 +435,8 @@ def _report_html(report):
 
 def _font(fonts_doc, font_id):
     available = n.load_fonts(fonts_doc)
+    if font_id is None:
+        font_id = fonts_doc.get('default_font_id')
     if font_id is None:
         n.require(len(available) == 1, 'multiple approved faces require a global --font-id; no implicit font matching')
         font_id = next(iter(available))
@@ -495,7 +518,7 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
     return checked
 
 
-def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', plan_localization=False, visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical', reconstruction_config=None):
+def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_title_size=None, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', plan_localization=False, visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical', reconstruction_config=None, prepared_text_mask=None):
     """All current strict translated candidates, with explicit machine skip states."""
     from . import aggressive, reconstruction, visible_translations
     confidence_settings, reconstruction_spec = _render_policies(
@@ -515,19 +538,21 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     n.require(not output.exists() and output.parent.is_dir() and
               not any(path.is_symlink() for path in (output, *output.parents)), 'automatic output must be fresh without symlinks')
     paths, contents, preview_doc, fonts_doc, rgb, source = p._sources(preview, image, fonts)
+    if max_title_size is not None:
+        n.integer(max_title_size,8,144)
     raw = preview_doc['ocr']['raw_detections'][0]
     n.require(type(raw) is list and len(raw) <= 512 and (len(raw)>0 or not preview_doc['units']), 'automatic raw detection budget')
     outlines = {d['source_id']:d.get('ocr_metadata',{}).get('outline_reading',{})
                 for d in raw if d.get('reason')=='corroborated_outline_reading'}
+    title_bars = {d['source_id'] for d in raw if d.get('ocr_metadata',{}).get('tab_strip',{}).get('count')==1}
     pixels = rgb.width*rgb.height
-    n.budget_check(pixels*len(raw) <= MAX_WORK, 'automatic binding raster work budget')
     # Explicit machine binding contract; there is no geometry_intent, reviewed
     # flag, manual selection file, proposal ID or call to confirmation/export.
     source_contract = {'schema_version': 1, 'purpose': 'automatic_candidate_only', 'source': source,
         'preview_sha256': n.digest(contents[0]), 'fonts_sha256': n.digest(contents[2]), 'units': []}
     n.bind(preview_doc, paths[1], rgb, contents[1], contents[0], source_contract, contents[2], selection_kind='automatic_candidate_only')
     font_id, (font_data, coverage) = _font(fonts_doc, font_id)
-    from .font_faces import ApprovedFaces
+    from .font_faces import ApprovedFaces, handwritten_columns
     faces = ApprovedFaces(fonts_doc, font_id)
     style = {'min_size': min_size, 'max_size': max_size, 'outline': 0}
     candidates = preview_doc['ocr'].get('automatic_recognition_results', [])
@@ -584,7 +609,15 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     if visibility_policy != 'replacement-only':
         report['visibility_policy'] = visibility_policy
     restoration_context = None
-    text_mask, text_mask_error = None, None
+    text_mask, text_mask_error = prepared_text_mask, None
+    if text_mask is not None:
+        n.require(model_spec is not None and isinstance(text_mask,segmentation.TextMask)
+                  and text_mask.evidence['checkpoint']==model_spec
+                  and text_mask.evidence['source_pixels_sha256']==n.digest(rgb.tobytes())
+                  and text_mask.raw.shape==(rgb.height,rgb.width)
+                  and text_mask.evidence['mask_sha256']==n.digest(text_mask.raw.tobytes()),
+                  'prepared OCR text mask differs from the rendering source or checkpoint')
+        report['text_mask_inference'] = text_mask.evidence
     if model_spec is not None:
         report['policy'] = 'automatic_flat_classical_native_semantic_v1'
         report['text_mask_model'] = model_spec
@@ -616,7 +649,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     'reason_code': getattr(error, 'code', 'validation'), 'reason': str(error),
                     'evidence': getattr(error, 'evidence', {})})
         raise original_error
-    work, eligible, coverage_eligible, attempts = pixels*len(raw), 0, 0, 0
+    work, eligible, coverage_eligible, attempts = 0, 0, 0, 0
     context, context_error, context_initialized = None, None, False
 
     def initialize_context():
@@ -624,10 +657,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         if not context_initialized:
             context_initialized = True
             try:
-                n.budget_check(work+pixels*len(raw) <= MAX_WORK, 'automatic source geometry raster work budget')
                 context = OriginalComponents(rgb)
-                context.bind_geometry(raw)
-                work += pixels*len(raw)
+                work += context.bind_geometry(raw, remaining_work=MAX_WORK-work)
             except n.ResourceLimit as error:
                 context, context_error = None, str(error)
 
@@ -648,6 +679,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                    'translation_review_needed': review_needed if type(review_needed) is bool else None}}
         if (record['status'] == 'abstained' and unit.selected.origin=='raw_main_reading'
                 and unit.selected.text.isascii() and any(c.isalnum() for c in unit.selected.text)):
+            row['original_label_retained'] = True
+        if retained_label(record):
             row['original_label_retained'] = True
         if retained_artwork(record):
             row['original_artwork_retained'] = True
@@ -672,14 +705,46 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 binding = n.strict_result_binding(record, unit, request=contextual.get(unit.unit_id))
                 eligible += 1
             row.update(machine_selected=True, binding=binding)
+            from ..ocr import sound_readings
+            from ..translation.rendition import impact_sound
+            source_lines = [d for d in raw if d['source_id'] in unit.member_ids]
+            source_word = next((v.text for v in unit.readings if v.revision==binding.get('reread_selected_revision')),
+                               unit.selected.text)
+            if (len(source_lines)==1 and (impact_sound(source_word) or sound_readings.repeat(source_word)
+                    or source_lines[0].get('ocr_metadata',{}).get('drawn_kana')
+                    or source_lines[0].get('reason') in ('supplemental_rotated_sound_region','corroborated_repeated_effect')
+                    or re.fullmatch(r'[ァ-ヺー]{2,6}ッ[!！]*',source_word))):
+                row['lettering_role'] = 'shout'
+            elif source_lines and (all(d.get('reason')=='confirmed_handwritten_line' or d.get('ocr_metadata',{}).get('handwritten_aside') for d in source_lines)
+                                   or handwritten_columns(source_lines)):
+                row['lettering_role'] = 'handwriting'
+            elif (len(source_lines)==1 and re.fullmatch(r'(?:おしまい|つづく|おわり)[。！!…]*',source_word)
+                    and min(point[1] for point in source_lines[0]['polygon']) > .85*rgb.height):
+                row['lettering_role'] = 'handwriting'
+            if visibility_policy == 'always-show':
+                if len(source_lines)==1 and rc.pencil_hatching(rgb,source_lines[0]):
+                    raise AutomaticSkip('uncorroborated_source','The detected strokes continue as hatching outside the text region.')
+                selected = binding.get('reread_selected_revision')
+                reviewed = next((reading.text for reading in unit.readings if reading.revision == selected), None)
+                decision = record.get('luna_decision') or {}
+                if preview_doc.get('settings', {}).get('profile') in ('page','panel','atlas','reviewed') and decision.get('category') == 'translation':
+                    reviewed = decision.get('source') or reviewed
+                if not reviewed and all(d.get('reason')=='corroborated_repeated_effect' or any(k in d.get('ocr_metadata',{}) for k in ('colored_word','painted_effect','outlined_display'))
+                                        for d in raw if d['source_id'] in unit.member_ids):
+                    if confirms_raw(crop_records.get(unit.unit_id),unit,proposals[unit.unit_id],rgb,raw):
+                        reviewed = unit.selected.text
+                preserve = rc.original_lettering_reason(unit, binding['text'], raw,
+                    proposals[unit.unit_id]['crop_bounds'], rgb.size, reviewed_source=reviewed)
+                if preserve:
+                    raise AutomaticSkip(*preserve)
             if (is_coverage and removal_policy == 'aggressive' and not binding.get('reread_selected_revision')
-                    and not (preview_doc['settings'].get('profile') in ('page', 'panel', 'atlas', 'reviewed')
+                    and not (preview_doc.get('settings', {}).get('profile') in ('page', 'panel', 'atlas', 'reviewed')
                         and (record.get('luna_decision') or {}).get('category') == 'translation'
                         and record['luna_decision'].get('source', '').strip())
                     and unit.selected.origin == 'raw_main_reading'):
                 assessment = rc.assess_source(unit, binding['text'], rc.DEFAULT_MINIMUM)
                 if (assessment['reason_code'] in ('replacement_low_ocr_confidence', 'replacement_confidence_unavailable')
-                        and not confirms_raw(crop_records.get(unit.unit_id), unit, proposals[unit.unit_id], rgb)):
+                        and not confirms_raw(crop_records.get(unit.unit_id), unit, proposals[unit.unit_id], rgb, raw)):
                     row['replacement_confidence'] = assessment
                     raise AutomaticSkip('uncorroborated_source', 'Weak OCR without a corroborated reading. Preserve the artwork.')
             if len(unit.member_ids)==1 and unit.member_ids[0] in outlines:
@@ -702,6 +767,9 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     raise AutomaticSkip(assessment['reason_code'], assessment['reason'])
             font_data, coverage = faces.resolve(row)
             n.validate_text(binding['text'], coverage)
+            if (reconstruction_policy=='auto' and proposals[unit.unit_id].get('grouping_method')=='separate_printed_table_rows'
+                    and len(binding['member_ids'])==1 and (model_spec is not None or binding['member_ids'][0] not in title_bars)):
+                raise AutomaticSkip('ruled_table_cell','Use the printed cell boundaries for cleanup and lettering.')
             if is_coverage:
                 # Delay not just geometry but also its slot/raster budget until
                 # ALL strict placements and their fallback attempts finish.
@@ -741,6 +809,9 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                             'reason_code': getattr(restore_error, 'code', 'resource_budget'), 'reason': str(restore_error),
                             'evidence': getattr(restore_error, 'evidence', {})})
                         plan = semantic_plan(binding, row, flat_error)
+            if reconstruction_policy == 'auto' and proposals[unit.unit_id].get('grouping_method') == 'stacked_vertical_subject':
+                from .layout_enclosures import stacked_paper
+                plan = stacked_paper(rgb,raw,binding['member_ids'],plan)
             plans[index] = PackedPlan(plan)
             row['mask_evidence'] = plan.evidence
             check(not (plan.erase & plan.obstacles).any(), 'erasure_obstacle', 'automatic erasure intersects original obstacles')
@@ -898,6 +969,9 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                             context=restoration_context, reserved=reserved, background_method=background_method)
                         method = plan.evidence['cleanup_method']
                     check(not (plan.erase & plan.obstacles).any(), 'erasure_obstacle', 'best-effort erasure touches protected output')
+                    if reconstruction_policy == 'auto' and proposals[row['unit_id']].get('grouping_method') == 'stacked_vertical_subject':
+                        from .layout_enclosures import stacked_paper
+                        plan = stacked_paper(rgb,raw,row['binding']['member_ids'],plan,reserved)
                     background = plan.evidence.get('background_rgb_at_center', plan.background)
                     n.require(background is not None, 'best-effort contrast estimate unavailable')
                     light = float(np.dot(background, [.2126, .7152, .0722])) < 128
@@ -918,13 +992,17 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                     if confidence_settings is not None or visibility_policy == 'always-show' or removal_policy != 'legacy':
                         reason = rc.layout_rejection(provenance, min_size)
                         check(reason is None, 'replacement_layout_confidence', reason)
+                    plate_pixels = np.asarray(rgb).copy()
+                    apply_cleanup(plate_pixels, plan)
+                    if (reconstruction_policy=='auto' and not light and not row.get('effect_style')
+                            and len(row['binding']['member_ids'])>=2 and len(row['binding']['text'].split())>=2):
+                        layer,provenance,content = best_effort.inset_retained_ink(layer,provenance,content,
+                            plate_pixels,font_data,coverage,fallback_style,fallback_work)
                     box = layer.getchannel('A').getbbox()
                     check(box is not None, 'empty_alpha', 'best-effort text has no raster alpha')
                     alpha = np.asarray(layer.getchannel('A')) != 0
                     check(not (alpha & (~plan.layout | plan.obstacles | reserved)).any(),
                           'alpha_containment', 'best-effort alpha leaves declared local overlay support')
-                    plate_pixels = np.asarray(rgb).copy()
-                    apply_cleanup(plate_pixels, plan)
                     plate = Image.fromarray(plate_pixels)
                     composed = Image.alpha_composite(plate.convert('RGBA'), layer).convert('RGB')
                     audit = n.pixel_audit(rgb, plate, composed, plan.erase, alpha, plan.obstacles)
@@ -1192,10 +1270,17 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             except (ValueError,OSError) as error:
                 text_mask_error=str(error)
                 report['text_mask_error']=text_mask_error
+        repetitions = {}
+        if reconstruction_policy=='auto' and text_mask is not None:
+            from . import repeated_strokes
+            try:
+                repetitions = repeated_strokes.samples(rgb,raw,text_mask.raw,model_spec)
+            except (ValueError,OSError,cv2.error) as error:
+                report['repeated_stroke_error'] = str(error)
         try:
             report['units'],clean,text,composite,erase_union,layout_union,recovery_artifacts,report['reconstruction_summary'] = aggressive.recover(
                 rgb,source,raw,report['units'],clean,text,erase_union,layout_union,*faces.primary,style,
-                backend=backend,font_resolver=faces.resolve,
+                backend=backend,font_resolver=faces.resolve,repetitions=repetitions,max_title_size=max_title_size,
                 probability=text_mask.raw if text_mask is not None else None,extents=extents)
         except reconstruction.BindingError:
             raise
@@ -1204,9 +1289,9 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
                 'error':type(error).__name__+': '+str(error)[:2000],'model_config':reconstruction_spec}
         from . import replacement
         report['units'],clean,text,composite,erase_union,layout_union,final_artifacts,report['removal_summary'] = replacement.finish(
-            rgb,raw,report['units'],clean,text,erase_union,layout_union,*faces.primary,style,font_resolver=faces.resolve,
+            rgb,raw,report['units'],clean,text,erase_union,layout_union,*faces.primary,style,font_resolver=faces.resolve,repetitions=repetitions,
             probability=text_mask.raw if text_mask is not None else None,source=source,backend=backend,
-            budget=reconstruction.Budget(maximum_calls=4,maximum_seconds=240 if reconstruction_policy in ("auto", "sdxl") else 40),extents=extents)
+            max_title_size=max_title_size, budget=reconstruction.Budget(maximum_calls=4,maximum_seconds=240 if reconstruction_policy in ("auto", "sdxl") else 40),extents=extents)
         recovery_artifacts.update(final_artifacts)
         from . import outlined_sound_cleanup
         clean, text, joint_repairs = outlined_sound_cleanup.finish(rgb,clean,text,layout_union,erase_union,raw,units,
@@ -1214,6 +1299,11 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         if joint_repairs:
             report['outlined_sound_cleanup'] = joint_repairs
             composite = Image.alpha_composite(clean.convert('RGBA'),text).convert('RGB')
+        if reconstruction_policy == 'auto':
+            from . import table_cells
+            if table_cells.place(rgb,clean,text,erase_union,layout_union,report['units'],proposals,raw,faces.resolve,
+                                 probability=text_mask.raw if text_mask is not None else None):
+                composite = Image.alpha_composite(clean.convert('RGBA'),text).convert('RGB')
         alpha_union = np.asarray(text.getchannel('A')) != 0
         protected = ~(erase_union | layout_union)
         report['pixel_audit'] = n.pixel_audit(rgb,clean,composite,erase_union,alpha_union,protected)
@@ -1225,7 +1315,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
             composite, text, patch_layer, fallback_text, display_mask, display_tiles, display_summary = visible_translations.display(
                 rgb, raw, units, report['units'], clean, native_text, native_composite, *faces.primary, style,
                 font_resolver=faces.resolve,
-                max_displays=max(0,min(visible_translations.MAX_ATTEMPTS,(MAX_ARTIFACTS-24-14*len(plans))//3)),native_erase=erase_union)
+                max_displays=max(0,min(visible_translations.MAX_ATTEMPTS,(MAX_ARTIFACTS-24-14*len(plans))//3)),native_erase=erase_union,
+                protect_artwork=removal_policy=='aggressive')
             report['display_summary'] = display_summary
             report['pixel_audit_scope'] = 'native clean/text before separately audited opaque display overlays'
         except (ValueError, OSError, KeyError, TypeError) as error:
@@ -1297,7 +1388,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         # Exact target availability survives overflow, budgets and model failures.
         report['transcript'] = [{'unit_id':row['unit_id'],'binding':row['binding'],
             'image_display':row.get('display_status',visible_translations.composed_status(row) if row['status']=='automatic_composed' else 'undisplayed')}
-            for row in report['units'] if 'binding' in row]
+            for row in report['units'] if 'binding' in row
+            and row.get('reason_code') not in ('uncorroborated_source', 'replacement_unchanged_text')]
         report['transcript_only'] = sum(item['image_display']=='undisplayed' for item in report['transcript'])
     report['job_revision'] = n.revision({k: v for k, v in report.items() if k not in ('job_revision', 'artifacts')})
     blobs, total, recovery_total = {}, 0, 0

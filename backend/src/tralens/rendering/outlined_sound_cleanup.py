@@ -70,6 +70,36 @@ def joint_mask(rgb, owned, protected, zone, *, extend=False):
     return (cv2.dilate(ink.astype(np.uint8), np.ones((5,5),np.uint8)) != 0) & ~other
 
 
+def clipped_rims(pixels, mask, owned, protected):
+    """Recover black letter edges whose white center opens into a balloon or gutter."""
+    if np.mean(np.ptp(pixels,axis=2)>24)<.12:
+        return mask
+    paper = (pixels.min(2)>245) & (np.ptp(pixels,axis=2)<10)
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(paper.astype(np.uint8))
+    broad = stats[:,-1]>3000
+    broad[0] = False
+    if not broad.any():
+        return mask
+    near_paper = cv2.dilate(broad[labels].astype(np.uint8), np.ones((9,9),np.uint8)) != 0
+    near_letters = cv2.dilate(mask.astype(np.uint8), np.ones((25,135),np.uint8)) != 0
+    dark = pixels.max(2)<85
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(dark.astype(np.uint8))
+    rims = np.zeros_like(dark,dtype=np.uint8)
+    for i,(x,y,w,h,area) in enumerate(stats[1:],1):
+        if not (35<=area<=2200 and 7<=max(w,h)<=115 and min(w,h)<=50):
+            continue
+        roi = np.s_[y:y+h,x:x+w]
+        body = labels[roi]==i
+        if (not near_letters[roi][body].any() or not owned[roi][body].all()
+                or protected[roi][body].any() or mask[roi][body].mean()>.75
+                or near_paper[roi][body].mean()<.08):
+            continue
+        ink = pixels[roi][body]
+        if np.median(ink.max(1))<=17 and np.median(np.ptp(ink,axis=1))<=9:
+            rims[roi][body] = 1
+    return mask | ((cv2.dilate(rims,np.ones((5,5),np.uint8))!=0) & owned & ~protected)
+
+
 def repair_gutter(pixels, plate, mask, protected):
     """Remove small connected glyph tips hanging into a wide band of bare paper."""
     paper = (pixels.min(2)>=245) & (np.ptp(pixels,axis=2)<6)
@@ -171,6 +201,37 @@ def tile_repair(rgb, zone, mask, protected, source, binding, backend, deadline, 
     return restored, requests
 
 
+def source_centered_lettering(text, font, coverage, frame, blocked, style, *, wrap=False):
+    """Let parallel diagonal effects interleave where their actual strokes leave room."""
+    from . import natural
+    l,t,r,b = map(int,frame)
+    width,height = r-l,b-t
+    if min(width,height)<8 or max(width,height)>1024 or width*height>160000 or len(text)>96:
+        return None
+    canvas = Image.new('L',(width+24,height+20),255)
+    try:
+        layer,proof = natural.layout(text,font,coverage,canvas,style,fixed_breaks=None if wrap else ())
+    except natural.ResourceLimit:
+        raise
+    except ValueError:
+        return None
+    ink = layer.getchannel('A').getbbox()
+    glyph = layer.crop(ink)
+    tile = Image.new('RGBA',(glyph.width+12,glyph.height+12))
+    tile.paste(glyph,(6,6))
+    footprint = cv2.dilate(np.asarray(tile.getchannel('A')),np.ones((5,5),np.uint8)) != 0
+    cx,cy = (l+r-tile.width)//2,(t+b-tile.height)//2
+    offsets = range(-12,13,3)
+    for dx,dy in sorted(((dx,dy) for dx in offsets for dy in offsets),key=lambda p:p[0]**2+p[1]**2):
+        x,y = cx+dx,cy+dy
+        if x<0 or y<0 or x+tile.width>blocked.shape[1] or y+tile.height>blocked.shape[0]:
+            continue
+        if not (blocked[y:y+tile.height,x:x+tile.width] & footprint).any():
+            proof.update(original_layout_crop_bounds=list(ink),placement_policy='source_centered_outlined_sound')
+            return tile,(x,y),proof
+    return None
+
+
 def plan_lettering(original, text, layout, raw, active, rows, artifacts, zone, protected, font_resolver, style):
     """Pack the verified targets together, keeping every other existing glyph fixed."""
     from . import natural, replacement
@@ -180,6 +241,8 @@ def plan_lettering(original, text, layout, raw, active, rows, artifacts, zone, p
     backings = np.zeros(layout.shape,bool)
     for i, _, _, _ in active:
         row = rows[i]
+        if row['status'] != 'automatic_composed':
+            continue  # This verified sound has no existing tile to lift.
         final = row.get('removal_fallback') or {}
         bounds = final.get('backing_bounds') or final.get('outlined_tile_bounds')
         if bounds:
@@ -207,6 +270,15 @@ def plan_lettering(original, text, layout, raw, active, rows, artifacts, zone, p
     placements = []
     # Give long lines first choice. Each subsequent label can still use any
     # free part of the verified source group inside its painted panel.
+    member_ids = set().union(*(ids for _,_,_,ids in active))
+    slopes = []
+    for d in raw:
+        if d['source_id'] in member_ids:
+            p = np.asarray(d['polygon'])
+            dx,dy = (p[1]-p[0]) + (p[2]-p[3])
+            if dx>0 and .2*dx<abs(dy)<dx:
+                slopes.append(float(-np.degrees(np.arctan2(dy,dx))))
+    group_angle = float(np.clip(np.median(slopes),-20,20)) if len(slopes)>=3 and np.ptp(slopes)<16 else 0.
     for i,binding,_,ids in sorted(active,key=lambda entry:-len(entry[1]['text'])):
         polygons = np.vstack([d['polygon'] for d in raw if d['source_id'] in ids])
         l,t = np.floor(polygons.min(0)).astype(int)
@@ -216,17 +288,41 @@ def plan_lettering(original, text, layout, raw, active, rows, artifacts, zone, p
         confined = np.ones_like(blocked)
         confined[t:b,l:r] = blocked[t:b,l:r]
         font, coverage = font_resolver(rows[i])
-        try:
-            layer,(px,py),proof = replacement.patch_layout(binding['text'],font,coverage,frame,confined,
-                {**style,'max_size':style['min_size'],'fill':[0,0,0],'outline_fill':[255,255,255]},outline=2)
-        except natural.ResourceLimit:
-            raise
-        except ValueError:
+        # Only tallied, corroborated sound effects enter this pass. Their source
+        # quadrilaterals supply a baseline even when the English is wider.
+        angle = group_angle
+        if len(ids) == 1 and polygons.shape == (4,2):
+            dx, dy = (polygons[1]-polygons[0]) + (polygons[2]-polygons[3])
+            if dx > 0 and abs(dy) <= dx and (dy or not group_angle):
+                angle = float(np.clip(-np.degrees(np.arctan2(dy,dx)), -20,20))
+        # joint_mask only commits these placements on finding pale letter bodies
+        # enclosed by dark rims in the source. Match that measured polarity.
+        lettering_style = {**style,'rotation':angle,'max_size':style['min_size'],
+                           'fill':[255]*3,'outline_fill':[0]*3,'outline':2}
+        fit = source_centered_lettering(binding['text'],font,coverage,frame,confined,lettering_style)
+        if fit is None:
+            # The uppercase rendition can be wider than its source. Try a
+            # compact wrapped version on the same footprint before moving it.
+            fit = source_centered_lettering(binding['text'],font,coverage,frame,confined,
+                {**lettering_style,'min_size':min(style['min_size'],max(14,round(style['min_size']*.78)))},wrap=True)
+        if fit is None:
+            for rotation in dict.fromkeys((angle,0)):
+                try:
+                    fit = replacement.patch_layout(binding['text'],font,coverage,frame,confined,
+                        {**lettering_style,'rotation':rotation},outline=2)
+                    break
+                except natural.ResourceLimit:
+                    raise
+                except ValueError:
+                    pass
+        if fit is None:
             return None
+        layer,(px,py),proof = fit
         h,w = layer.height,layer.width
-        blocked[py:py+h,px:px+w] = True
+        alpha = np.asarray(layer.getchannel('A'))
+        blocked[py:py+h,px:px+w] |= cv2.dilate(alpha,np.ones((5,5),np.uint8)) != 0
         px,py = px+x,py+y
-        occupied[py:py+h,px:px+w] = True
+        occupied[py:py+h,px:px+w] |= alpha != 0
         stage.alpha_composite(layer,dest=(px,py))
         proof.update(page_tile_offset=[px,py],glyph_page_origin=[px+6,py+6])
         placements.append((i,proof,[px,py,px+w,py+h],layer))
@@ -236,34 +332,107 @@ def plan_lettering(original, text, layout, raw, active, rows, artifacts, zone, p
 def finish(rgb, clean, text, layout, erase, raw, units, rows, source, backend, artifacts, font_resolver, style):
     extra = {d['source_id']: d for d in raw if d.get('reason') == 'supplemental_rotated_sound_region'
              and d.get('ocr_metadata',{}).get(outlined_sounds.POLICY)}
+    discovered = {d['source_id']:d['text'] for d in raw if d.get('reason')=='frontier_discovery'
+                  and d.get('ocr_metadata',{}).get('frontier_discovery',{}).get('proposal',{}).get('source')==d['text']}
     candidates = []
+    single_beats = set()
     corroborated = set()
+    long_runs = {}
     for i, (unit, row) in enumerate(zip(units, rows)):
-        if row['status'] != 'automatic_composed':
+        placed = row['status'] == 'automatic_composed'
+        weak_source = not placed and row.get('reason_code') == 'uncorroborated_source'
+        if not placed and (not row.get('binding') or
+                (not weak_source and row.get('reason_code') not in ('coverage_uncertain_geometry','component_spill'))):
             continue
         binding = row['binding']
         selected = binding.get('reread_selected_revision') or unit.selected_revision
         reading = next((r for r in unit.readings if r.revision == selected), None)
         if reading is None:
             continue
-        motif = sound_readings.repeat(reading.text) or sound_readings.clipped_motif(reading.text)
+        ids = binding['member_ids']
+        discovery = [discovered.get(key) for key in ids]
+        beat = discovery[0] if discovery and all(v==discovery[0] for v in discovery) else None
+        # A vision model may report one beat per box instead of a repeated
+        # string. Group these only alongside independent readings of the same
+        # motif and only if their outlined ink is present in every footprint.
+        single = beat and sound_readings.repeat(beat*2)==beat and reading.text in (
+            beat,beat*len(ids),beat*2,beat[-1]+beat*len(ids))
+        discovered_repeat = len(ids)==1 and beat==reading.text and sound_readings.repeat(reading.text)
+        if row.get('reason_code')=='component_spill' and not single:
+            continue
+        if not placed and reading.origin != crop_readings.ENGINE and not (discovered_repeat or single):
+            continue
+        motif = beat if single else sound_readings.repeat(reading.text) or sound_readings.clipped_motif(reading.text)
         if motif:
             ids = set(binding['member_ids'])
             centers = [np.mean(d['polygon'], axis=0) for d in raw if d['source_id'] in ids]
             if centers:
-                candidates.append(((i, binding, motif, ids), centers))
                 if reading.origin == crop_readings.ENGINE and len(ids) == 1:
-                    corroborated.update(ids)
-    if not extra and len(corroborated) < 2:
+                    if not weak_source and not single:
+                        corroborated.update(ids)
+                    if reading.text.count(motif)>=4:
+                        poly=next(d['polygon'] for d in raw if d['source_id'] in ids)
+                        l,t=np.floor(np.min(poly,axis=0)).astype(int)
+                        r,b=np.ceil(np.max(poly,axis=0)).astype(int)
+                        if 220<=r-l<=1024 and 2.2*(b-t)<r-l and (r-l)*(b-t)<=160000:
+                            long_runs[i]=(int(l),int(t),int(r),int(b))
+                if not weak_source or i in long_runs:
+                    candidates.append(((i, binding, motif, ids), centers))
+                    if single:
+                        single_beats.add(i)
+    if not extra and not corroborated:
         return clean, text, []
     original = np.asarray(rgb)
     plate = np.asarray(clean).copy()
     zones = outlined_sounds.zones(original,[d['polygon'] for d in raw if d['source_id'] not in extra])
+    # Discovery zones look for glyphs outside detector boxes. A correctly
+    # localized long refrain may already cover every glyph in its strip.
+    regions=[(zone,None) for zone in zones]
+    for item,centers in candidates:
+        i,_,motif,ids=item
+        if i not in long_runs or (ids & corroborated and any(
+                l<=centers[0][0]<r and t<=centers[0][1]<b for l,t,r,b in zones)):
+            continue
+        if any(other[0]!=i and other[2]==motif and other[3]&corroborated for other,_ in candidates):
+            regions.append((long_runs[i],i))
+            if len(regions)>=len(zones)+4:
+                break
     reports = []
     deadline, budget = time.monotonic()+180, rec.Budget(maximum_calls=16)
-    for index, bounds in enumerate(zones):
+    for index,(bounds,run_index) in enumerate(regions):
         active = [item for item, centers in candidates
-                  if all(bounds[0]<=x<bounds[2] and bounds[1]<=y<bounds[3] for x,y in centers)]
+                  if ((run_index is None and rows[item[0]].get('reason_code')!='uncorroborated_source')
+                      or item[0]==run_index) and all(bounds[0]<=x<bounds[2] and bounds[1]<=y<bounds[3] for x,y in centers)]
+        l,t,r,b = bounds
+        group_motifs = {item[2] for item in active if item[0] not in single_beats and item[3] & corroborated}
+        active = [item for item in active if item[0] not in single_beats or item[2] in group_motifs]
+        zone = [max(0,l-36),max(0,t-36),min(rgb.width,r+36),min(rgb.height,b+36)]
+        x,y,right,bottom = zone
+        roi = np.s_[y:bottom,x:right]
+        def lettering_for(group, obstacle):
+            if not group or len(group)>18 or (right-x)*(bottom-y)>900000:
+                return None
+            preferred = max(style['min_size'],round(.70*style['max_size']))
+            for size in dict.fromkeys((preferred,style['min_size'])):
+                lettering = plan_lettering(original,text,layout,raw,group,rows,artifacts,zone,obstacle,
+                                           font_resolver,{**style,'min_size':size})
+                if lettering is not None:
+                    return lettering
+        pending = [item for item in active if rows[item[0]]['status'] != 'automatic_composed']
+        lettering = None
+        if pending and len(active) <= 18 and len({item[2] for item in active}) == 1:
+            # Drifting OCR polygons can overlap adjacent copies of the same effect.
+            # Reserve and place the entire group before opening any new source.
+            members = set().union(*(item[3] for item in active))
+            if run_index is not None or len(members & corroborated) >= 2:
+                neighbors = np.zeros(erase.shape,np.uint8)
+                for d in raw:
+                    if d['source_id'] not in members:
+                        cv2.fillPoly(neighbors,[np.asarray(d['polygon'],np.int32)],1)
+                lettering = lettering_for(active,cv2.dilate(neighbors,np.ones((5,5),np.uint8)) != 0)
+        if lettering is None:
+            active = [item for item in active if rows[item[0]]['status'] == 'automatic_composed']
+            pending = []
         all_ids = set().union(*(item[3] for item in active))
         if not all_ids.difference(extra) or len({item[2] for item in active}) != 1:
             continue
@@ -274,7 +443,7 @@ def finish(rgb, clean, text, layout, erase, raw, units, rows, source, backend, a
                        and sound_readings.repeat(outlined_sounds.confirmed_text(extra[k]['ocr_metadata'][outlined_sounds.POLICY]['readings']) or '') == motif
                        for k in added):
                 continue
-        elif len(all_ids & corroborated) < 2:
+        elif run_index is None and len(all_ids & corroborated) < 2:
             continue
         owned = np.zeros(erase.shape,np.uint8)
         protected = np.zeros_like(owned)
@@ -294,18 +463,10 @@ def finish(rgb, clean, text, layout, erase, raw, units, rows, source, backend, a
                     l,t,r,b = detail['bounds']
                     eligible[t:b,l:r] |= np.asarray(mask) != 0
         prior_other = obstacle
-        l,t,r,b = bounds
-        zone = [max(0,l-36),max(0,t-36),min(rgb.width,r+36),min(rgb.height,b+36)]
-        x,y,right,bottom = zone
-        roi = np.s_[y:bottom,x:right]
-        lettering = None
-        if len(active)<=18 and (right-x)*(bottom-y)<=900000:
-            preferred = max(style['min_size'],round(.70*style['max_size']))
-            for size in dict.fromkeys((preferred,style['min_size'])):
-                lettering = plan_lettering(original,text,layout,raw,active,rows,artifacts,zone,prior_other,
-                                           font_resolver,{**style,'min_size':size})
-                if lettering is not None:
-                    break
+        if lettering is None:
+            lettering = lettering_for(active,prior_other)
+        if run_index is not None and lettering is None:
+            continue
         backings = np.zeros_like(erase) if lettering is None else lettering[2]
         obstacle = prior_other | (erase & ~eligible & ~backings)
         for row in rows:
@@ -313,25 +474,33 @@ def finish(rgb, clean, text, layout, erase, raw, units, rows, source, backend, a
             if backing:
                 l,t,r,b = backing
                 obstacle[t:b,l:r] |= ~backings[t:b,l:r]
-        mask = joint_mask(original,owned!=0,obstacle,zone,extend=not added)
+        mask = joint_mask(original,owned!=0,obstacle,zone,extend=not added and run_index is None)
         if not mask.any():
             continue
-        wide = cv2.dilate(mask.astype(np.uint8),cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(31,31))) != 0
-        old = eligible[roi] & erase[roi] & wide & ~obstacle[roi]
+        # Every newly placed target must have visible outlined ink in its own footprint.
+        def supported(ids):
+            footprint = np.zeros(mask.shape,np.uint8)
+            for d in raw:
+                if d['source_id'] in ids:
+                    cv2.fillPoly(footprint,[np.asarray(d['polygon'],np.int32)-[x,y]],1)
+            return np.count_nonzero(mask & (footprint != 0)) >= max(20,.06*footprint.sum())
+        tested = active if run_index is not None else pending
+        if (any(not supported(ids) for _,_,_,ids in tested) or
+                any(not supported({key}) for i,_,_,ids in active if i in single_beats for key in ids)):
+            continue
         pixels = original[roi]
+        if run_index is not None:
+            mask = clipped_rims(pixels,mask,owned[roi]!=0,obstacle[roi])
         selected = rec.region_backend(backend,pixels,mask)
-        if selected is None:
-            # The coarse earlier pass often removed midtone wall and bird
-            # detail between the characters. Keep their original paint.
-            near = cv2.dilate(mask.astype(np.uint8), np.ones((9, 9), np.uint8)) != 0
-            black = pixels.max(2) < 65
-            white = (pixels.min(2) > 200) & (np.ptp(pixels, axis=2) < 32)
-            mask |= old & near & (black | white)
-            known = eligible[roi] & erase[roi] & ~obstacle[roi] & ~(black | white) & ~mask
-            known |= old & ~mask
-        else:
-            mask |= old & ((pixels.max(2)<110) | ((pixels.min(2)>155) & (np.ptp(pixels,axis=2)<55)))
-            known = old & ~mask
+        # The broad first cleanup may include an entire dark costume or shadow.
+        # Only add antialiased tips next to confirmed strokes. Return the rest of
+        # the original paint from these exact members, including dark details.
+        earlier = eligible[roi] & erase[roi] & ~obstacle[roi]
+        near = cv2.dilate(mask.astype(np.uint8), np.ones((7,7),np.uint8)) != 0
+        black = pixels.max(2) < 65
+        white = (pixels.min(2) > 200) & (np.ptp(pixels,axis=2) < 32)
+        mask |= earlier & near & (black | white)
+        known = earlier & ~mask
         binding = dict(active[0][1], related_bindings=[item[1] for item in active[1:]])
         report = dict(bounds=zone,source_ids=sorted(all_ids))
         reports.append(report)
@@ -354,6 +523,9 @@ def finish(rgb, clean, text, layout, erase, raw, units, rows, source, backend, a
             # glyphs. Restore its source first, then compose the shared repair.
             plate[backings] = original[backings]
             for i,proof,tile,layer in placements:
+                if rows[i]['status'] != 'automatic_composed':
+                    rows[i].update(status='automatic_composed',reason_code=None,reason=None,
+                                   cleanup_method='outlined_sound_group',render_quality='best_effort')
                 rows[i]['layout'] = proof
                 rows[i]['outlined_sound_placement'] = tile
                 artifacts[f'outlined-sound-{index}-{i}-text.png'] = layer

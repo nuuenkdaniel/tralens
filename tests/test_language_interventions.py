@@ -7,6 +7,13 @@ from tralens.translation.contracts import canonical
 
 
 class Review(unittest.TestCase):
+    def test_repeated_personal_address_carries_only_its_own_predicate(self):
+        from tralens.translation.rendition import repeated_addressee
+        self.assertEqual(repeated_addressee('大切だーっ',['あなたもあなたも','大切だ']),'あなたが大切だーっ')
+        self.assertFalse(repeated_addressee('必要だ',['あなたもあなたも','大切だ']))
+        self.assertFalse(repeated_addressee('大切だ',['あなたもあなたも','大切だ','これを使って']))
+        self.assertFalse(repeated_addressee('大切だ',['これもこれも']))
+
     def test_english_error_does_not_require_source_change(self):
         req=english.request('はい','No.',binding={'source_sha256':'a'*64,'unit_revision':'b'*64,'primary_result_revision':'c'*64})
         result=english.parse(req,canonical({'translation':'Yes.','uncertainties':[],'assessment':'candidate'}))

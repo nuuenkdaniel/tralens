@@ -38,6 +38,8 @@ def display_counts(rows):
 
 
 def composed_status(row):
+    if row.get('cleanup_method') == 'outlined_sound_group':
+        return 'aggressive'
     if row.get('removal_fallback',{}).get('status')=='removed_and_placed':
         return 'aggressive'
     if row.get('reconstruction',{}).get('status')=='composed_unverified':
@@ -79,10 +81,19 @@ def _free(mask, blocked, x, y):
             and not (mask & blocked[y:y+h,x:x+w]).any())
 
 
-def place(rgb, source_bounds, own, blocked, text, font_data, coverage, style):
+def place(rgb, source_bounds, own, blocked, text, font_data, coverage, style, *, protect_artwork=True):
     """Return local patch/text tiles and an explicit page offset/footprint."""
     left,top,right,bottom = source_bounds
     cx,cy = (left+right)//2,(top+bottom)//2
+    if protect_artwork:
+        # A source rectangle or a gap between OCR boxes does not imply blank art.
+        # Limit the extra scan to the neighborhood reachable by these tiles.
+        pad = 330
+        ax, ay = max(0,left-pad), max(0,top-pad)
+        ar, ab = min(rgb.width,right+pad), min(rgb.height,bottom+pad)
+        from .aggressive import placement_obstacles
+        blocked = blocked.copy()
+        blocked[ay:ab,ax:ar] |= placement_obstacles(np.asarray(rgb.crop((ax,ay,ar,ab))),own[ay:ab,ax:ar])
     work = n.LayoutWork()
     attempts = []
     try:
@@ -156,7 +167,7 @@ def place(rgb, source_bounds, own, blocked, text, font_data, coverage, style):
     return 'caption',patch,lettering,xy,proof,attempts
 
 
-def display(rgb, raw, units, rows, native_clean, native_text, native_composite, font_data, coverage, style, *, max_displays=MAX_ATTEMPTS, native_erase=None, font_resolver=None):
+def display(rgb, raw, units, rows, native_clean, native_text, native_composite, font_data, coverage, style, *, max_displays=MAX_ATTEMPTS, native_erase=None, font_resolver=None, protect_artwork=True):
     """Independent post-clean display pass. Failures never roll back native edits."""
     started = time.monotonic()
     shape = (rgb.height,rgb.width)
@@ -197,6 +208,9 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
         row['display_status'] = 'undisplayed'
         attempt = {'policy':POLICY,'status':'unresolved','native_reason':row.get('reason_code')}
         row['display_fallback'] = attempt
+        if row.get('reason_code') == 'ruled_table_cell':
+            attempt['reason'] = 'target_exceeds_printed_cell'
+            continue
         if row.get('reason_code') in ('runtime_locality','evaluation_cap','uncorroborated_source'):
             attempt['reason'] = 'source_validation_or_explicit_evaluation_limit'
             continue
@@ -217,7 +231,7 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
             n.require(w > 0 and h > 0,'missing visible translation source geometry')
             blocked = p.dilate(counts > own_count,2) | reserved
             kind,patch,lettering,xy,proof,routes = place(rgb,(x,y,x+w,y+h),own,blocked,
-                row['binding']['text'],font_data,coverage,style)
+                row['binding']['text'],font_data,coverage,style,protect_artwork=protect_artwork)
             px,py = xy;ph,pw = patch.height,patch.width
             gx,gy = proof.get('caption_bounds',[px,py])[:2]
             proof.update(page_tile_offset=list(xy), glyph_page_origin=[gx+PADDING,gy+PADDING])

@@ -8,8 +8,8 @@ from sklearn.cluster import DBSCAN
 from .types import Text_Box, Text_Group
 
 
-def centered_dialogue_rows(boxes, pixels):
-    """A bounded stack of centered print separated by uninterrupted light seams."""
+def aligned_dialogue_rows(boxes, pixels):
+    """Centered print or a right-aligned quotation on uninterrupted paper."""
     if pixels is None or not 2 <= len(boxes) <= 6:
         return False
     ordered = sorted(boxes, key=lambda box: box.bbox[1])
@@ -24,7 +24,12 @@ def centered_dialogue_rows(boxes, pixels):
         return False
     centers = [(x+r)/2 for x,y,r,b in rows]
     if max(centers)-min(centers) > .45*scale:
-        return False
+        ends = [r for x,y,r,b in rows]
+        text = ''.join(box.text.strip() for box in ordered)
+        if (max(ends)-min(ends) > .5*scale or not any(
+                text.startswith(left) and text.endswith(right) and text.count(left)==text.count(right)==1
+                for left,right in (('「','」'),('『','』')))):
+            return False
     for x,y,r,b in rows:
         if r-x < 2.5*scale or not (0 <= x < r <= pixels.shape[1] and 0 <= y < b <= pixels.shape[0]):
             return False
@@ -73,8 +78,8 @@ class GroupingMixin:
                 for b in range(a + 1, len(clusters)):
                     second = clusters[b]
                     pairs = [(i, j) for i in first for j in second]
-                    centered = centered_dialogue_rows([text_boxes[i] for i in first+second], original_pixels)
-                    if not centered and not all(self._manga_compatible(text_boxes[i], text_boxes[j],
+                    aligned = aligned_dialogue_rows([text_boxes[i] for i in first+second], original_pixels)
+                    if not aligned and not all(self._manga_compatible(text_boxes[i], text_boxes[j],
                                                      relaxed=True) for i, j in pairs):
                         continue
                     known = {regions[i][0] for i in first + second if i in regions}
@@ -82,7 +87,7 @@ class GroupingMixin:
                         continue
                     local = [(i, j) for i, j in pairs
                              if self._manga_compatible(text_boxes[i], text_boxes[j])]
-                    if centered and not local:
+                    if aligned and not local:
                         local = pairs
                     if local:
                         if merge_guard is not None and not merge_guard(
@@ -162,6 +167,16 @@ class GroupingMixin:
             columns = (oy >= .6 and abs(a[1] - b[1]) <= 1.5 * scale
                        and dx <= (4 if relaxed else 1.8) * scale)
             fragments = ox >= .7 and dy <= .8 * scale
+            if fragments and oy <= .3 and not columns:
+                # The bounding rectangles of slanted columns can touch even
+                # when the actual ends belong to different lines of print.
+                upper, lower = (first, second) if a[1] < b[1] else (second, first)
+                if len(upper.poly) == len(lower.poly) == 4:
+                    bottom = sorted(upper.poly, key=lambda pt: pt[1])[-2:]
+                    top = sorted(lower.poly, key=lambda pt: pt[1])[:2]
+                    offset = abs(sum(p[0] for p in bottom) - sum(p[0] for p in top)) / 2
+                    width = min(abs(bottom[1][0] - bottom[0][0]), abs(top[1][0] - top[0][0]))
+                    fragments = offset <= .45 * width
             return columns or fragments
         rows = (ox >= .55 and abs(a[0] - b[0]) <= 2 * scale
                 and dy <= (2.5 if relaxed else 1.3) * scale)

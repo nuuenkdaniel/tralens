@@ -459,6 +459,21 @@ class ViewerTests(unittest.TestCase):
             self.assertEqual(kwargs.get('crop_reader_model'),config.crop_reader_model if use_crop else None)
             self.assertEqual(kwargs['manga_reread_model'],config.manga_reread_model if quality else None)
 
+    def test_reader_uses_crop_recognition_without_collecting_unused_views(self):
+        import main
+        from dataclasses import replace
+        config = replace(self.config, reader_mode=True, fonts=self.root/'fonts.json',
+                         crop_reader_model=self.root/'hayai')
+        image = self.root/'reader.png'
+        from PIL import Image
+        Image.new('RGB',(390,600),'white').save(image)
+        settings = s.options({'translation_policy':'coverage-first'},render_enabled=True)
+        with patch.object(main,'run_pipeline') as pipeline:
+            s.execute_job(config,dict(image=image,directory=self.root/'reader',options=settings))
+        self.assertEqual(pipeline.call_args.kwargs['crop_reader_model'], config.crop_reader_model)
+        self.assertFalse(pipeline.call_args.kwargs['reader_presentations'])
+        self.assertEqual(pipeline.call_args.kwargs['timeout'],300)
+
     def test_mode_dispatch_reuses_coordinator_and_preview_workflow(self):
         import main
         from tralens.translation import workflow

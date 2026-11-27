@@ -469,12 +469,12 @@ function pageImage(p, mode) {
   const columns = prefs.layout === "spread" || (view === "compare" && prefs.comparison === "side") ? 2 : 1;
   const width = Math.min(innerWidth / columns, prefs.fit === "width" ? Infinity : innerHeight * p.width / p.height, p.width);
   const reading = mode !== "original" && p.has_text;
-  const preserve = reading && view !== "compare" && (p.reading_width < 0 || width < p.reading_width);
-  const translated = mode !== "original" && p.ready && !preserve;
+  const tapToRead = reading && view !== "compare" && (p.reading_width < 0 || width < p.reading_width);
+  const translated = mode !== "original" && p.ready;
   return (
     '<div class="imagebox" data-page="' +
     p.id +
-    '"' + (preserve ? ' data-reading-fallback' : '') + '><img class="page-image" ' +
+    '"' + (tapToRead ? ' data-reading-fallback' : '') + '><img class="page-image" ' +
     (p.width && p.height
       ? 'width="' + p.width + '" height="' + p.height + '" '
       : "") +

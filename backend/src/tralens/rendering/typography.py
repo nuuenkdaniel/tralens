@@ -114,6 +114,23 @@ def layout_dialogue(text, font_data, coverage, mask, style):
             best = key, layer.crop(box), box[:2], provenance, len(probes)-1
     n.require(best is not None, 'overflow: no contained layout within comfortable margins and supplied size bounds')
     _, tile, xy, provenance, index = best
+    # Keep a short hyphenated name or compound together when one line still
+    # fits at a readable size. Preserve the two-line fit for narrower balloons.
+    if (provenance['inserted_break_offsets'] and
+            re.fullmatch(r"[A-Za-z]{2,12}[-‐][A-Za-z]{2,9}[.!?…]*",text)):
+        try:
+            single,metrics = n.layout(text,font_data,coverage,content,
+                {**style,'min_size':max(low,round(provenance['size']*.75)),
+                 'max_size':provenance['size']},work=work,fixed_breaks=())
+        except n.ResourceLimit:
+            raise
+        except ValueError as error:
+            if not str(error).startswith('overflow:'):
+                raise
+        else:
+            box = single.getchannel('A').getbbox()
+            tile,xy,provenance = single.crop(box),box[:2],metrics
+            probes[index]['unbroken_size'] = metrics['size']
     layer = Image.new('RGBA', mask.size)
     layer.paste(tile, xy)
     provenance.update(rasterized_pixels=work.rasterized_pixels, search_work=dict(work.search),
@@ -122,3 +139,37 @@ def layout_dialogue(text, font_data, coverage, mask, style):
             'content_pixels': int(np.count_nonzero(np.asarray(content))), 'preferred_size': preferred,
             'chosen_probe': index, 'probes': probes, 'score_scope': 'bounded presentation heuristic; not an optimality or language claim'})
     return layer, provenance, content
+
+
+def interior_box(paper):
+    """Find a contained text rectangle in a small irregular balloon or caption."""
+    ys,xs = np.nonzero(paper)
+    if not len(xs):
+        return Image.fromarray(np.uint8(paper)*255)
+    x,y,w,h = cv2.boundingRect(np.uint8(paper))
+    tile = paper[y:y+h,x:x+w]
+    sums = cv2.integral(np.uint8(~tile))
+    # A balloon tail or a thin connected gutter should not dictate the aspect
+    # ratio or center of the English text.
+    aspect = np.clip((np.percentile(xs,90)-np.percentile(xs,10)+1) /
+                     (np.percentile(ys,90)-np.percentile(ys,10)+1),.5,5.)
+    cx,cy = np.median(xs)-x,np.median(ys)-y
+    result = np.zeros_like(paper,np.uint8)
+    lo,hi = 1,h
+    while lo<=hi:
+        rh = (lo+hi)//2
+        rw = max(1,round(rh*aspect))
+        if rw>w:
+            hi = rh-1
+            continue
+        outside = sums[rh:,rw:]-sums[:-rh,rw:]-sums[rh:,:-rw]+sums[:-rh,:-rw]
+        rows,cols = np.nonzero(outside==0)
+        if not len(rows):
+            hi = rh-1
+            continue
+        i = ((rows+(rh-1)/2-cy)**2+(cols+(rw-1)/2-cx)**2).argmin()
+        left,top = x+cols[i],y+rows[i]
+        result.fill(0)
+        result[top:top+rh,left:left+rw] = 255
+        lo = rh+1
+    return Image.fromarray(result)
