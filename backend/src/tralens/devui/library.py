@@ -1,6 +1,8 @@
 """Server-owned reader library. One queued page at a time enters the existing job API."""
 
 from contextlib import contextmanager
+from functools import lru_cache
+from io import BytesIO
 import fcntl
 import json
 import math
@@ -101,6 +103,8 @@ class Library:
         except BaseException:
             self.owner.close()
             raise
+        self.thumbnail_slots = threading.BoundedSemaphore(2)
+        self.cached_thumbnail = lru_cache(maxsize=160)(self._make_thumbnail)
         self.wake = threading.Event()
         self.stopped = threading.Event()
         with self.db() as db:
@@ -367,6 +371,28 @@ class Library:
         if not r or r["data"] is None:
             raise RequestError("Page unavailable.", 404)
         return (r["mime"] if field == "source" else "image/png"), r["data"]
+
+    def thumbnail(self, page, variant, account="owner"):
+        # Check ownership and the current revision even on a cache hit.
+        with self.db() as db:
+            row = db.execute(
+                "SELECT updated, length(final) AS translated FROM pages "
+                "JOIN chapters ON pages.chapter=chapters.id JOIN books ON chapters.book=books.id "
+                "WHERE pages.id=? AND books.account=?", (page, account)
+            ).fetchone()
+        if not row or (variant == "translated" and row["translated"] is None):
+            raise RequestError("Page unavailable.", 404)
+        revision = row["updated"] if variant == "translated" else 0
+        with self.thumbnail_slots:
+            return self.cached_thumbnail(page, variant, account, revision)
+
+    def _make_thumbnail(self, page, variant, account, revision):
+        _, data = self.image(page, variant, account)
+        with Image.open(BytesIO(data)) as image:
+            image.thumbnail((320, 448), Image.Resampling.LANCZOS)
+            output = BytesIO()
+            image.save(output, "WEBP", quality=82, method=2)
+            return "image/webp", output.getvalue()
 
     def archive_name(self, book, variant, account="owner"):
         with self.db() as db:

@@ -148,6 +148,13 @@ class AccountTests(unittest.TestCase):
             self.assertEqual(self.call(f"/api/library/books/{book}/{variant}.zip", cookie=bob)[0], 404)
         self.assertEqual(self.call(f"/api/library/pages/{page}/original", cookie=alice)[0], 200)
         original = f"/api/library/pages/{page}/original"
+        thumbnail = original + "/thumbnail"
+        status, _, data = self.call(thumbnail, cookie=alice)
+        self.assertEqual(status, 200)
+        with Image.open(BytesIO(data)) as preview:
+            self.assertEqual((preview.format, preview.size), ("WEBP", (18, 24)))
+        self.assertEqual(self.call(thumbnail, cookie=bob)[0], 404)
+        self.assertEqual(self.call(thumbnail)[0], 401)
         archive = f"/api/library/books/{book}/original.zip"
         issue = "/api/library/download-ticket"
         self.assertEqual(self.call(issue, {"path": original}, alice, bob_token)[0], 403)

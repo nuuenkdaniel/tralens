@@ -108,6 +108,22 @@ class ReaderLibraryTests(unittest.TestCase):
         self.assertEqual(self.library.catalog()["books"][0]["chapters"][0]["pages"][0]["status"], "failed")
         self.assertEqual(self.library.image(page, "translated"), previous)
 
+    def test_thumbnail_refreshes_on_new_translation_and_preserves_original(self):
+        self.library.add(self.meta, [self.file])
+        page = self.finished()["chapters"][0]["pages"][0]["id"]
+        original = self.library.thumbnail(page, "original")
+        first = self.library.thumbnail(page, "translated")
+        with self.library.db() as db:
+            db.execute("UPDATE pages SET status='running' WHERE id=?", (page,))
+        updated = BytesIO()
+        Image.new("RGB", (1000, 1500), "blue").save(updated, "PNG")
+        self.library.finish(page, updated.getvalue(), None)
+        self.assertNotEqual(first, self.library.thumbnail(page, "translated"))
+        with Image.open(BytesIO(self.library.thumbnail(page, "translated")[1])) as thumb:
+            self.assertEqual(thumb.size, (299, 448))
+        self.assertEqual(self.library.thumbnail(page, "original"), original)
+        self.assertEqual(self.library.image(page, "translated")[1], updated.getvalue())
+
     def test_chapters_pages_position_download_and_restart(self):
         first = self.library.add(self.meta, [self.file, self.file])
         self.library.add(

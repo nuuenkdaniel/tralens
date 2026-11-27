@@ -63,13 +63,14 @@ const ib = (action, label, symbol) =>
   icon(symbol) +
   "</button>";
 const pagesOf = (book) => book.chapters.flatMap((c) => c.pages);
-const url = (p, which) =>
+const url = (p, which, suffix = "") =>
   "/api/library/pages/" +
   p.id +
   "/" +
-  which +
+  which + suffix +
   (which === "translated" ? "?v=" + p.updated : "");
 const best = (p) => url(p, p.ready ? "translated" : "original");
+const thumbnail = (p) => url(p, p.ready ? "translated" : "original", "/thumbnail");
 const readURL = (b, p) => "#read/" + b.id + "/" + p.id;
 const lastPage = (b) =>
   pagesOf(b).find((p) => p.id === b.position) || pagesOf(b)[0];
@@ -238,7 +239,7 @@ function card(b) {
     '<a class="book" href="#book/' +
     b.id +
     '"><img loading="lazy" src="' +
-    best(pages[0]) +
+    thumbnail(pages[0]) +
     '" alt=""><b>' +
     esc(b.title) +
     "</b><small>" +
@@ -286,7 +287,7 @@ function library() {
     .sort((a, b) => b.last_read - a.last_read)[0];
   const hero = recent
     ? '<section class="hero"><img alt="" src="' +
-      best(lastPage(recent)) +
+      thumbnail(lastPage(recent)) +
       '"><div><small>Continue reading</small><h2>' +
       esc(recent.title) +
       '</h2><p class="meta">' +
@@ -445,7 +446,7 @@ function detail(b) {
   return (
     header(true) +
     '<main class="wrap detail"><img class="cover" src="' +
-    best(pages[0]) +
+    thumbnail(pages[0]) +
     '" alt="' +
     esc(b.title) +
     ' cover"><div><h1>' +
@@ -503,7 +504,7 @@ root.addEventListener("toggle", (event) => {
   const { book } = current();
   const chapter = book?.chapters.find(c => c.id === list.dataset.chapter);
   if (chapter) list.innerHTML = chapter.pages.map((p, i) =>
-    '<a href="' + readURL(book, p) + '"><img loading="lazy" src="' + best(p) +
+    '<a href="' + readURL(book, p) + '"><img loading="lazy" src="' + thumbnail(p) +
     '" alt="Page ' + (i + 1) + '">' + (i + 1) + '</a>').join("");
 }, true);
 function pageImage(p, mode) {
@@ -525,7 +526,7 @@ function pageImage(p, mode) {
     esc(p.name) +
     " · " +
     (translated ? "translated" : "original") +
-    '" loading="lazy">' +
+    (prefs.layout === "continuous" && view !== "compare" ? '" loading="lazy">' : '">') +
     (mode !== "original" && !p.ready
       ? '<small class="badge">Original</small>'
       : "") +
@@ -667,6 +668,68 @@ function setWipe(value) {
   if (image) image.parentElement.style.setProperty("--divider", value + "%");
   if (image) image.style.clipPath = "inset(0 " + (100 - value) + "% 0 0)";
 }
+// Keep at most the next screen in this signed-in tab. Reuse the image element
+// on a turn so private pages never need a persistent browser cache.
+const preparedPages = new Map();
+function keepPrepared(sources) {
+  for (const [src, img] of preparedPages) {
+    if (!sources.includes(src)) {
+      img.removeAttribute("src");
+      preparedPages.delete(src);
+    }
+  }
+}
+function prepareNext(book, chapter, page, canvas) {
+  if (canvas.classList.contains("continuous") || navigator.connection?.saveData) {
+    keepPrepared([]);
+    return;
+  }
+  const spread = prefs.layout === "spread" && view !== "compare";
+  const step = spread ? 2 : 1;
+  const index = chapter.pages.indexOf(page) + step;
+  const nextChapter = index < chapter.pages.length ? chapter : book.chapters[book.chapters.indexOf(chapter) + 1];
+  const start = nextChapter === chapter ? index : 0;
+  const next = nextChapter?.pages.slice(start, start + step) || [];
+  const sources = next.flatMap(p => view === "compare" && p.ready ? [best(p), url(p, "original")] :
+    [view === "original" ? url(p, "original") : best(p)]);
+  keepPrepared(sources);
+  const visible = [...canvas.querySelectorAll(".page-image")];
+  Promise.allSettled(visible.map(img => img.decode())).then(() => {
+    if (!canvas.isConnected || canvas !== $(".canvas") || !config) return;
+    for (const src of sources) {
+      if (preparedPages.has(src)) continue;
+      const img = new Image();
+      img.fetchPriority = "low";
+      img.onerror = () => { if (preparedPages.get(src) === img) preparedPages.delete(src); };
+      preparedPages.set(src, img);
+      img.src = src;
+    }
+  });
+}
+function mountReader(markup) {
+  if (!preparedPages.size) {
+    root.innerHTML = markup;
+    return;
+  }
+  const template = document.createElement("template");
+  template.innerHTML = markup;
+  const replacements = [];
+  for (const target of template.content.querySelectorAll(".page-image")) {
+    const src = target.getAttribute("src");
+    const img = preparedPages.get(src);
+    if (!img) continue;
+    preparedPages.delete(src);
+    img.onerror = null;
+    img.fetchPriority = "auto";
+    for (const attr of target.attributes) {
+      if (attr.name !== "src") img.setAttribute(attr.name, attr.value);
+    }
+    target.removeAttribute("src");
+    replacements.push([target, img]);
+  }
+  root.replaceChildren(template.content);
+  for (const [target, img] of replacements) target.replaceWith(img);
+}
 let lastRender = "",
   lastFocusPage = "";
 function render() {
@@ -682,13 +745,15 @@ function render() {
   const expanded = same && screen === "book" ? [...root.querySelectorAll("details[open] .pages")].map(el => el.dataset.chapter) : [];
   const hidden = same && $(".reader")?.classList.contains("clean");
   clearTimeout(hideTimer);
-  root.innerHTML = reading
-    ? reader(book, chapter, page)
-    : screen === "settings"
+  if (reading) mountReader(reader(book, chapter, page));
+  else {
+    keepPrepared([]);
+    root.innerHTML = screen === "settings"
       ? preferences()
       : screen === "book" && book
         ? detail(book)
         : library();
+  }
   document.title =
     (reading
       ? book.title + " · " + chapter.title
@@ -710,6 +775,7 @@ function render() {
     if (hidden) $(".reader").classList.add("clean");
     else showChrome();
     const canvas = $(".canvas");
+    prepareNext(book, chapter, page, canvas);
     const keepScroll = same && oldCanvas?.className === canvas.className;
     if (keepScroll) canvas.scrollTop = oldScroll;
     if (canvas.classList.contains("continuous")) {
@@ -1649,6 +1715,7 @@ function verifyServer(origin) {
   });
 }
 function accountCard(title, intro, content) {
+  keepPrepared([]);
   if (pendingImport) clearImport();
   if (sheet.open) sheet.close();
   clearTimeout(pollTimer);

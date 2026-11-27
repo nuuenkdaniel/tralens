@@ -103,9 +103,11 @@ class ReaderHandler(Handler):
             elif match := re.fullmatch(f"/api/library/pages/({ID})/transcript", path):
                 self.json(200, self.server.library.transcript(match[1], self.account))
             elif match := re.fullmatch(
-                f"/api/library/pages/({ID})/(original|translated)", path
+                f"/api/library/pages/({ID})/(original|translated)(/thumbnail)?", path
             ):
-                mime, data = self.server.library.image(*match.groups(), self.account)
+                page, variant, thumb = match.groups()
+                load = self.server.library.thumbnail if thumb else self.server.library.image
+                mime, data = load(page, variant, self.account)
                 self.respond(200, data, mime)
             elif match := re.fullmatch(
                 rf"/api/library/books/({ID})/(original|translated|both)\.zip", path
