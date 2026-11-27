@@ -124,7 +124,10 @@ class SourceExtents(unittest.TestCase):
             else:result=replacement.finish(*shared,source=source,backend=backend,extents={'one':extent})
         rows,clean,after_text,_,erase,_,_,_=result
         tail=np.zeros(shape,bool);tail[210:230,380:410]=True
-        self.assertTrue((np.asarray(clean)[tail]==150).all())
+        if no_placement:
+            self.assertTrue(np.array_equal(np.asarray(clean),before))
+        else:
+            self.assertTrue((np.asarray(clean)[tail]==150).all())
         self.assertTrue(np.array_equal(np.asarray(clean)[old|alpha],before[old|alpha]))
         self.assertTrue(np.array_equal(np.asarray(after_text)[alpha],np.asarray(text)[alpha]))
         self.assertTrue(np.array_equal(np.asarray(clean)[~erase],before[~erase]))
@@ -136,11 +139,11 @@ class SourceExtents(unittest.TestCase):
     def test_aggressive_extent_removes_tail_without_overwriting_edits(self):
         self.assertEqual(self.run_cleanup('recovery')[0]['status'],'automatic_composed')
 
-    def test_final_extent_removal_survives_failed_placement(self):
-        self.assertEqual(self.run_cleanup('final',no_placement=True)[0]['status'],'source_removed')
+    def test_failed_placement_preserves_extended_strokes(self):
+        self.assertEqual(self.run_cleanup('final',no_placement=True)[0]['status'],'skipped')
 
     def test_exhausted_aggressive_budget_leaves_fresh_final_reconstruction_available(self):
-        self.assertEqual(self.run_cleanup('deferred',no_placement=True)[0]['status'],'source_removed')
+        self.assertEqual(self.run_cleanup('deferred',no_placement=True)[0]['status'],'skipped')
 
 
 class ExtentCoordinator(unittest.TestCase):

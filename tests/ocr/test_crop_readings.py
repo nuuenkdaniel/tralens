@@ -18,6 +18,82 @@ from tralens.translation.contracts import automatic_units,canonical
 
 
 class CropReadings(unittest.TestCase):
+    def test_quoted_literal_preserves_spaces_and_flags_when_three_views_agree_on_the_tail(self):
+        source='"git status -s"(3?!'
+        record=dict(source=source,direction='horizontal',scores=[.84],quoted_literal_tail=True,
+                    readings=['"gitstatus-s"を試そう！','“gitstatus-s”を試そう!','"git status -s"を試そう!'])
+        self.assertTrue(c.select_record(record))
+        self.assertEqual(c.candidate_text(record),'"git status -s"を試そう！')
+        for different in ['"gitstatus-s"を試した','"gitstatus-s!"を試そう！','"gitstatus"を試そう！']:
+            self.assertFalse(c.select_record({**record,'readings':record['readings'][:2]+[different]}))
+
+    def test_individual_reread_only_when_paragraph_disagreement_lies_in_another_trusted_column(self):
+        lines=[dict(text='うん',confidence=.58),dict(text='新しい時計が届いた',confidence=.99)]
+        reads=['うん新しい時形が届いた','うん新しい時形が届いた','うん新しい時刻が届いた']
+        self.assertEqual(c.weak_member(lines,reads),0)
+        self.assertIsNone(c.weak_member(lines,[v.replace('うん','うむ') for v in reads]))
+        self.assertIsNone(c.weak_member(lines,[reads[0]]*3))
+        self.assertIsNone(c.weak_member([lines[0],dict(lines[1],confidence=.82)],reads))
+    def test_trailing_emphasis_does_not_dispute_an_internal_particle(self):
+        record=dict(source='顔さ見せて',polygons=[[],[],[]],scores=[.45,.82,.67],
+                    readings=['顔を見せてー','顔を見せて','顔を見せて'])
+        self.assertEqual(c.isolated_passage_text(record),'顔を見せて')
+        self.assertIsNone(c.isolated_passage_text(dict(record,readings=['顔を見せてよ','顔を見せて','顔を見せて'])))
+        self.assertIsNone(c.isolated_passage_text(dict(record,source='顔を見せた')))
+
+    def test_full_size_kana_before_vowel_mark_requires_unanimous_readings(self):
+        src='スッールの脚'; word='スツールの脚'
+        self.assertTrue(c.selection(src,[word]*3,[.99],'vertical'))
+        self.assertFalse(c.selection(src,[word,word,src],[.99],'vertical'))
+        self.assertFalse(c.selection(src,[word+'だ']*3,[.99],'vertical'))
+
+    def test_padded_disagreement_must_fall_inside_an_independent_confident_column(self):
+        columns = ['うむむ','機械','なんだ']
+        record = dict(direction='vertical',source=''.join(columns),scores=[.45,.99,.95],
+                      readings=['うんうん機械なんだ','うんうん機械なんだ','うんうん機会なんだ'])
+        self.assertTrue(c.anchored_columns(record,columns))
+        self.assertFalse(c.anchored_columns(dict(record,scores=[.45,.88,.95]),columns))
+        record['readings'][2]='うんうむ機械なんだ'
+        self.assertFalse(c.anchored_columns(record,columns))
+
+    def test_small_kana_in_two_printed_beats(self):
+        native = 'しゃかしゃか'
+        views = [native,native,native+'し']
+        self.assertTrue(c.selection('しやかしやか',views,[.95,.62],'horizontal'))
+        self.assertFalse(c.selection('しやかしやか',views,[.64,.62],'horizontal'))
+        self.assertFalse(c.selection('しやこしやこ',views,[.95,.62],'horizontal'))
+        self.assertFalse(c.selection('しやかしやか',[native,native,native+'す'],[.95,.62],'horizontal'))
+
+    def test_repeated_small_tsu_agreement_requires_identical_words(self):
+        word='うわっっ扉が開いたよ'
+        self.assertTrue(c.selection('うわら扉が開いたよ',[word,word,word.replace('っっ','っ')],[.63],'horizontal'))
+        self.assertFalse(c.selection('うわら扉が開いたよ',[word,word,word.replace('開','閉')],[.63],'horizontal'))
+        self.assertFalse(c.selection('うわら扉が開いたよ',[word,word,word.replace('っっ','')],[.63],'horizontal'))
+
+    def test_multiline_rereads_keep_native_suffix_where_the_presentations_diverge(self):
+        raw = '新しいワキショップを開灌します！工作同好会'
+        good = '新しいワークショップを開催します！工作同好会'
+        record = dict(source=raw,direction='horizontal',polygons=[[]]*3,scores=[.87]*3,
+                      readings=[good.replace('好会','好子会')]*2+[good.replace('好会','女子会')])
+        self.assertEqual(c.shared_line_edits(record),good)
+        self.assertIsNone(c.shared_line_edits(dict(record,direction='vertical')))
+        self.assertIsNone(c.shared_line_edits(dict(record,readings=['全然別の文章']*3)))
+
+    def test_consistent_isolation_can_discard_a_repeated_fragment_outside_the_column(self):
+        raw,ordinary='世界遺產の話','世界遺産の話'
+        record=dict(source=raw,polygons=[[],[]],scores=[.66,.92],readings=[ordinary+'の話',ordinary,ordinary])
+        self.assertEqual(c.isolated_passage_text(record),ordinary)
+        self.assertIsNone(c.isolated_passage_text(dict(record,readings=[ordinary+'別',ordinary,ordinary])))
+        self.assertIsNone(c.isolated_passage_text(dict(record,readings=[ordinary+'の話',raw,ordinary])))
+
+    def test_menu_labels_require_matching_shortcuts_and_two_intact_views(self):
+        source = '保仔(S)開く(O)'
+        label = '保存(S)開く(O)'
+        self.assertTrue(c.selection(source,[label,label,'保存S開('],[.76],'horizontal'))
+        self.assertFalse(c.selection(source,[label,label,'保管(S)開く(O)'],[.76],'horizontal'))
+        self.assertFalse(c.selection(source,[label,label,'保存S開('],[.95],'horizontal'))
+        self.assertFalse(c.selection(source,[label.replace('(S)','(F)')]*2+['開('],[.76],'horizontal'))
+
     def test_square_repeated_effect_requires_three_agreeing_reads_and_a_matching_kana(self):
         record = dict(direction='unknown', polygons=[[]], scores=[.43], source='く', readings=['ごくごく']*3)
         self.assertTrue(c.select_record(record))
@@ -33,6 +109,17 @@ class CropReadings(unittest.TestCase):
     def refine(self,reader):
         c.refine(self.engine,self.image,self.original,reader=reader,model_identity='synthetic',output=self.output)
         return automatic_units(self.batch,self.engine.automatic_recognition_results[0])[0]
+
+    def test_padded_crop_can_omit_complete_shorter_column_only_when_it_reads_separately(self):
+        record = dict(source='ヘフな4',direction='vertical',scores=[.61,.58],
+            polygons=[[[55,10],[73,10],[73,53],[55,53]],[[33,10],[52,10],[52,33],[33,33]]],
+            readings=['ヘンな人','ヘンな人','ヘンな'],clipped_column_pair={'readings':['ヘンな','人'],'view_hashes':['a','b']})
+        self.assertTrue(c.select_record(record))
+        record['clipped_column_pair']['readings'][1]='犬'
+        self.assertFalse(c.select_record(record))
+        record['clipped_column_pair']['readings'][1]='人'
+        record['polygons'].reverse()
+        self.assertFalse(c.select_record(record))
 
     def test_clipped_column_requires_attached_ink_and_matching_separate_kana(self):
         from PIL import ImageDraw

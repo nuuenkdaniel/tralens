@@ -10,6 +10,7 @@ import json
 import math
 from pathlib import Path
 import sys
+import unicodedata
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -180,6 +181,9 @@ def check_review(stage, units, records, preview, rgb, image_bytes):
             # Regenerate from explicit source pixels, never open row['views'][*]['path'].
             request, views = visual.prepare_input(unit, rgb, image_bytes,
                 preview["ocr"]["raw_detections"][0], stage["model"])
+            if row["request_revision"] != request.revision:
+                request, views = visual.prepare_input(unit, rgb, image_bytes,
+                    preview["ocr"]["raw_detections"][0], stage["model"], legacy_stroke=True)
             same(row["request"], asdict(request), "review source/crop/view binding drift")
             same(row["request_revision"], request.revision, "review request revision drift")
             expected_body = revision({"model": request.model, "stream": False, "think": False,
@@ -239,6 +243,7 @@ def check_schedule(preview, entries):
     selected = preview["settings"]["selected_ids"]
     by_id = {e["unit"].unit_id: e for e in entries}
     originals, alternates, regions, fragments = [], [], [], []
+    unicode_versions = set()
     for identifier in selected or tuple(by_id):
         entry = by_id[identifier]
         unit, record = entry["unit"], entry["record"]
@@ -256,6 +261,17 @@ def check_schedule(preview, entries):
         for child in record.get("fragment_previews", []):
             expected = fragment_scheduling_info(unit.selected.text, explicit_selection=bool(selected))
             actual = {k: v for k, v in child["scheduling"].items() if k != "planned_position"}
+            unicode_versions.add(actual.get("unicode_version"))
+            require(len(unicode_versions) == 1, "mixed Unicode versions in fragment schedule")
+            if actual.get("unicode_version") == "13.0.0" and expected["unicode_version"] != "13.0.0":
+                # Replay Python 3.10 evidence only for characters already assigned in
+                # Unicode 3.2 whose NFKC mapping agrees with the current database.
+                text = unit.selected.text
+                old = unicodedata.ucd_3_2_0
+                require(all(old.category(ch) != "Cn" for ch in text)
+                        and old.normalize("NFKC", text) == unicodedata.normalize("NFKC", text),
+                        "cannot verify historical Unicode scheduling for this reading")
+                expected["unicode_version"] = "13.0.0"
             same(actual, expected, "fragment scheduling evidence drift")
             fragments.append((unit, child, expected["reason"]))
     if not selected:

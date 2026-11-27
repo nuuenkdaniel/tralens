@@ -42,7 +42,8 @@ class SourceOnlySuiteTest(unittest.TestCase):
                 target = checkout/asset
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source/asset, target)
-            for name in ("README.md",".gitignore"):
+            for name in ("README.md", "PRIVACY.md", ".gitignore", "deploy/promote-release.sh"):
+                (checkout/name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source/name,checkout/name)
             self.assertFalse((checkout/"images").exists())
             self.assertFalse((checkout/"test-results").exists())

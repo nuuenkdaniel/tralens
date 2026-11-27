@@ -7,6 +7,19 @@ from tralens.ocr.grouping import group_manga_boxes
 
 
 class CenteredDialogueTests(unittest.TestCase):
+    def test_right_aligned_quote_joins_across_indent_only_on_clear_paper(self):
+        from tralens.ocr.grouping import aligned_dialogue_rows
+        pixels = np.full((115,200,3),255,np.uint8)
+        rows = [box(0,(104,12,169,28),text='「ここから'),
+                box(1,(62,32,170,48),text='階段を使って'),
+                box(2,(88,52,165,68),text='ください」')]
+        self.assertTrue(aligned_dialogue_rows(rows,pixels))
+        pixels[50,:] = 0
+        self.assertFalse(aligned_dialogue_rows(rows,pixels))
+        pixels[:] = 255
+        rows[-1].text = 'ください'
+        self.assertFalse(aligned_dialogue_rows(rows,pixels))
+
     def test_centered_indent_needs_clear_seam_and_continuing_text(self):
         image = np.full((100, 180, 3), 255, dtype=np.uint8)
         rows = [box(0, (58, 20, 122, 32), text='まだ'),

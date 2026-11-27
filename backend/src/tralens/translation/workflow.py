@@ -54,7 +54,46 @@ class _CountedRuntime:
         return self.provider.generate(**kwargs)
 
 
-def _translation_crop(image, image_hash, detections, unit):
+def _panel_bounds(page, target, fallback):
+    """Follow uninterrupted paper gutters around the target in a bounded thumbnail."""
+    import numpy as np
+    preview = page.convert('RGB')
+    preview.thumbnail((620, 800))
+    ink = np.asarray(preview).min(axis=2) < 244
+    height, width = ink.shape
+    scale = np.array([width / page.width, height / page.height] * 2)
+    x, y, right, bottom = np.asarray(target) * scale
+    left, top, end, base = 0, 0, width, height
+    divided = False
+    for _ in range(4):
+        region = ink[top:base, left:end]
+        previous = left, top, end, base
+        for axis, origin in ((1, top), (0, left)):
+            paper = region.mean(axis=axis) < .01
+            edges = np.flatnonzero(np.diff(np.r_[False, paper, False]))
+            for start, stop in zip(edges[::2], edges[1::2]):
+                if stop - start < 3:
+                    continue
+                middle = origin + (start + stop) // 2
+                if start > 0 and stop < len(paper):
+                    divided |= middle < (y if axis else x) or middle > (bottom if axis else right)
+                if axis == 1:
+                    if middle < y:
+                        top = max(top, middle)
+                    elif middle > bottom:
+                        base = min(base, middle)
+                elif middle < x:
+                    left = max(left, middle)
+                elif middle > right:
+                    end = min(end, middle)
+        if previous == (left, top, end, base):
+            break
+    if not divided or (end-left)*(base-top) > .8*width*height or min(end-left, base-top) < 40:
+        return fallback
+    return tuple(round(v) for v in (np.array([left, top, end, base]) / scale))
+
+
+def _translation_crop(image, image_hash, detections, unit, *, panel=False, toolbar=False):
     """A bounded view around the original target. Neighboring lettering is context only."""
     from PIL import Image
     content = _read_image(image)
@@ -81,7 +120,15 @@ def _translation_crop(image, image_hash, detections, unit):
         pad = min(320, max(72, round(min(page.size)*.15)))
         bounds = (max(0, int(min(xs))-pad), max(0, int(min(ys))-pad),
                   min(page.width, int(max(xs))+pad+1), min(page.height, int(max(ys))+pad+1))
+        if panel:
+            bounds = _panel_bounds(page, (min(xs), min(ys), max(xs), max(ys)), bounds)
+        if toolbar:
+            w,h = max(xs)-min(xs),max(ys)-min(ys)
+            bounds = (max(0,round(min(xs)-.45*w)),max(0,round(min(ys)-1.5*h)),
+                      min(page.width,round(max(xs)+.45*w)),min(page.height,round(max(ys)+.3*h)))
         view = page.crop(bounds).convert('RGB')
+        if toolbar:
+            view = view.resize((view.width*3,view.height*3),Image.Resampling.LANCZOS)
         view.thumbnail((768,768), Image.Resampling.LANCZOS)
         stream = BytesIO()
         view.save(stream, format='PNG')
@@ -160,7 +207,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 timeout=120, keep_alive=60, num_predict=1024, selected_ids=(), ocr_factory=None, runtime=None,
                 allow_fragment_previews=False, review_ocr=False, review_model="qwen3.8:latest",
                 max_review_attempts=4, review_timeout=90, review_runtime=None, cancelled=lambda:False,
-                translation_policy='coverage-first', ocr_refine=None, translation_context='isolated', source_localization=False,
+                translation_policy='coverage-first', ocr_detect=None, ocr_refine=None, translation_context='isolated', source_localization=False,
                 luna_mode=None, related_pages=()):
     """Injected OCR factory is workflow-owned; an injected translation runtime is caller-owned.
 
@@ -177,6 +224,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
         raise ValueError("allow_fragment_previews must be a boolean")
     if type(review_ocr) is not bool or not callable(cancelled):
         raise ValueError("review_ocr must be a boolean and cancelled must be callable")
+    if ocr_detect is not None and not callable(ocr_detect):
+        raise ValueError('OCR detection must be an explicit callback')
     if ocr_refine is not None and not callable(ocr_refine):
         raise ValueError('OCR refinement must be an explicit callback')
     if type(source_localization) is not bool:
@@ -327,6 +376,10 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
             engine = ocr_factory(str(image), device=device, model_root=str(Path(model_root).expanduser()),
                                  model_profile=DEFAULT_PROFILE, enable_manga_ocr=False)
             engine.process_images(propose_units=True, complementary_ownership=True, regroup_companions=True)
+            if ocr_detect is not None:
+                ocr_detect(engine)
+                if hasattr(engine,'masked_detection_error'):
+                    state['masked_detection_error'] = engine.masked_detection_error
             if frontier and run_local_model and luna_mode != 'isolated' and not selected_ids and max_attempts >= 2:
                 from . import discovery
                 if cancelled():
@@ -339,6 +392,21 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
                     state['frontier_discovery'] = dict(model=model, added_ids=[], error=str(error)[:512])
                 assert_source()
+                discovery_result = state['frontier_discovery']
+                repeated = discovery_result.get('repeated_kana')
+                if repeated and state['attempts']+1 < max_attempts:
+                    if cancelled():
+                        raise KeyboardInterrupt('cancelled before repeated lettering check')
+                    state['attempts'] += 1
+                    persist()
+                    try:
+                        detail = discovery.extend(engine, image, size, model, timeout, repeated=repeated)
+                        discovery_result['repeated_check'] = detail
+                        discovery_result['proposed'] += detail['proposed']
+                        discovery_result['added_ids'].extend(detail['added_ids'])
+                    except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
+                        discovery_result['repeated_check'] = {'error':str(error)[:512]}
+                    assert_source()
             if ocr_refine is not None:
                 ocr_refine(engine, output=output)
             if source_localization:
@@ -551,7 +619,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                         translator = PreviewTranslator(counted, model=model, profile=capability,
                             max_attempts=1, timeout=timeout, generation_options=options,single_rendition=True,terminology_units=units,
                             page_context=translation_context == "sound-effects",
-                            context_crop=lambda unit: _translation_crop(image,image_hash,state["ocr"]["raw_detections"][0],unit))
+                            table_cells=(p.proposal_id for p in batch.proposals if p.grouping_method=="separate_printed_table_rows"),
+                            context_crop=lambda unit, **crop_options: _translation_crop(image,image_hash,state["ocr"]["raw_detections"][0],unit,**crop_options))
                     counted.record = record
                     def observe(event):
                         record["generation_evidence"].append(_retain_event(output,prefix,event))

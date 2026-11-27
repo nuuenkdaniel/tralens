@@ -14,6 +14,45 @@ POLICY='source_bound_semantic_strokes_v4_thin_contacts'
 CONTEXT_POLICY='inference_only_neighbor_lettering_v1'
 
 
+def restore_paper_band(crop, candidate, own, mask, protected):
+    """Carry a uniform printed stripe through a white knockout around narrow lettering."""
+    x,y,w,h = cv2.boundingRect(own.astype(np.uint8))
+    if not 12 <= w <= min(h,120) or x < 13 or x+w+12 > crop.shape[1]:
+        return mask
+    sides = np.concatenate((crop[y:y+h,x-12:x-4],crop[y:y+h,x+w+3:x+w+11]),axis=1)
+    tone = np.median(sides,axis=1)
+    matches = np.abs(sides-tone[:,None]).max(2)<=5
+    agree = (matches.mean(1)>=.75) & (matches[:,:8].mean(1)>=.625) & (matches[:,8:].mean(1)>=.625)
+    gray = agree & (np.ptp(tone,axis=1)<10) & (tone.min(1)>=64) & (tone.max(1)<=247)
+    # A one-row speck outside the glyph can interrupt an otherwise continuous band.
+    similar = np.abs(np.diff(tone,axis=0)).max(1)<=4
+    gray[1:-1] |= gray[:-2] & gray[2:] & similar[:-1] & similar[1:] & (matches[1:-1].mean(1)>=.625)
+    transitions = np.r_[False,np.abs(np.diff(tone,axis=0)).max(1)>10]
+    starts = np.flatnonzero(gray & (~np.r_[False,gray[:-1]] | transitions))
+    ends = np.flatnonzero(gray & (~np.r_[gray[1:],False] | np.r_[transitions[1:],False]))+1
+    result = mask.copy()
+    collar = p.dilate(mask,8)
+    cols = slice(x-3,x+w+3)
+    for a,b in zip(starts,ends):
+        if not 4<=b-a<=34 or np.ptp(tone[a:b],axis=0).max()>10:
+            continue
+        # An open gray field or a single gray edge cannot establish a stripe.
+        if not any(agree[i] and tone[i].min()>249 for i in range(max(0,a-6),a)):
+            continue
+        if not any(agree[i] and tone[i].min()>249 for i in range(b,min(h,b+7))):
+            continue
+        end = b
+        # Thin dark rules bordering the stripe need independent support at each row.
+        while end<min(h,b+3) and matches[end].mean()>=.86 and tone[end].max()<tone[b-1].min()-15:
+            end += 1
+        for j in range(a,end):
+            area = (y+j,cols)
+            take = collar[area] & ~protected[area] & (mask[area] | (crop[area].min(1)>240))
+            candidate[area][take] = np.rint(tone[j]).astype(np.uint8)
+            result[area] |= take
+    return result
+
+
 def complete_contacts(ink,own,protected,probability,support,physical,labels,stats):
     """Separate thick native pieces from thin art contacts without following art.
 
@@ -64,6 +103,116 @@ def complete_contacts(ink,own,protected,probability,support,physical,labels,stat
             'parent_weak_probability_pixels':int(weak_counts[parent]),
             'parent_strong_probability_pixels':int(strong_counts[parent]),'added_pixels':int(extra.sum())})
     return support,completed
+
+
+def pale_sign_strokes(crop, own, protected, probability):
+    """Trace a row of pale painted glyphs on a consistently colored surface."""
+    points=cv2.findNonZero(own.astype(np.uint8))
+    if points is None:
+        return
+    _,(w,h),_=cv2.minAreaRect(points)
+    if not 15<=min(w,h)<=95 or max(w,h)<1.75*min(w,h) or max(w,h)>480:
+        return
+    x,y,width,height=cv2.boundingRect(points)
+    if width<1.4*height:
+        return
+    pixels=crop[own]
+    tone=np.median(pixels,axis=0)
+    if not (18<np.ptp(tone)<135 and 60<tone.mean()<190
+            and np.median(np.abs(pixels-tone).max(1))<22):
+        return
+    gray=cv2.cvtColor(crop,cv2.COLOR_RGB2GRAY)
+    cutoff=max(175,np.median(gray[own])+46)
+    bright=(gray>cutoff) & (crop.min(2)>150)
+    _,labels,stats,_=cv2.connectedComponentsWithStats(bright.astype(np.uint8))
+    components=[]
+    for label in np.unique(labels[bright & own]):
+        a,b,cw,ch,area=stats[label]
+        box=np.s_[b:b+ch,a:a+cw]
+        component=labels[box]==label
+        if (area<12 or ch<.25*height or cw>height or ch>height or not own[box][component].all()):
+            continue
+        components.append(label)
+    if not 2<=len(components)<=18:
+        return
+    body=np.isin(labels,components)
+    if (body.sum()<.06*own.sum() or body.sum()>.40*own.sum() or np.count_nonzero(bright & own & ~body)>.12*body.sum()
+            or np.count_nonzero(body & (probability>=77))<12):
+        return
+    # Each letter needs to sit on the same colored material. A white window,
+    # motion stripe or shirt inside the box will border a different surface.
+    for label in components:
+        ring=p.dilate(labels==label,5) & ~p.dilate(body,2)
+        if not ring.any() or (np.abs(crop[ring]-tone).max(1)<40).mean()<.77:
+            return
+    radius=int(np.clip(round(min(w,h)*.06),2,4))
+    mask=p.dilate(body,radius) & ~protected
+    return mask, np.rint(np.median(crop[body],axis=0)).astype(int).tolist()
+
+
+def outlined_interiors(crop, own, protected, probability):
+    """Follow a white glyph interior to its tip where text probability fades."""
+    light = crop.min(2)>180
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(light.astype(np.uint8))
+    dark = crop.max(2)<135
+    result = np.zeros_like(own)
+    for label in np.unique(labels[own & (probability>=77) & light]):
+        if not label:
+            continue
+        x,y,w,h,area = stats[label]
+        if not (65<=area<=9000 and min(w,h)>=5 and max(w,h)<=230):
+            continue
+        pad = 8
+        ys = slice(max(0,y-pad),min(own.shape[0],y+h+pad))
+        xs = slice(max(0,x-pad),min(own.shape[1],x+w+pad))
+        body = labels[ys,xs]==label
+        if not own[ys,xs][body].all() or (probability[ys,xs][body]>=45).mean()<.70:
+            continue
+        ring = cv2.dilate(body.astype(np.uint8),np.ones((5,5),np.uint8)).astype(bool) & ~body
+        if not ring.any() or dark[ys,xs][ring].mean()<.85:
+            continue
+        width = cv2.distanceTransform(body.astype(np.uint8),cv2.DIST_L2,5)[body]
+        radius = int(np.clip(np.ceil(np.percentile(width,90)),2,7))
+        rim = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(2*radius+1,2*radius+1))
+        result[ys,xs] |= cv2.dilate(body.astype(np.uint8),rim).astype(bool)
+    return result & ~protected
+
+
+def hollow_effect_masks(crop, own, protected, probability):
+    """Measure each outlined stroke's dark rim without collecting touching illustration lines."""
+    light = crop.min(2) > 170
+    dark = crop.max(2) < 135
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(light.astype(np.uint8))
+    result = np.zeros_like(own)
+    widths = []
+    for i in np.unique(labels[own & (probability >= 77)]):
+        x,y,w,h,area = stats[i]
+        if not i or not (40 < area < 15000 and 4 < min(w,h) and max(w,h) < 250):
+            continue
+        region = np.s_[max(0,y-12):y+h+12,max(0,x-12):x+w+12]
+        body = labels[region] == i
+        if own[region][body].mean() < .78 or (probability[region][body] >= 77).mean() < .60:
+            continue
+        distance = cv2.distanceTransform(np.uint8(~body), cv2.DIST_L2, 5)
+        ring = (distance > 0) & (distance <= 2)
+        if not ring.any() or dark[region][ring].mean() < .75:
+            continue
+        # Most of the next ring becomes page color just outside the outline.
+        for radius in range(2,11):
+            ring = (distance >= radius) & (distance < radius+1)
+            if ring.any() and dark[region][ring].mean() < .5:
+                result[region] |= distance <= radius+1
+                widths.append(radius)
+                break
+    seeds = own & (probability >= 150) & ~protected
+    if len(widths) >= 3 and seeds.any() and result[seeds].mean() >= .57:
+        # The white outer border is part of outlined manga type. Leaving it
+        # as known model context produces pale letter-shaped gaps. Preserve
+        # original dark illustration strokes inside this additional collar.
+        radius = int(np.median(widths))
+        inference = p.dilate(result,radius)
+        commit = (result | (inference & (crop.min(2)>238))) & ~protected
+        return commit,inference
 
 
 def derive(crop,own,protected,probability):
@@ -166,12 +315,14 @@ def derive(crop,own,protected,probability):
     return support,evidence
 
 
-def painted_stroke_fill(crop, mask, obstacle, *, slanted=False):
+def painted_stroke_fill(crop, mask, obstacle, *, slanted=False, pale_ink=False, measured_outline=False):
     """Reconstruct thin lettering on softly varying paint from nearby paper colors."""
-    if max(mask.shape) > 512 or mask.sum() < 32:
+    height,width = mask.shape
+    strip = width >= 4*height and width <= 2048 and mask.size <= 512*512
+    if (max(mask.shape) > 512 and not strip) or mask.sum() < 32:
         return None
     radius = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)[mask].max()
-    if radius > 12:
+    if radius > (24 if strip or measured_outline else 12):
         return None
     ring = p.dilate(mask, 8) & ~mask & ~obstacle
     if not ring.any():
@@ -179,7 +330,9 @@ def painted_stroke_fill(crop, mask, obstacle, *, slanted=False):
     samples = crop[ring].astype(np.float32)
     center = np.median(samples, axis=0)
     distance = np.abs(crop.astype(np.float32) - center).max(axis=2)
-    if (center.min() < 115 or np.percentile(np.ptp(samples, axis=1), 50) < 7
+    smooth_strip = (strip or measured_outline) and np.percentile(distance[ring],90) <= 18
+    if (center.min() < (55 if pale_ink else 115) or (radius > 12 and not smooth_strip)
+            or (np.percentile(np.ptp(samples, axis=1), 50) < 7 and not smooth_strip)
             or np.mean(distance[ring] < 45) < (.62 if slanted else .72)):
         return None
     # Exclude outlying ink from neighboring characters even if OCR missed it.
@@ -190,8 +343,52 @@ def painted_stroke_fill(crop, mask, obstacle, *, slanted=False):
         return None
     colors = cv2.GaussianBlur(crop * weights[:,:,None], (0,0), sigma)
     result = crop.copy()
-    result[mask] = np.clip(np.rint(colors[mask] / support[mask,None]), 0, 255).astype(np.uint8)
+    paper = np.clip(np.rint(colors[mask] / support[mask,None]), 0, 255)
+    if smooth_strip:
+        # Broad semantic masks include visible paper between printed strokes.
+        # Preserve its texture wherever the measured local shade still agrees.
+        matching = np.max(np.abs(crop[mask] - paper), axis=1) <= 10
+        paper[matching] = crop[mask][matching]
+    result[mask] = paper.astype(np.uint8)
     return result
+
+
+def painted_keyline_fill(crop, ink, protected):
+    """Continue matching paint bands across a vertical glyph with a white outer rim."""
+    x,y,width,height = cv2.boundingRect(np.uint8(ink))
+    if height < 1.6*width or width>96 or height>512 or ink.sum()<60:
+        return None
+    reach = cv2.dilate(np.uint8(ink), cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7))) != 0
+    reach &= ~protected
+    repair = crop.copy()
+    supported = np.zeros_like(ink)
+    for row in range(max(0,y-3),min(len(ink),y+height+3)):
+        cols = np.flatnonzero(reach[row])
+        for run in np.split(cols,np.flatnonzero(np.diff(cols)>1)+1):
+            if not len(run):
+                continue
+            l,r = run[0]-1,run[-1]+1
+            if l<2 or r+2>=crop.shape[1] or r-l>64 or protected[row,l-2:r+3].any():
+                continue
+            left,right = (np.median(samples,axis=0) for samples in (crop[row,l-2:l+1],crop[row,r:r+3]))
+            if min(left.min(),right.min())<110 or np.abs(left-right).max()>26:
+                continue
+            weight = ((run-l)/(r-l))[:,None]
+            repair[row,run] = np.rint(left*(1-weight)+right*weight)
+            supported[row,run] = True
+    edge = ink & ~p.erode(ink,2) & supported
+    difference = crop.astype(np.int16)-repair
+    bright = edge & (crop.min(2)>215) & (difference.mean(2)>8)
+    if bright.sum()<24 or bright.sum()<.12*edge.sum() or (ink & supported).sum()<.88*ink.sum():
+        return None
+    # Antialiasing along this rim also picks up some of the colored face.
+    # Keep high-contrast lines and untouched source pixels outside the glyph.
+    fringe = reach & ~ink & supported & (difference.min(2)>-32) & (np.abs(difference).max(2)>3)
+    commit = ink | fringe
+    missing = ink & ~supported
+    if missing.any():
+        repair[missing] = cv2.inpaint(crop,np.uint8(reach),3,cv2.INPAINT_NS)[missing]
+    return commit, repair
 
 
 def inference_context(commit,probability):
@@ -206,3 +403,26 @@ def inference_context(commit,probability):
     inference=commit | p.dilate(probability>=32,4)
     return inference,{'policy':CONTEXT_POLICY,'inference_only_pixels':int((inference&~commit).sum()),
         'commit_support_expanded':False,'source_removal_verified':False}
+
+
+def adjoining_solid_ink(crop, own, support, probability):
+    """Protect the low-confidence edge of a solid illustration beside open dialogue."""
+    if support.sum()<1500 or not own.any() or (crop.min(2)[own]>240).mean()<.55:
+        return None
+    gray = crop.max(2)
+    dark = gray<125
+    if (dark & ~own).sum()<400:
+        return None
+    distance = cv2.distanceTransform(dark.astype(np.uint8),cv2.DIST_L2,5)
+    _, components = cv2.connectedComponents(np.uint8(distance>3.5))
+    outside = ~cv2.dilate(own.astype(np.uint8),np.ones((9,9),np.uint8)).astype(bool)
+    seeds = np.unique(components[outside & (distance>6)])
+    seeds = seeds[seeds!=0]
+    if not len(seeds):
+        return None
+    # Disconnected dark glyphs and thin text that touches the hair at a tip
+    # cannot propagate this seed. Keep the source mask where the model is confident.
+    near = cv2.dilate(np.uint8(np.isin(components,seeds)),cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(11,11)))!=0
+    guard = near & support & (gray<245) & (probability<105)
+    if guard.sum()>=40 and probability[guard].mean()<55:
+        return guard

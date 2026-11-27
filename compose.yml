@@ -19,6 +19,7 @@ services:
       XDG_CACHE_HOME: /state/cache
       TMPDIR: /state/tmp
       TRALENS_STATE_ROOT: /state
+      TRALENS_REGISTRATION: ${TRALENS_REGISTRATION:-open}
       TRALENS_ORIGIN: ${TRALENS_ORIGIN:-}
       TRALENS_PORT: ${TRALENS_PORT:-7871}
       TRALENS_FRONTIER_PROVIDER: ${TRALENS_FRONTIER_PROVIDER:-chatgpt}
@@ -34,13 +35,13 @@ services:
       - --output-root
       - /library
       - --model-root
-      - /models
+      - "${TRALENS_OCR_ROOT:-/opt/tralens/ocr}"
       - --fonts
       - "${TRALENS_FONTS:-/app/fonts.json}"
       - --endpoint
-      - "${TRALENS_OLLAMA:-http://127.0.0.1:11434}"
+      - "${TRALENS_OLLAMA:-http://127.0.0.1:${TRALENS_OLLAMA_PORT:-11434}}"
       - --model
-      - "${TRALENS_MODEL:-translategemma:4b}"
+      - "${TRALENS_MODEL:-translategemma:12b}"
       - --profile
       - "${TRALENS_MODEL_PROFILE:-translategemma}"
     healthcheck:
@@ -57,9 +58,30 @@ services:
   setup:
     <<: *tralens
     profiles: [setup]
-    environment:
-      HF_HOME: /models/.cache
-      HF_HUB_DISABLE_TELEMETRY: "1"
+    network_mode: none
     volumes:
       - ${TRALENS_MODELS:-./tralens-data/models}:/models
-    entrypoint: ["/bin/sh", "/app/deploy/download-models.sh"]
+    entrypoint: ["cp", "-R", "/opt/tralens/ocr/.", "/models/"]
+
+  ollama:
+    profiles: [ollama]
+    image: docker.io/ollama/ollama:0.40.18@sha256:1cabd20e1762a7a8444bf4a7110b346d923cd77ab6c97c984434140638c913ec
+    platform: linux/amd64
+    user: "${TRALENS_UID:-1000}:${TRALENS_GID:-1000}"
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      HOME: /data
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_NO_CLOUD: "1"
+    ports:
+      - "127.0.0.1:${TRALENS_OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ${TRALENS_OLLAMA_DATA:-./tralens-data/ollama}:/data
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 4s
+      start_period: 10s
+      retries: 3

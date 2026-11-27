@@ -86,6 +86,24 @@ class FontFaces(unittest.TestCase):
         for text in ('Missing 字','Bad\tcontrol','Bad\u202etext'):
             with self.assertRaises(ValueError):faces.resolve({'binding':{'text':text}})
 
+    def test_handwritten_columns_require_independent_tilts(self):
+        def column(x, lean):
+            return {'polygon': [[x, 0], [x+20, 0], [x+20+lean, 80], [x+lean, 80]]}
+        self.assertTrue(f.handwritten_columns([column(80, 9), column(30, -2)]))
+        self.assertFalse(f.handwritten_columns([column(80, 9), column(30, 9)]))
+        self.assertFalse(f.handwritten_columns([column(80, 0), column(30, 1)]))
+
+    def test_source_role_respects_whole_target_coverage_and_cache(self):
+        primary = self.manifest['fonts'][0]
+        for role, weight in [('handwriting', 'regular'), ('shout', 'bold')]:
+            self.manifest['fonts'].append(dict(primary, id=role, role=role, weight=weight))
+        faces = f.ApprovedFaces(self.manifest, 'latin')
+        for role, text, expected in [(None, 'Hey', 'latin'), ('handwriting', 'Hey', 'handwriting'),
+                                     ('shout', 'Hey', 'shout'), ('handwriting', 'Heyこ', 'cjk')]:
+            row = {'binding': {'text': text}, 'lettering_role': role}
+            faces.resolve(row)
+            self.assertEqual(row['font_selection']['selected_id'], expected)
+
     def test_fallback_is_explicit_and_checks_license_and_font_bytes(self):
         self.manifest['fallbacks']={}
         with self.assertRaisesRegex(ValueError,'glyph coverage'):
@@ -95,18 +113,21 @@ class FontFaces(unittest.TestCase):
         self.manifest['fallbacks']={'latin':['cjk']};self.manifest['fonts'][1]['sha256']='0'*64
         with self.assertRaises(ValueError):f.ApprovedFaces(self.manifest,'latin')
 
-    def test_removal_and_placement_use_same_fallback_and_missing_glyph_keeps_cleanup(self):
+    def test_removal_and_placement_use_same_fallback_and_missing_glyph_keeps_source(self):
         from .test_removal_first import RemovalFirst
         fixture=RemovalFirst();fixture.setUp()
         faces=f.ApprovedFaces(self.manifest,'latin')
-        for target,status in [('Try aこPー.','automatic_composed'),('Missing 字','source_removed')]:
+        for target,status in [('Try aこPー.','automatic_composed'),('Missing 字','skipped')]:
             fixture.rows[0]['binding']['text']=target;mask=np.zeros((300,420),bool)
             rows,clean,text,composite,erase,layout,_,summary=replacement.finish(fixture.image,fixture.raw,
                 fixture.rows,fixture.image.copy(),Image.new('RGBA',fixture.image.size),mask,mask,
                 *faces.primary,fixture.style,font_resolver=faces.resolve)
             self.assertEqual(rows[0]['status'],status)
-            self.assertEqual(summary['removed'],1)
-            self.assertTrue((np.asarray(clean)[90:180,198:206]==255).all())
+            self.assertEqual(summary['removed'],int(status=='automatic_composed'))
+            if status=='skipped':
+                self.assertTrue(np.array_equal(clean,fixture.image))
+            else:
+                self.assertTrue((np.asarray(clean)[90:180,198:206]==255).all())
             self.assertTrue(np.array_equal(np.asarray(clean)[~erase],np.asarray(fixture.image)[~erase]))
             if status=='automatic_composed':
                 self.assertEqual(rows[0]['font_selection']['selected_id'],'cjk')

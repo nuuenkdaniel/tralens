@@ -94,6 +94,17 @@ class AutomaticMaskTests(unittest.TestCase):
         with self.assertRaises(AutomaticSkip):
             derive_plan(image, detections, ['left'])
 
+    def test_cropped_fractional_polygons_match_full_page_overlap_counts(self):
+        from tralens.rendering.automatic import OriginalComponents
+        image = Image.new('RGB',(47,53),'white')
+        points = [[[3.1,15.4],[22.9,3.5],[36.6,17.7],[20.25,25.3]],
+                  [[18.7,8.5],[47,18.9],[44.8,53],[10.7,25]]]
+        detections = [dict(source_id=i,polygon=p) for i,p in enumerate(points)]
+        context = OriginalComponents(image)
+        expected = sum(np.array(n.polygon_mask(p,image.size,evidence=True),dtype=bool).astype(np.uint16) for p in points)
+        context.bind_geometry(detections)
+        np.testing.assert_array_equal(context.source_counts,expected)
+
     def test_source_side_budget_is_checked_before_component_allocation(self):
         from tralens.rendering.automatic import OriginalComponents
         source = Image.new('RGB', (4097, 4), 'white')

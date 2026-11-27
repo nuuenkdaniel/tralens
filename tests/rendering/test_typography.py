@@ -17,6 +17,19 @@ from . import test_natural as fixtures
 
 
 class TypographyTests(unittest.TestCase):
+    def test_balloon_interior_box_ignores_connected_gutter_and_avoids_art(self):
+        paper = np.zeros((100,140),bool)
+        paper[30:80,20:115] = True
+        paper[4:40,92:95] = True
+        paper[30:39,20:34] = False
+        box = t.interior_box(paper)
+        left,top,right,bottom = box.getbbox()
+        self.assertTrue((np.asarray(box,dtype=bool)<=paper).all())
+        self.assertGreater(right-left,65)
+        self.assertGreater(bottom-top,31)
+        self.assertGreaterEqual(top,30)
+
+
     def setUp(self):
         self.data = synthetic_font()
         self.coverage = n.font_coverage(self.data)
@@ -27,12 +40,44 @@ class TypographyTests(unittest.TestCase):
             Image.new('L', (180, 160), 255) if mask is None else mask,
             self.style if style is None else style)
 
+    def test_rotated_sound_can_share_empty_tile_corners_without_overlapping_ink(self):
+        from tralens.rendering.outlined_sound_cleanup import source_centered_lettering
+        blocked = np.zeros((130,180),bool)
+        frame = (30,24,148,104)
+        args = ('Clap',self.data,self.coverage,frame)
+        style = {**self.style,'rotation':20,'outline':2,'fill':[255]*3,'outline_fill':[0]*3}
+        first,xy,proof = source_centered_lettering(*args,blocked,style)
+        alpha = np.asarray(first.getchannel('A'))!=0
+        x,y=xy
+        blocked[y,x]=True
+        second,new_xy,_ = source_centered_lettering(*args,blocked,style)
+        self.assertEqual(xy,new_xy)
+        self.assertEqual(first.tobytes(),second.tobytes())
+        self.assertEqual(proof['original_text'],'Clap')
+        blocked[y:y+first.height,x:x+first.width] |= alpha
+        self.assertIsNone(source_centered_lettering(*args,blocked,style))
+
+    def test_stutter_prefix_stays_with_its_word_and_ordinary_compounds_can_break(self):
+        self.assertEqual(n.break_positions('N-no.'),[0,5])
+        self.assertNotIn(3,n.break_positions("Th-that's new."))
+        self.assertIn(6,n.break_positions('paper-thin'))
+        _,meta,_ = self.layout('W-well, yeah.',Image.new('L',(100,130),255))
+        self.assertNotIn('W-\n',meta['draw_text'])
+
     def test_thought_keeps_three_beats_and_exact_characters(self):
         source = 'Oh! Too late. They know...'
         _, proof, _ = self.layout(source,Image.new('L',(320,140),255),{**self.style,'preset':'thought'})
         self.assertEqual(proof['draw_text'],'Oh! \nToo late. \nThey know...')
         self.assertEqual(proof['draw_text'].replace('\n',''),source)
         self.assertGreaterEqual(proof['size'],20)
+
+    def test_compact_hyphenated_name_prefers_an_intact_readable_line(self):
+        text = 'Nina-san'
+        _,meta,_ = self.layout(text,Image.new('L',(115,100),255))
+        self.assertEqual(meta['draw_text'],text)
+        _,narrow,_ = self.layout(text,Image.new('L',(64,100),255))
+        self.assertIn('\n',narrow['draw_text'])
+        self.assertGreaterEqual(narrow['size'],self.style['min_size'])
 
     def test_comfortable_fit_is_inset_and_does_not_always_maximize_font(self):
         mask = Image.new('L', (180, 160), 255)

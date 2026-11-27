@@ -62,3 +62,36 @@ def matches(record):
     full,tail = readings[0],readings[-1]
     return bool(re.fullmatch('[ァ-ヺー]{4,14}',full) and 2<=len(tail)<len(full)
                 and len(set(tail))==1 and full.endswith(tail) and len(set(full))>=2)
+
+
+def pale_effect(image, box, reader):
+    """Check whether a short vertical OCR error is horizontal white kana turned sideways."""
+    from .masked_lines import corrected
+    from .recognition_units import image_fingerprint
+    x,y,r,b=box.bbox
+    w,h=r-x+1,b-y+1
+    if (not 20<=w<=105 or not 1.65*w<h<=290 or not re.fullmatch(r'[一-鿿a-zA-Z0-9]{1,4}[!！?？]',box.text)):
+        return None
+    bounds=(max(0,x-8),max(0,y-8),min(image.width,r+9),min(image.height,b+9))
+    native=image.crop(bounds)
+    pixels=np.asarray(native)
+    own=np.zeros(pixels.shape[:2],np.uint8)
+    cv2.fillPoly(own,[np.int32(box.poly-bounds[:2])],1)
+    if np.mean(np.ptp(pixels[own!=0],axis=1)>24)<.25:
+        return None
+    mask=(own!=0) & (pixels.min(2)>=205)
+    if not .05<mask.sum()/own.sum()<.55:
+        return None
+    binary=Image.fromarray(np.uint8(~mask)*255).convert('RGB')
+    try:
+        first=reader(binary.transpose(Image.Transpose.ROTATE_270))
+        if (not isinstance(first,str) or not re.fullmatch(r'[ァ-ヺー]{2,8}[ッン][!！?？]?',first)
+                or reader(native.transpose(Image.Transpose.ROTATE_270))!=first
+                or reader(binary.rotate(-84,expand=True,fillcolor='white'))!=first):
+            return None
+    except (ValueError, RuntimeError, OSError):
+        return None
+    member=corrected(box.box_id,box.confidence,box.poly,first,box.text,box,masked=True)
+    member.ocr_metadata['painted_effect']={'reading':first,'bounds':list(bounds),'source_digest':image_fingerprint(native),
+                                          'reads':[first]*3,'white_sideways':True}
+    return member

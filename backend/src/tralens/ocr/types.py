@@ -1,5 +1,6 @@
 import copy
 import math
+import re
 import unicodedata
 from dataclasses import dataclass
 from enum import Enum
@@ -42,6 +43,55 @@ class OCRReviewPolicy:
 def normalize_ocr_text(text):
     # Keep punctuation, ASCII and digits: all can be meaningful manga text.
     return "".join(unicodedata.normalize("NFKC", text).split())
+
+
+def is_printed_punctuation(text):
+    return bool(re.fullmatch(r'[\s.…。!?！？・↑↓←→、♡♥☆★]+', text.strip()))
+
+
+def is_printed_number(text):
+    return bool(re.fullmatch(r'[0-9]+(?:[.,][0-9]+)*[%％]?',unicodedata.normalize('NFKC',text.strip())))
+
+
+def menu_shortcuts(source):
+    return re.findall(r'[一-鿿ぁ-ヺー]{1,10}[（(]([A-Z])[)）]',source)
+
+
+def printed_latin_lines(source, lines):
+    """Independent high-confidence Latin words may be stacked or split by a border."""
+    letters = [c for c in source if c.isalpha()]
+    if not lines or len(letters)<2 or any('LATIN' not in unicodedata.name(c,'') for c in letters):
+        return False
+    multiple = (re.fullmatch(r"[A-Za-z]{2,}(?: [A-Za-z]{2,})+",source) or
+                len(lines)>=2 and all(re.fullmatch(r'[A-Za-z]{2,}',line.get('text','')) for line in lines))
+    floor = .90 if multiple else .97
+    return all(line.get('confidence',0)>=floor and line.get('status')=='accepted' for line in lines)
+
+
+def is_printed_literal(text):
+    """A standalone web address or shell example should retain its printed glyphs."""
+    text = text.strip()
+    if re.fullmatch(r'https?://[^\s<>]+|\$\s*[A-Za-z][\x20-\x7e]*', text):
+        return True
+    if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.() -]{1,85}\.(?:pdf|epub|cbz|zip|png|jpe?g|webp|gif|svg|exe|dll|txt|odt|docx?|ods|xlsx?|pptx?|tar|gz)',text,re.I):
+        return True
+    # A substitution pattern is executable text even when its search term
+    # is Japanese. It can be clipped halfway through a bracket expression.
+    return bool(re.fullmatch(r"""['"]?s/[^/\s]+(?:/[^/\s]*/[gim0-9]*['"]?|\[[^\s]*)""",text))
+
+
+def is_credit_list(text):
+    """Repeated, delimited Latin names on patron lists and publication credits."""
+    if re.search(r'[ぁ-ヺ]', text):
+        return False
+    entries = [name.strip() for name in re.split(r'\s+[|*]\s+|\s*[•·★☆✦◆]\s*', text)]
+    if len(entries) < 3 or (len(entries) == 3 and not re.search(r'[•★☆✦◆]', text)):
+        return False
+    latin_names = sum(bool(re.fullmatch(r"[^\W\d_][\w .’'&-]{0,55}", name))
+                      and any('LATIN' in unicodedata.name(c, '') for c in name)
+                      for name in entries)
+    han_names = sum(bool(re.fullmatch(r'[一-鿿]{1,5}(?: *& *[一-鿿]{1,5})?', name)) for name in entries)
+    return latin_names >= 2 and latin_names + han_names >= .75 * len(entries)
 
 
 class Text_Box:

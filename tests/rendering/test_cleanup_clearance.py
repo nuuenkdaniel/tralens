@@ -64,9 +64,12 @@ class CleanupClearance(unittest.TestCase):
         rows=self.check_cleanup(self.run_pass('recovery'))
         self.assertEqual(rows[0]['status'],'automatic_composed')
 
-    def test_final_removal_erases_clearance_ink_even_without_placement(self):
-        rows=self.check_cleanup(self.run_pass('final',placement=False))
-        self.assertEqual(rows[0]['status'],'source_removed')
+    def test_failed_placement_keeps_source_and_prior_edits(self):
+        rows,clean,text,_,erase,_,_,_=self.run_pass('final',placement=False)
+        self.assertEqual(rows[0]['status'],'skipped')
+        self.assertTrue(np.array_equal(clean,self.before))
+        self.assertTrue(np.array_equal(text,self.text))
+        self.assertTrue(np.array_equal(erase,self.old))
 
     def test_final_tile_stays_outside_prior_layout_clearance(self):
         result=self.run_pass('final');rows=self.check_cleanup(result)
