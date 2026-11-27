@@ -2,7 +2,7 @@
 
 Tralens is software you run on a server you control. Your library, original uploads, translated pages, transcripts, reading positions, and job diagnostics are stored on that server. Reader preferences and the selected translator are stored in your browser. The Tralens project does not receive this information from your instance.
 
-When you select Local, translation requests go to the Ollama endpoint configured by the operator. Review that service's configuration, including cloud settings. The setup service contacts Hugging Face to download the selected OCR exports. OCR itself runs on your server.
+When you select Local, translation requests go to the Ollama endpoint configured by the operator. Review that service's configuration, including cloud settings. OCR runs on your server using models included in the Docker image. Building the image from source downloads the pinned exports from Hugging Face. Reader usernames and salted password verifiers are stored in the server’s library database. Only the owner can connect a ChatGPT account.
 
 ## Sign in with ChatGPT
 
