@@ -69,13 +69,22 @@ export class OfflineLibrary {
 }
 
 // A separate dialog keeps offline navigation independent of online jobs, polling and reading position.
-export function downloads(username, {escape, notify, direction, unauthorized}) {
+export function downloads(username, {escape, notify, direction, unauthorized, progressChanged}) {
   const store = new OfflineLibrary(username);
   const dialog = document.createElement("dialog");
   dialog.className = "offline-library";
   dialog.setAttribute("aria-label", "Downloads");
   document.body.append(dialog);
   let controller, saving, active, objectURL, serial = 0, disposed = false, feedback = "";
+  const progress = new Map();
+  function remember(id, saved, total) {
+    if (disposed) return;
+    progress.set(id, {saved, total, running: saving === id});
+    progressChanged(id);
+  }
+  const restored = store.list().then(rows => {
+    for (const row of rows) remember(row.id, row.saved, row.urls.length);
+  }).catch(() => {});
   const button = (action, label) => '<button class="btn" data-local="' + action + '">' + label + '</button>';
   function releaseImage() {
     if (objectURL) URL.revokeObjectURL(objectURL);
@@ -132,15 +141,20 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
     }
   }
   async function save(record) {
-    if (controller) { await list(); return; }
+    await restored;
+    if (disposed) return;
+    const previous = progress.get(record.id);
+    if (controller || (previous && previous.saved === previous.total)) { await list(); return; }
     const abort = new AbortController();
     feedback = "";
     controller = abort;
     saving = record.id;
+    remember(record.id, previous?.saved ?? 0, previous?.total ?? record.urls.length);
     try {
       navigator.storage?.persist?.().catch(() => {});
       const row = await store.begin(record);
-      await list();
+      remember(row.id, row.saved, row.urls.length);
+      if (dialog.open && !active) await list();
       for (let i = row.saved; i < row.urls.length; i++) {
         const response = await fetch(row.urls[i], {signal: abort.signal, redirect: "error"});
         if (response.status === 401) { unauthorized(); return; }
@@ -149,6 +163,7 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
         if (!blob.size) throw Error("Empty page. Resume to try again.");
         abort.signal.throwIfAborted();
         await store.append(row, i, blob);
+        remember(row.id, i + 1, row.urls.length);
         const status = dialog.querySelector('[data-chapter-id="' + row.id + '"] [role=status]');
         if (status) {
           status.textContent = (i+1) + " of " + row.urls.length + " pages saved";
@@ -171,6 +186,8 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
       }
     } finally {
       controller = saving = null;
+      const last = progress.get(record.id);
+      remember(record.id, last.saved, last.total);
       if (!disposed && dialog.open && !active) await list();
     }
   }
@@ -216,11 +233,11 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
       if (cmd === "read") await read(id);
       if (cmd === "prev" || cmd === "next") turn(cmd === "next" ? 1 : -1);
       if (cmd === "pause") controller?.abort();
-      if (cmd === "remove") { await store.remove(id); feedback = ""; await list(); }
+      if (cmd === "remove") { await store.remove(id); progress.delete(id); if (!disposed) progressChanged(id); feedback = ""; await list(); }
       if (cmd === "resume") { const row = (await store.list()).find(r => r.id === id); if (row) await save(row); }
     } catch (err) { notify(errorMessage(err)); }
   };
-  return {list, save, back, isOpen: () => dialog.open,
+  return {list, save, back, progress: id => progress.get(id), isOpen: () => dialog.open,
     hasSaved: async () => (await store.list()).length > 0,
     dispose() { disposed = true; ++serial; controller?.abort(); dialog.remove(); releaseImage(); store.database.then(db => db.close(), () => {}); }};
 }

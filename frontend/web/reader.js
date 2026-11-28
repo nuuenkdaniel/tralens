@@ -431,6 +431,15 @@ function preferences() {
     ' MiB of page images.</p><p class="hint">Reading preferences are saved on this device.</p></section></main>'
   );
 }
+function offlineButtonContent(id) {
+  const state = offline.progress(id);
+  if (!state) return icon("download") + "Save offline";
+  const {running, saved, total} = state;
+  if (saved === total) return icon("check") + "Saved offline";
+  if (!running) return icon("download") + "Resume · " + saved + "/" + total;
+  return '<span class="chapter-download">Downloading · ' + saved + '/' + total +
+    '<progress aria-label="Pages saved" value="' + saved + '" max="' + total + '"></progress></span>';
+}
 function detail(b) {
   const pages = pagesOf(b);
   return (
@@ -484,7 +493,7 @@ function detail(b) {
           '" title="Change chapter language">' + icon("lang") + sourceLanguages[c.source_language || "ja"] +
           (c.source_language === "auto" && c.detected_language ? " (" + sourceLanguages[c.detected_language] + (c.language_uncertain ? ", uncertain" : "") + ")" : "") +
           '</button>' + (offline ? '<button data-action="save-offline" data-id="' + c.id +
-            '">' + icon("download") + 'Save offline</button>' : "") +
+            '">' + offlineButtonContent(c.id) + '</button>' : "") +
           '</div><details class="chapter-pages"><summary aria-label="Browse pages in ' + esc(c.title) + '">' +
           icon("page") + "Browse pages" + icon("chev-d") +
           '</summary><div class="pages" data-chapter="' + c.id + '"></div></details></article>';
@@ -1747,6 +1756,10 @@ function bindDownloads(user) {
   offlineUser = user;
   offline = user ? offlineModule.downloads(user, {
     escape: esc, notify: toast, direction: () => prefs.direction,
+    progressChanged(id) {
+      const button = root.querySelector('[data-action="save-offline"][data-id="' + CSS.escape(id) + '"]');
+      if (button && offline) button.innerHTML = offlineButtonContent(id);
+    },
     unauthorized: () => { config = null; bindDownloads(null); showAccountForm(); }
   }) : null;
 }

@@ -343,6 +343,8 @@ small,
   color: var(--accent);
   font-size: .9rem;
 }
+.chapter-download { display: grid; gap: 3px; text-align: start; }
+.chapter-download progress { width: 100%; height: 5px; accent-color: var(--accent); }
 .chapter-pages { border-top: 1px solid var(--line); }
 .chapter-pages > summary {
   display: flex;
