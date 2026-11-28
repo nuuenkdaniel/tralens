@@ -425,8 +425,11 @@ class PreviewTranslator:
                         printed_latin_lines(source,strict_json(unit.selected.evidence_json))):
                     outcome = UnitOutcome(unit.unit_id, "abstained", "", ("already_latin_lettering",), "unverified", unit.selected_revision)
                     return result("abstained", outcomes=(outcome,), attempts=0)
+                # Short detached effects describe their immediate drawing. Injecting them into
+                # every dialogue prompt on the page can change unrelated names or sentences.
                 nearby = [other.selected.text[:100] for other in self.terminology_units
-                          if other.page_json == unit.page_json and other.unit_id != unit.unit_id and other.selected.text]
+                          if other.page_json == unit.page_json and other.unit_id != unit.unit_id and other.selected.text
+                          and 'detached_kana' not in getattr(other.selected, 'evidence_json', '')]
                 guide = ('Write one concise printable comic line. Preserve the speech act, who does what to whom, '
                          'register, uncertainty and trailing thoughts. A dependent fragment may continue in another balloon. '
                          'For a mimetic word choose one short visual effect, never a definition or list of senses. ')
@@ -511,12 +514,17 @@ class PreviewTranslator:
                                and len({v for v in nearby if re.match(r'\[[A-Za-z]{2}',v)})>=2
                                and len({v for v in nearby if '.' in v and is_printed_literal(v)})>=2)
                 toolbar = bool(self.context_crop and (clipped_tab or disputed_toolbar_label(unit,nearby)))
-                adverb = mimetic_adverb(source) if not cue else ''
+                handwritten = 'corroborated_handwritten_ending' in unit.selected.evidence_json
+                detached = (unit.selected.origin == 'raw_main_reading' and len(source) <= 4
+                            and 'detached_kana' in unit.selected.evidence_json)
+                adverb = mimetic_adverb(source,handwritten=handwritten) if handwritten or not cue else ''
                 topic = preceding_topic(source,unit,self.terminology_units)
                 expressive = positive_reaction(source)
                 connective = detached_connective(source)
-                if self.context_crop and not toolbar and not printed_name and not connective and (topic or cosmetic_practice(source) or impact_sound(source) or adverb or expressive or clipped_effect or len(source.strip()) <= 5 or len(menu_shortcuts(source))>=2 or any(term in source for term in ('帰し','なさそ','悪い人'))):
-                    if topic or cosmetic_practice(source) or impact_sound(source) or adverb or expressive or (cue and re.fullmatch(r'([ぁ-ゖァ-ヺー]{2,4})\1[っッ]?',source)) or (clipped_effect and source.endswith(('ッ','？','?'))):
+                if self.context_crop and not toolbar and not printed_name and not connective and (detached or topic or cosmetic_practice(source) or impact_sound(source) or adverb or expressive or clipped_effect or len(source.strip()) <= 5 or len(menu_shortcuts(source))>=2 or any(term in source for term in ('帰し','なさそ','悪い人'))):
+                    if detached:
+                        png, bounds, punctuation = self.context_crop(unit, adjacent=True)
+                    elif topic or cosmetic_practice(source) or impact_sound(source) or adverb or expressive or (cue and re.fullmatch(r'([ぁ-ゖァ-ヺー]{2,4})\1[っッ]?',source)) or (clipped_effect and source.endswith(('ッ','？','?'))):
                         png, bounds, punctuation = self.context_crop(unit,panel=True)
                     else:
                         png, bounds, punctuation = self.context_crop(unit)
@@ -590,6 +598,10 @@ class PreviewTranslator:
                 if prompt := self_contained_prompt(source,nearby):
                     message['content'] = prompt
                     rendition_evidence['self_contained_prompt'] = True
+                if handwritten and adverb and message.get('images'):
+                    message['content'] = (f'The handwritten Japanese adverb {source} labels a movement. Look at the '
+                        'nearby person or object. Give the short action effect an English comic would print. '
+                        'Use the base form for a verb. Output only the lettering.')
                 if unit.selected.origin=='raw_main_reading' and 'printed_annotation' in unit.selected.evidence_json:
                     from .rendition import annotation_guide
                     native=strict_json(unit.selected.evidence_json)
@@ -753,6 +765,17 @@ class PreviewTranslator:
                             +f' The lettering reads {unit.selected.text}. Output only the English lettering.',
                             'images':[base64.b64encode(png).decode('ascii')]}
                         rendition_evidence['context_crop'] = {'bounds':bounds,'sha256':hashlib.sha256(png).hexdigest()}
+                if detached and payload['messages'][0].get('images') and 'format' not in payload:
+                    payload['messages'][0]['content'] = (
+                        f'Look closely at the drawing around the Japanese lettering {source}. First describe what '
+                        'the person or object next to the lettering is visibly doing. Then translate the lettering '
+                        'in that context as a short idiomatic English comic effect or reaction. Write both fields in English.')
+                    payload['format'] = {'type': 'object', 'properties': {
+                        'action': {'type': 'string', 'maxLength': 180},
+                        'lettering': {'type': 'string', 'minLength': 1, 'maxLength': 32,
+                                      'pattern': "^[A-Za-z0-9 .,!?'’…—–-]+$"}},
+                        'required': ['action', 'lettering'], 'additionalProperties': False}
+                    rendition_evidence['effect_field'] = 'visible_action'
             payload.update(self.generation_options.transport_fields())
             if (self.profile.specialist_template and not self.profile.specialist_chat and isinstance(self.runtime, OllamaRuntime)
                     and self.runtime.specialist_template is None):
@@ -826,7 +849,7 @@ class PreviewTranslator:
             if rendition_evidence.get('effect_field') or rendition_evidence.get('interrupted_word'):
                 try:
                     text=(rendition.interrupted_word(text,unit.selected.text) if rendition_evidence.get('interrupted_word')
-                          else rendition.effect_field(text))
+                          else rendition.effect_field(text, depicted=rendition_evidence.get('effect_field') == 'visible_action'))
                 except ValueError as error:
                     return result("failed",failure="invalid_output",detail=str(error),attempts=attempts,
                                   generation_seconds=time.monotonic()-started)
@@ -880,7 +903,7 @@ class PreviewTranslator:
                     try:
                         punctuation = ''
                         if retry_policy in rendition.VISUAL_POLICIES:
-                            if retry_policy in (rendition.VISUAL_OWNER, rendition.VISUAL_TONE, rendition.VISUAL_REACTION):
+                            if retry_policy in (rendition.VISUAL_OWNER, rendition.VISUAL_TONE, rendition.VISUAL_REACTION, rendition.FACIAL_MOTION):
                                 png, bounds, punctuation = self.context_crop(request.units[0], panel=True)
                             else:
                                 png, bounds, punctuation = self.context_crop(request.units[0])
@@ -896,6 +919,10 @@ class PreviewTranslator:
                         failed=notify({'attempt':attempts,'status':'response','purpose':retry_policy,'response_json':raw})
                         if failed is not None:return failed
                         candidate=candidate.text if isinstance(candidate,Generation) else candidate
+                        if retry_policy == rendition.FACIAL_MOTION:
+                            candidate = rendition.facial_lettering(strict_json(candidate))
+                        if retry_policy == rendition.PRINTED_SPELLING:
+                            candidate = rendition.verified_spelling(unit.selected.text,primary,candidate)
                         if retry_policy == rendition.NOUN_LABEL:
                             label = strict_json(candidate)
                             if not isinstance(label,dict) or not isinstance(label.get('label'),str):

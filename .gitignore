@@ -26,3 +26,6 @@ test.py
 /tralens-data/
 /frontend/demo/
 /tralens-first-beta.bundle
+
+# Local model checkpoints.
+*.pt

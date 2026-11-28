@@ -11,6 +11,10 @@ on:
         description: Main image digest from a successful Reader checks run
         required: true
         type: string
+      android_version_code:
+        description: Android version code, higher than the previous public APK
+        required: true
+        type: string
       approved:
         description: The candidate passed the licensing and live translation checklist
         required: true
@@ -31,10 +35,11 @@ jobs:
     if: github.repository == 'nuuenkdaniel/tralens' && github.ref == 'refs/heads/main' && inputs.approved
     environment: public-beta
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       VERSION: ${{ inputs.version }}
       DIGEST: ${{ inputs.digest }}
+      TRALENS_ANDROID_VERSION_CODE: ${{ inputs.android_version_code }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -64,7 +69,26 @@ jobs:
           export TRALENS_IMAGE="ghcr.io/$GITHUB_REPOSITORY@$DIGEST"
           docker pull --platform linux/amd64 "$TRALENS_IMAGE"
           bash deploy/smoke-compose.sh
-      - name: Stage the verified digest and its Compose bundle
+      - uses: ./.github/actions/provision-android
+      - name: Build the Android release APK
+        run: TRALENS_ANDROID_VERSION_NAME="${VERSION#v}" frontend/android/build-apk --online --release
+      - name: Sign and verify the Android APK
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+        shell: bash
+        run: |
+          : "${ANDROID_RELEASE_KEYSTORE_BASE64:?Configure the release keystore in public-beta}"
+          : "${ANDROID_RELEASE_KEYSTORE_PASSWORD:?Configure the release keystore password in public-beta}"
+          keystore=$(mktemp "$RUNNER_TEMP/tralens-keystore.XXXXXX")
+          trap 'rm -f -- "$keystore"' EXIT
+          printf '%s' "$ANDROID_RELEASE_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          unset ANDROID_RELEASE_KEYSTORE_BASE64
+          apk="tralens-android-$VERSION.apk"
+          bash frontend/android/sign-apk .android-build/outputs/tralens-release-unsigned.apk "$apk" "$keystore"
+          sha256sum "$apk" > "$apk.sha256"
+          sha256sum --check "$apk.sha256"
+      - name: Stage the verified image, Compose bundle, and Android APK
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REGISTRY_AUTH_FILE: ${{ runner.temp }}/registry-auth.json
@@ -79,6 +103,8 @@ jobs:
           image="ghcr.io/$GITHUB_REPOSITORY-release@$DIGEST"
           printf '\nTRALENS_IMAGE=%s\n' "$image" >> "$bundle/.env.example"
           archive="tralens-compose-$VERSION.tar.gz"
+          apk="tralens-android-$VERSION.apk"
+          assets=("$archive" "$archive.sha256" "$apk" "$apk.sha256")
           tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
             -czf "$archive" -C "$bundle" compose.yml .env.example
           sha256sum "$archive" > "$archive.sha256"
@@ -91,18 +117,20 @@ jobs:
 
           notes=$(mktemp)
           {
+            printf 'Install `%s` on Android and connect it to your reader over HTTPS. See [Android setup](%s/%s/tree/%s#android-app).\n\n' \
+              "$apk" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$VERSION"
             printf 'Image for Linux x86-64: `%s`\n\n' "$image"
             printf 'Extract the Compose bundle and follow the [setup guide](%s/%s/tree/%s#start-the-reader).\n\n' \
               "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$VERSION"
-            printf 'Verify a clean anonymous pull before publishing this prerelease. See the [release checklist](%s/%s/blob/%s/docs/releasing.md).\n' \
+            printf 'Verify a clean anonymous pull before publishing this prerelease. See the [release checklist](%s/%s/tree/%s#release-process).\n' \
               "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$VERSION"
           } > "$notes"
           if gh release view "$VERSION" --json isDraft >/dev/null 2>&1; then
             if [[ "$(gh release view "$VERSION" --json isDraft --jq .isDraft)" == true ]]; then
-              gh release upload "$VERSION" "$archive" "$archive.sha256" --clobber
+              gh release upload "$VERSION" "${assets[@]}" --clobber
             fi
           else
-            gh release create "$VERSION" "$archive" "$archive.sha256" --verify-tag \
+            gh release create "$VERSION" "${assets[@]}" --verify-tag \
               --draft --prerelease --title "Tralens $VERSION" --notes-file "$notes"
           fi
           printf '\n- `%s`\n' "$image" >> "$GITHUB_STEP_SUMMARY"

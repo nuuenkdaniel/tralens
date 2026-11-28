@@ -16,6 +16,7 @@ import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowCompat;
+import android.webkit.CookieManager;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebView;
@@ -76,6 +77,13 @@ public class MainActivity extends BridgeActivity {
         // including multipart bodies, to the selected same-origin backend.
         bridge.setWebViewClient(new BridgeWebViewClient(bridge) {
             @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                // Login and logout both reload the reader.
+                CookieManager.getInstance().flush();
+            }
+
+            @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 Uri uri = request.getUrl();
                 if (request.isForMainFrame() && isReaderOrigin(uri) && "/privacy".equals(uri.getPath())) {
@@ -98,6 +106,12 @@ public class MainActivity extends BridgeActivity {
                 return super.shouldInterceptRequest(view, request);
             }
         });
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        CookieManager.getInstance().flush();
     }
 
     void download(String path, String ticket, String name) {

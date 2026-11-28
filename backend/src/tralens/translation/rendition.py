@@ -91,6 +91,7 @@ BIRD_SOUND = re.compile(r'ピ[ーイ]?チク|パ[ーア]?チク|ポッポ')
 VISUAL_ACTOR = 'unstated_actor_in_question'
 VISUAL_OWNER = 'unmarked_part_owner'
 VISUAL_TONE = 'sound_source_mismatch'
+FACIAL_MOTION = 'ambiguous_facial_motion'
 VISUAL_REACTION = 'spoken_reaction_mismatch'
 UNMARKED_PART = re.compile(r'(?<![一-鿿の])(?:目|眼|耳|口|手|足|腕|顔|首|頭|背中|羽|尾|翼)を')
 URGENT = 'colloquial_urgency'
@@ -122,14 +123,15 @@ def quoted_response_body(source, english):
     return english
 
 
-def effect_field(response):
+def effect_field(response, *, depicted=False):
     """Only the printable effect from a structured visual answer enters the page."""
     from .contracts import strict_json
     if not isinstance(response,str):
         raise ValueError('invalid comic effect response')
     data=strict_json(response)
-    word=data.get('effect') if isinstance(data,dict) and set(data)=={'effect'} else None
-    if not isinstance(word,str) or not word.strip() or not word.isprintable() or len(word)>32 or len(word.split())>4:
+    fields = {'action', 'lettering'} if depicted else {'effect'}
+    word = data.get('lettering' if depicted else 'effect') if isinstance(data, dict) and set(data) == fields else None
+    if not isinstance(word,str) or not word.strip() or not word.isprintable() or len(word)>32 or (not depicted and len(word.split())>4):
         raise ValueError('invalid short comic effect')
     return word.strip()
 
@@ -176,7 +178,12 @@ def short_reading(unit):
     return ''.join(parts)
 
 
-VISUAL_POLICIES = (VISUAL_PERMISSION, VISUAL_SOUND, VISUAL_ACTOR, VISUAL_OWNER, VISUAL_TONE, VISUAL_REACTION, CLICK)
+PRINTED_SPELLING = "printed_latin_spelling"
+# A cross inside or directly after a Latin name can be an OCR substitution.
+# Exclude numeric dimensions and product names on either side of a crossover.
+SPELLING_TOKEN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]{3,}×[a-z]*(?![A-Za-z0-9×])")
+
+VISUAL_POLICIES = (FACIAL_MOTION, PRINTED_SPELLING, VISUAL_PERMISSION, VISUAL_SOUND, VISUAL_ACTOR, VISUAL_OWNER, VISUAL_TONE, VISUAL_REACTION, CLICK)
 
 
 def visual_guide(policy, source, punctuation):
@@ -212,6 +219,12 @@ def visual_guide(policy, source, punctuation):
 
 
 def visual_retry(source, primary):
+    token = SPELLING_TOKEN.search(source)
+    if token and token[0] in primary and len(SPELLING_TOKEN.findall(source))==1:
+        return PRINTED_SPELLING
+    if (re.fullmatch(r'(?:く[わゎ]|ク[ワヮ])[っッ][!！…]*',source.strip())
+            and re.fullmatch(r'(?:chomp|crunch|bite|munch)[.!…]*',primary.strip().strip('*_'),re.I)):
+        return FACIAL_MOTION
     if positive_reaction(source) and re.match(r'^\W*(?:ugh|yuck|eww?)\b',primary,re.I):
         return VISUAL_REACTION
     if UNMARKED_PART.search(source) and re.search(r'\b(?:my|your|his|her|our|their)\s+(?:eyes?|ears?|mouth|hands?|feet|foot|arms?|face|neck|head|back|wings?|tail)\b',primary,re.I):
@@ -440,9 +453,32 @@ def retry_policy(source, target, style):
     return None
 
 
+def verified_spelling(source, primary, response):
+    """A visual reread may change only the ambiguous character in the copied word."""
+    token = SPELLING_TOKEN.search(source)
+    if token and isinstance(response,str):
+        word = token[0]
+        if response.strip() in (word.replace('×','x'),word.replace('×','X')):
+            pattern = r'(?<![A-Za-z0-9])'+re.escape(word)+r'(?![A-Za-z0-9])'
+            return re.sub(pattern,response.strip(),primary)
+    return primary
+
+
+def facial_lettering(review):
+    # An actual bite or an ambiguous image keeps its original translation.
+    if (str(review.get('object_between_teeth','')).strip(' .').lower() in ('none','nothing','empty','no object')
+            and isinstance(review.get('visible_motion'),str) and review['visible_motion'].strip()):
+        return review.get('lettering')
+    return None
+
+
 def candidate_matches(policy, primary, candidate, source='', *, term=None):
     if ' / ' in candidate:
         return False
+    if policy == PRINTED_SPELLING:
+        token = SPELLING_TOKEN.search(source)
+        return bool(token and candidate!=primary and
+            any(verified_spelling(source,primary,token[0].replace('×',x))==candidate for x in ('x','X')))
     if policy == SOUND_LETTERING:
         return bool(re.fullmatch(r"[A-Za-z][A-Za-z'-]*(?: [A-Za-z'-]+)?[!….]*", printed_cadence(source, candidate)))
     if policy == NOUN_LABEL:
@@ -467,7 +503,9 @@ def candidate_matches(policy, primary, candidate, source='', *, term=None):
             return 0 < len(candidate.split()) <= 2*len(primary.split())+4 and '\n' not in candidate
         if policy == VISUAL_REACTION:
             return '\n' not in candidate and 2<=len(candidate.split())<=2*len(primary.split())+4
-        if policy == VISUAL_TONE:
+        if policy == FACIAL_MOTION and re.match(r'k(?:u?w|v)a',candidate,re.I):
+            return False
+        if policy in (VISUAL_TONE, FACIAL_MOTION):
             return bool(re.fullmatch(r"[A-Za-z][A-Za-z'-]*(?: [A-Za-z'-]+)?[!….]*", printed_cadence(source,candidate)))
         if policy == VISUAL_PERMISSION:
             verb = PERMISSION_COMMAND.match(re.sub(r"^did you\s+", "", primary.strip(), flags=re.I))
@@ -529,7 +567,21 @@ def payload(original, policy=POLICY, source='', *, term=None, punctuation='', sc
         raise ValueError('single-rendition retry requires one native specialist user message')
     text=messages[0]['content']
     marker='Please translate the following '
+    if policy == FACIAL_MOTION:
+        messages[0]['content'] = ('Identify what, if anything, is between the teeth. If the mouth is empty, '
+            'render the sudden facial reaction rather than chewing. The Japanese effect '+source+
+            ' marks a sudden widening of eyes or mouth. For lettering, use one idiomatic English comic effect. '
+            'Do not transliterate the kana.')
+        fields = ('object_between_teeth','visible_motion','lettering')
+        result['format']={'type':'object','properties':{f:{'type':'string'} for f in fields},'required':list(fields)}
+        return result
     if marker not in text:raise ValueError('unknown specialist prompt structure')
+    if policy == PRINTED_SPELLING:
+        word = SPELLING_TOKEN.search(source)[0]
+        messages[0]['content'] = (f'Read the spelling of the Latin word corresponding to OCR “{word}” in the '
+            'attached lettering. The text may run vertically. Distinguish a letter from a printed symbol. '
+            'Return only the word as printed, keeping its case. Japanese context: '+source)
+        return result
     if policy == VISUAL_REACTION:
         messages[0]['content'] = ('Render the line in two parts. For the sound, write a pleased English hum or a '
             'touched sigh, and for the speech write only the words following that sound. Preserve repetition. Japanese: '+source)
@@ -790,12 +842,15 @@ def positive_reaction(source):
 
 
 @lru_cache(maxsize=256)
-def mimetic_adverb(source):
+def mimetic_adverb(source, *, handwritten=False):
     """Look up a standalone emphatic kana reading before treating it as speech."""
     word = source.strip(' ！!？?…。')
-    if not re.fullmatch(r'[ぁ-ゖァ-ヺー]{1,6}[りリ][っッ]',word):
+    if re.fullmatch(r'[ぁ-ゖァ-ヺー]{1,6}[りリ][っッ]',word):
+        stem = word[:-1]
+    elif handwritten and re.fullmatch(r'[ぁ-ゖァ-ヺー]{2,6}',word):
+        stem = word
+    else:
         return ''
-    stem = word[:-1]
     try:
         from fugashi import Tagger
         import unidic_lite
@@ -1022,7 +1077,37 @@ def announced_item_effect(source, nearby):
     return ''
 
 
+def affectionate_name(source):
+    """Separate a diminutive suffix from a dictionary-confirmed personal name."""
+    if 'たん' not in source:
+        return None
+    try:
+        from fugashi import Tagger
+        import unidic_lite
+        import jaconv
+        words = list(Tagger(f'-d "{unidic_lite.DICDIR}"')(source))
+    except (ImportError, RuntimeError):
+        return None
+    for name, suffix in zip(words, words[1:]):
+        if (suffix.surface == 'たん' and suffix.feature.pos1 == '接尾辞' and
+                name.feature.pos3 == '人名' and name.feature.kana):
+            return name.surface, jaconv.kata2alphabet(name.feature.kana).capitalize()
+    return None
+
+
 def self_contained_prompt(source, nearby=()):
+    if named := affectionate_name(source):
+        name, reading = named
+        return (f'Translate this manga dialogue. The personal name {name} and affectionate suffix たん '
+                f'are two parts. Write the form of address as {reading}-tan. Translate the rest naturally. '
+                'Output only the English line. '+source)
+    if (re.search(r'[てで]おいて(?:ね|よ)?[。！!]*$',source)
+            and not re.search(r'勝手に|無断で|くせに|[私僕俺]が|わたしが',source)):
+        return ('Translate the standalone Japanese line into natural dialogue. The final te-oite form asks '
+                'the listener to do something in preparation. Keep the addressee as the person doing the '
+                'work. Preserve any named group or institution that identifies the person, including its '
+                'specific field or subject. Use familiar English for technical abbreviations. Make the request '
+                'sound like something a person would actually say. Keep the line concise. Give only the English dialogue. '+source)
     if re.search(r'(?:トイレ|お手洗い|シャワー|浴室|台所|キッチン)(?:を|は)?貸す', source):
         return ('Translate the following Japanese comic lettering. The speaker offers the addressee use of a '
                 'fixed facility. Treat 貸す as granting access. Then render the invitation in natural spoken '

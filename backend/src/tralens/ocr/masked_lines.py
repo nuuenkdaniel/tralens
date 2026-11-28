@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from . import reader_geometry
+from . import detached_kana, reader_geometry
 from .automatic_units import propose_page_from_boxes
 from .crop_readings import views
 from .recognition_units import image_fingerprint
@@ -179,9 +179,7 @@ def discover(engine, image, reader, probability):
     support = cv2.dilate(np.uint8(probability>28),cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(7,7))) != 0
     pixels = np.where(support[:,:,None],np.asarray(image),255).astype(np.uint8)
     result = engine.ocr.predict(pixels.copy())
-    if not result:
-        return
-    output = result[0]
+    output = result[0] if result else {}
     isolated = Image.fromarray(pixels)
     detected = list(boxes)
     by_id = {v.box_id:v for v in boxes}
@@ -194,7 +192,7 @@ def discover(engine, image, reader, probability):
     row_candidates = defaultdict(list)
     next_id = max(by_id,default=-1)+1
     attempts = 0
-    for text,score,points in zip(output['rec_texts'],output['rec_scores'],output['rec_polys']):
+    for text,score,points in zip(output.get('rec_texts', ()), output.get('rec_scores', ()), output.get('rec_polys', ())):
         poly = np.asarray(points,dtype=np.float32)
         if poly.shape!=(4,2) or not np.isfinite(poly).all():
             continue
@@ -283,6 +281,16 @@ def discover(engine, image, reader, probability):
     detected = nearby_repeated_kana(image, probability, detected, reader)
     next_id = max((v.box_id for v in detected), default=-1)+1
     detected.extend(drawn_kana_rows(image, probability, detected, reader, next_id))
+    next_id = max((v.box_id for v in detected), default=-1)+1
+    readings = detached_kana.readings(image, probability, [v.poly for v in detected], reader)
+    for identity, (word, bounds, score, island, dot) in enumerate(readings, next_id):
+        left, top, right, bottom = bounds
+        poly = np.float32([[left, top], [right-1, top], [right-1, bottom-1], [left, bottom-1]])
+        member = corrected(identity, score, poly, word, '', masked=True)
+        member.ocr_metadata['detached_kana'] = {'reading': word, 'source_bounds': list(bounds), 'island': list(island)}
+        if dot:
+            member.ocr_metadata['detached_kana']['terminal_dot'] = list(dot)
+        detected.append(member)
     if detected!=boxes:
         batch = propose_page_from_boxes(detected,engine.image_path,complementary_ownership=True,regroup_companions=True)
         engine.raw_detections,engine.automatic_unit_proposals = [detected],[batch]

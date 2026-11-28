@@ -68,6 +68,8 @@ def options(value, *, render_enabled):
         visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical')
     if value.get('mode',result['mode'])=='render':
         result.update(visibility_policy='always-show',removal_policy='aggressive')
+        if value.get('removal_policy', 'aggressive') == 'aggressive':
+            result['reconstruction_policy'] = 'auto'
     result.update(value)
     if type(result['mode']) is not str or result['mode'] not in ('ocr', 'translate', 'render'):
         raise RequestError('Choose OCR, translation, or rendering.')

@@ -472,18 +472,45 @@ def drawn_kana_outline(crop, bounds, probability, detection, protected):
         return None
     core=np.zeros(crop.shape[:2],bool)
     core[tile]=glyphs
+    return white_letter_rim(crop, core, protected)
+
+
+def detached_letter_outline(crop, bounds, probability, proof, protected):
+    from PIL import Image
+    from ..ocr.detached_kana import ink_views
+
+    if not proof.get('island'):
+        return None
+    x, y, r, b = bounds
+    left, top, right, bottom = proof['island']
+    if not (x <= left < right <= r and y <= top < bottom <= b):
+        return None
+    views = ink_views(Image.fromarray(crop), probability, (left-x, top-y, right-x, bottom-y))
+    if views is None:
+        return None
+    (l, t, end, base), _, _, strokes = views
+    if [l+x, t+y, end+x, base+y] != proof['source_bounds']:
+        return None
+    core = np.zeros(crop.shape[:2], bool)
+    core[t:base, l:end] = strokes
+    if np.median(crop[core]) > 90:
+        return None
+    return white_letter_rim(crop, core, protected)
+
+
+def white_letter_rim(crop, core, protected):
     distance=cv2.distanceTransform(np.uint8(~core),cv2.DIST_L2,5)
     gray=crop.min(2)
     inner=(distance>1)&(distance<=3)
     outer=(distance>=10)&(distance<=14)
-    if np.mean(gray[inner]>=248)<.8 or np.median(gray[outer])>=245:
+    if not inner.any() or not outer.any() or np.mean(gray[inner]>=248)<.8 or np.median(gray[outer])>=245:
         return None
     # Fade-out of the printed white outline determines its width. Cap it
     # before nearby white clothing or a black frame could join the mask.
     radius=3
     for radius in range(3,11):
         ring=(distance>radius)&(distance<=radius+1)
-        if np.mean(gray[ring]>=248)<.45:
+        if not ring.any() or np.mean(gray[ring]>=248)<.45:
             break
     mask=(distance<=1.5)|((distance<=radius+3)&(gray>np.median(gray[outer])+3))
     return None if (core & protected).any() else mask & ~protected

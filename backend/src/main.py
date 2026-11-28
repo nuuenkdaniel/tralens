@@ -393,6 +393,7 @@ def crop_reader_refiner(model_path, *, ink_column_groups=False, ink_boundary_gro
                     corrected = clipped_repetitions(image,corrected,reader)
                     corrected = handwritten_lines.missing_middle_column(image,corrected,reader)
                     corrected = handwritten_lines.small_stacked_labels(image,corrected,reader)
+                    corrected = handwritten_lines.painted_sign_headers(image,corrected,reader)
                     corrected = table_rows.checkbox_headings(image,corrected,reader)
                     corrected = table_rows.split_tab_labels(image,corrected,reader)
                     corrected = split_interjections(image,corrected)

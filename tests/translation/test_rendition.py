@@ -10,6 +10,12 @@ from tralens.translation import rendition
 
 
 class SingleRendition(unittest.TestCase):
+    @unittest.skipUnless(all(importlib.util.find_spec(k) for k in ('fugashi','unidic_lite','jaconv')),'local dictionary unavailable')
+    def test_affectionate_suffix_requires_a_personal_name(self):
+        self.assertEqual(rendition.affectionate_name('お願い、健太たん'),('健太','Kenta'))
+        self.assertIsNone(rendition.affectionate_name('それを見てたんだ'))
+        self.assertIn('Kenta-tan',rendition.self_contained_prompt('お願い、健太たん'))
+
     def test_playful_retraction_needs_the_standalone_interjection_and_neighboring_joke(self):
         self.assertIn('冗談だよ',rendition.playful_retraction('なんちゃって！',['冗談だよ']))
         self.assertFalse(rendition.playful_retraction('なんて素敵だ',['冗談だよ']))
@@ -50,9 +56,22 @@ class SingleRendition(unittest.TestCase):
 
     def test_effect_envelope_keeps_only_single_printable_field(self):
         self.assertEqual(rendition.effect_field('{"effect":"Swish!"}'),'Swish!')
+        self.assertEqual(rendition.effect_field('{"action":"Someone is moving.", "lettering":"Rustle!"}',
+                                               depicted=True), 'Rustle!')
         for bad in ('{"effect":"swish","explanation":"a fan"}','{"effect":"first\\nsecond"}','{}',None):
             with self.assertRaises(ValueError):
                 rendition.effect_field(bad)
+    def test_visual_spelling_reread_can_only_change_the_confirmed_symbol(self):
+        src='Linu×のアップデート'
+        before='Linu× needs an update.'
+        self.assertEqual(rendition.visual_retry(src,before),rendition.PRINTED_SPELLING)
+        self.assertEqual(rendition.verified_spelling(src,before,'Linux'),'Linux needs an update.')
+        for read in ('Linu×','Unix','Linux needs updates.',''):
+            self.assertEqual(rendition.verified_spelling(src,before,read),before)
+        self.assertIsNone(rendition.visual_retry('4×4の箱','A 4×4 box.'))
+        self.assertIsNone(rendition.visual_retry('Hero×Team','Hero×Team'))
+        self.assertEqual(rendition.verified_spelling('Firefo×を開く','Open Firefo×.','Firefox'),'Open Firefox.')
+
     def test_extracts_only_a_separately_quoted_answer_to_a_translation_request(self):
         source='初めて投稿します。'
         message='Okay, here’s the translation of the post:\n\n“This is my first post.”\n'
@@ -127,6 +146,8 @@ class SingleRendition(unittest.TestCase):
         self.assertIn('明るく',rendition.usage_context('ぱあああ'))
         self.assertFalse(rendition.usage_context('かぽっと外れた'))
         self.assertTrue(rendition.self_contained_prompt('じゃこれもよろしく'))
+        self.assertTrue(rendition.self_contained_prompt('先生に伝えておいてね。'))
+        self.assertFalse(rendition.self_contained_prompt('先生に伝えておいてくれた。'))
         self.assertTrue(rendition.self_contained_prompt('僕はその中でも'))
         self.assertFalse(rendition.self_contained_prompt('どうぞよろしくお願いします。'))
         self.assertFalse(rendition.self_contained_prompt('僕はその中でも一番弱かった。'))
@@ -403,6 +424,14 @@ class SingleRendition(unittest.TestCase):
         self.assertEqual(rendition.visual_retry('力千','Rikisen'),rendition.CLICK)
         self.assertIsNone(rendition.visual_retry('千人','A thousand people'))
 
+    def test_facial_effect_rechecks_contact_only_when_the_first_reading_implies_a_bite(self):
+        self.assertEqual(rendition.visual_retry('クワッ','*chomp*'),rendition.FACIAL_MOTION)
+        self.assertIsNone(rendition.visual_retry('クワッ','Gasp!'))
+        self.assertIsNone(rendition.visual_retry('もぐもぐ','munch'))
+        observed={'object_between_teeth':'none','visible_motion':'eyes wide','lettering':'Gasp!'}
+        self.assertEqual(rendition.facial_lettering(observed),'Gasp!')
+        self.assertIsNone(rendition.facial_lettering({**observed,'object_between_teeth':'sandwich'}))
+        self.assertFalse(rendition.candidate_matches(rendition.FACIAL_MOTION,'chomp','Kwahh','くわっ'))
     def test_visual_retry_is_selective_and_keeps_valid_localizations(self):
         for source, primary, policy in [
                 ('ピーッ', 'Sproing!', rendition.VISUAL_TONE), ('ピーッ', 'Whistle!', None),

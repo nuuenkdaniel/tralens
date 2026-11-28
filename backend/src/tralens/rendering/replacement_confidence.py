@@ -102,10 +102,71 @@ def retains_printed_words(unit, target):
     return ''.join(line['text'] for line in lines) == reading.text
 
 
-def original_lettering_reason(unit, target, detections, bounds, page_size, *, reviewed_source=None):
+def circled_letter(image, polygon, reading):
+    """Confirm the enclosing ring before treating a lone OCR letter as a printed mark."""
+    if reading not in ('R','C','P','®','©','℗'):
+        return False
+    import cv2
+    import numpy as np
+    xx,yy = zip(*polygon)
+    l,t,r,b = int(min(xx)),int(min(yy)),int(max(xx))+1,int(max(yy))+1
+    w,h = r-l,b-t
+    if not (8<=w<=64 and 8<=h<=64 and .75<w/h<1.34):
+        return False
+    pixels = np.asarray(image.crop((max(0,l-3),max(0,t-3),min(image.width,r+3),min(image.height,b+3))).convert('L'))
+    _,binary = cv2.threshold(pixels,0,255,cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+    for ink in (binary,255-binary):
+        contours,tree = cv2.findContours(ink,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+        for i,contour in enumerate(contours):
+            x,y,cw,ch = cv2.boundingRect(contour)
+            if (tree[0,i,3]>=0 or tree[0,i,2]<0 or x==0 or y==0
+                    or x+cw>=ink.shape[1] or y+ch>=ink.shape[0] or min(cw/w,ch/h)<.72):
+                continue
+            area = cv2.contourArea(contour)
+            perimeter = cv2.arcLength(contour,True)
+            if area/(cw*ch)>.63 and 4*math.pi*area/perimeter**2>.78:
+                return True
+    return False
+
+
+def printed_sequence(member, detections):
+    """Three consecutive letters on a regularly spaced row or column are labels."""
+    labels = []
+    for d in detections:
+        word = d['text'].strip()
+        if not re.fullmatch('[A-Z]',word) or d['confidence']<.9:
+            continue
+        xs,ys = zip(*d['polygon'])
+        labels.append((ord(word),(min(xs)+max(xs))/2,(min(ys)+max(ys))/2,
+                       max(max(xs)-min(xs),max(ys)-min(ys),1),d['source_id']))
+    center = next((item for item in labels if item[4]==member),None)
+    if center is None:
+        return False
+    for other in labels:
+        delta = other[0]-center[0]
+        if abs(delta)!=1:
+            continue
+        dx,dy = (other[1]-center[1])/delta,(other[2]-center[2])/delta
+        step = math.hypot(dx,dy)
+        if not (center[3]<step<9*center[3] and max(dx,dy)>.9*step
+                and .65*center[3]<other[3]<1.5*center[3]):
+            continue
+        for third in labels:
+            k = third[0]-center[0]
+            if k not in (-delta,2*delta) or not .65*center[3]<third[3]<1.5*center[3]:
+                continue
+            if math.hypot(third[1]-center[1]-k*dx,third[2]-center[2]-k*dy)<.35*step:
+                return True
+    return False
+
+
+def original_lettering_reason(unit, target, detections, bounds, page_size, *, reviewed_source=None, verify_crop=None):
     """Retain literal/bilingual type, and quarantine readings with insufficient evidence."""
     from ..ocr.types import is_credit_list, is_printed_literal, is_printed_number, is_printed_punctuation, printed_latin_lines
     source = unit.selected.text.strip()
+    if (len(unit.member_ids)==1 and re.fullmatch('[A-Z]',source) and reviewed_source in (None,source)
+            and printed_sequence(unit.member_ids[0],detections)):
+        return 'replacement_unchanged_text','Preserve the printed sequence of letter labels.'
     if len(unit.member_ids)==1 and source.isascii() and any(
             z['source_id']==unit.member_ids[0] and z.get('reason')=='confirmed_checkbox_item' for z in detections):
         return 'replacement_unchanged_text', 'Preserve the printed software identifier beside its checkbox.'
@@ -173,7 +234,8 @@ def original_lettering_reason(unit, target, detections, bounds, page_size, *, re
         or any(d.get('ocr_metadata',{}).get(k,{}).get('reading')==reviewed_source for k in ('colored_word','outlined_display'))
         for d in detections if d['source_id'] in unit.member_ids)
     if (not confirmed_display and (right-left) > .34*width and bottom-top > .11*height and len(source) <= 12
-            and all(d['confidence'] < .82 for d in detections if d['source_id'] in unit.member_ids)):
+            and all(d['confidence'] < .82 for d in detections if d['source_id'] in unit.member_ids)
+            and not (verify_crop and verify_crop())):
         return 'uncorroborated_source', 'Large display lettering has no reliable original reading.'
     return None
 

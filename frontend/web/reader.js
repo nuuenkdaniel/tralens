@@ -3,7 +3,7 @@ const root = $("#root"),
   sheet = $("#sheet");
 const defaults = {
   translator: "local",
-  paint: "classical",
+  paint: "auto",
   protection: "all",
   direction: "rtl",
   layout: "single",
@@ -30,7 +30,7 @@ let config,
 let pendingPosition = Promise.resolve(),
   focusReturn,
   dismissed = "",
-  uploadBusy = false;
+  pendingImport = null;
 const esc = (text) =>
   String(text ?? "").replace(
     /[&<>"']/g,
@@ -63,13 +63,14 @@ const ib = (action, label, symbol) =>
   icon(symbol) +
   "</button>";
 const pagesOf = (book) => book.chapters.flatMap((c) => c.pages);
-const url = (p, which) =>
+const url = (p, which, suffix = "") =>
   "/api/library/pages/" +
   p.id +
   "/" +
-  which +
+  which + suffix +
   (which === "translated" ? "?v=" + p.updated : "");
 const best = (p) => url(p, p.ready ? "translated" : "original");
+const thumbnail = (p) => url(p, p.ready ? "translated" : "original", "/thumbnail");
 const readURL = (b, p) => "#read/" + b.id + "/" + p.id;
 const lastPage = (b) =>
   pagesOf(b).find((p) => p.id === b.position) || pagesOf(b)[0];
@@ -95,7 +96,7 @@ function toast(message) {
   clearTimeout(noticeTimer);
   noticeTimer = setTimeout(() => ($("#notice").textContent = ""), 4500);
 }
-async function api(path, body, reconnect = true) {
+async function api(path, body, reconnect = true, send = fetch) {
   const opts =
     body === undefined
       ? {}
@@ -104,10 +105,17 @@ async function api(path, body, reconnect = true) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  if (path === "config") opts.signal = AbortSignal.timeout(6000);
-  const res = await fetch("/api/" + path, opts);
+  if (path === "config" || path.startsWith("library/imports/")) opts.signal = AbortSignal.timeout(6000);
+  let res;
+  try {
+    res = await send("/api/" + path, opts);
+  } catch (err) {
+    if (err instanceof TypeError) throw Error("Couldn’t reach your server. Check your connection.");
+    throw err;
+  }
   if (res.status === 401) {
     config = null;
+    bindDownloads(null);
     showAccountForm();
     throw Error("Sign in to your Tralens server.");
   }
@@ -124,7 +132,7 @@ async function api(path, body, reconnect = true) {
       throw Error("The signed-in account changed.");
     }
     config = fresh;
-    return api(path, body, false);
+    return api(path, body, false, send);
   }
   if (!res.ok) throw Error(data.error || "Server request failed (HTTP " + res.status + "). Try again.");
   return data;
@@ -138,7 +146,7 @@ function schedulePoll() {
   pollTimer = setTimeout(poll, busy ? 2500 : 60000);
 }
 async function poll() {
-  if (!config || uploadBusy || document.hidden) return schedulePoll();
+  if (!config || document.hidden) return schedulePoll();
   try { await refresh(); }
   catch (err) { toast(err.message); schedulePoll(); }
 }
@@ -197,10 +205,9 @@ function header(back) {
       ? '<a href="#library" class="btn">' + icon("chev-l") + "Library</a>"
       : '<a href="#library" class="brand"><span class="mark">文<b>A</b></span>Tralens</a>') +
     '<span class="grow"></span>' +
+    (offline ? '<button type="button" data-action="offline-library" aria-label="Downloads on this device">' + icon("download") + "Downloads</button>" : "") +
     (!back ? btn("add", "Add manga", "primary wide", "plus") : "") +
-    '<a class="btn icon-btn" href="#settings" aria-label="Settings">' +
-    icon("gear") +
-    "</a>" +
+    (route()[0] === "settings" ? "" : '<a class="btn icon-btn" href="#settings" aria-label="Settings">' + icon("gear") + "</a>") +
     ib("theme", "Switch theme", "contrast") +
     "</header>"
   );
@@ -232,7 +239,7 @@ function card(b) {
     '<a class="book" href="#book/' +
     b.id +
     '"><img loading="lazy" src="' +
-    best(pages[0]) +
+    thumbnail(pages[0]) +
     '" alt=""><b>' +
     esc(b.title) +
     "</b><small>" +
@@ -280,7 +287,7 @@ function library() {
     .sort((a, b) => b.last_read - a.last_read)[0];
   const hero = recent
     ? '<section class="hero"><img alt="" src="' +
-      best(lastPage(recent)) +
+      thumbnail(lastPage(recent)) +
       '"><div><small>Continue reading</small><h2>' +
       esc(recent.title) +
       '</h2><p class="meta">' +
@@ -300,7 +307,7 @@ function library() {
     '<div class="tools"><input id="search" type="search" aria-label="Search manga" placeholder="Search your library" value="' +
     esc(query) +
     '">' +
-    select(
+    choicesField(
       "sort",
       [
         ["recent", "Recently read"],
@@ -315,29 +322,13 @@ function library() {
     btn("add", "Add manga", "primary fab", "plus")
   );
 }
-function select(key, choices, label) {
-  return (
-    '<select aria-label="' +
-    esc(label) +
-    '" data-pref="' +
-    key +
-    '">' +
-    choices
-      .map(
-        ([v, t, off]) =>
-          '<option value="' +
-          v +
-          '" ' +
-          (prefs[key] === v ? "selected " : "") +
-          (off ? "disabled" : "") +
-          ">" +
-          esc(t) +
-          (off ? " · unavailable" : "") +
-          "</option>",
-      )
-      .join("") +
-    "</select>"
-  );
+function choicesField(key, choices, label) {
+  return '<fieldset class="choice-field"><legend>' + esc(label) + '</legend><div class="choices">' +
+    choices.map(([value, text, unavailable]) =>
+      '<label><input type="radio" data-pref="' + key + '" name="pref-' + key + '" value="' + esc(value) + '"' +
+      (prefs[key] === value ? ' checked' : '') + (unavailable ? ' disabled' : '') + '><span>' +
+      esc(text) + (unavailable ? ' · unavailable' : '') + '</span></label>'
+    ).join('') + '</div></fieldset>';
 }
 const readingFields = [
   [
@@ -352,9 +343,9 @@ const readingFields = [
     "layout",
     "Page layout",
     [
-      ["single", "Single page"],
-      ["spread", "Two-page spread"],
-      ["continuous", "Continuous scroll"],
+      ["single", "One page"],
+      ["spread", "Two pages"],
+      ["continuous", "Scroll"],
     ],
   ],
   [
@@ -374,8 +365,7 @@ const readingFields = [
     ],
   ],
 ];
-const field = ([k, l, choices]) =>
-  '<label class="field">' + l + select(k, choices, l) + "</label>";
+const field = ([key, label, choices]) => choicesField(key, choices, label);
 
 function preferences() {
   const translators = [
@@ -391,7 +381,6 @@ function preferences() {
     '<section class="panel fields"><h2>Account</h2><p>Signed in as <b>' + esc(config.username) + '</b></p>' + btn("owner-logout", "Sign out") + "</section>" +
     '<section class="panel fields"><h2>Translation</h2>' +
     field(["translator", "Translation model", translators]) +
-    (config.frontier_provider === "chatgpt" ? '<p class="hint">Connecting ChatGPT is optional and enables GPT translation.</p>' : "") +
     '<p class="hint">' +
     esc(privacy()) +
     "</p>" +
@@ -440,7 +429,7 @@ function detail(b) {
   return (
     header(true) +
     '<main class="wrap detail"><img class="cover" src="' +
-    best(pages[0]) +
+    thumbnail(pages[0]) +
     '" alt="' +
     esc(b.title) +
     ' cover"><div><h1>' +
@@ -455,7 +444,7 @@ function detail(b) {
     icon("play") +
     (b.position ? "Continue reading" : "Start reading") +
     "</a>" +
-    btn("download-book", "Download", "", "download") +
+    btn("download-book", "Export ZIP", "", "download") +
     ib("book-menu", "Manga actions", "more") +
     '</div><div class="line"><h2>Chapters</h2>' +
     btn("add-chapter", "Add chapter", "", "plus") +
@@ -483,7 +472,8 @@ function detail(b) {
               .filter(Boolean)
               .join(" · "),
           ) +
-          "</small></a><details><summary>Pages in " +
+          "</small></a>" + (offline ? '<button class="btn" data-action="save-offline" data-id="' + c.id +
+            '">' + icon("download") + 'Save offline</button>' : "") + "<details><summary>Pages in " +
           esc(c.title) +
           '</summary><div class="pages" data-chapter="' + c.id + '"></div></details>',
       )
@@ -498,7 +488,7 @@ root.addEventListener("toggle", (event) => {
   const { book } = current();
   const chapter = book?.chapters.find(c => c.id === list.dataset.chapter);
   if (chapter) list.innerHTML = chapter.pages.map((p, i) =>
-    '<a href="' + readURL(book, p) + '"><img loading="lazy" src="' + best(p) +
+    '<a href="' + readURL(book, p) + '"><img loading="lazy" src="' + thumbnail(p) +
     '" alt="Page ' + (i + 1) + '">' + (i + 1) + '</a>').join("");
 }, true);
 function pageImage(p, mode) {
@@ -520,8 +510,7 @@ function pageImage(p, mode) {
     esc(p.name) +
     " · " +
     (translated ? "translated" : "original") +
-    '" loading="lazy">' +
-    (reading ? '<button class="read-english" data-action="transcript" data-id="' + p.id + '">Read English</button>' : "") +
+    (prefs.layout === "continuous" && view !== "compare" ? '" loading="lazy">' : '">') +
     (mode !== "original" && !p.ready
       ? '<small class="badge">Original</small>'
       : "") +
@@ -663,6 +652,68 @@ function setWipe(value) {
   if (image) image.parentElement.style.setProperty("--divider", value + "%");
   if (image) image.style.clipPath = "inset(0 " + (100 - value) + "% 0 0)";
 }
+// Keep at most the next screen in this signed-in tab. Reuse the image element
+// on a turn so private pages never need a persistent browser cache.
+const preparedPages = new Map();
+function keepPrepared(sources) {
+  for (const [src, img] of preparedPages) {
+    if (!sources.includes(src)) {
+      img.removeAttribute("src");
+      preparedPages.delete(src);
+    }
+  }
+}
+function prepareNext(book, chapter, page, canvas) {
+  if (canvas.classList.contains("continuous") || navigator.connection?.saveData) {
+    keepPrepared([]);
+    return;
+  }
+  const spread = prefs.layout === "spread" && view !== "compare";
+  const step = spread ? 2 : 1;
+  const index = chapter.pages.indexOf(page) + step;
+  const nextChapter = index < chapter.pages.length ? chapter : book.chapters[book.chapters.indexOf(chapter) + 1];
+  const start = nextChapter === chapter ? index : 0;
+  const next = nextChapter?.pages.slice(start, start + step) || [];
+  const sources = next.flatMap(p => view === "compare" && p.ready ? [best(p), url(p, "original")] :
+    [view === "original" ? url(p, "original") : best(p)]);
+  keepPrepared(sources);
+  const visible = [...canvas.querySelectorAll(".page-image")];
+  Promise.allSettled(visible.map(img => img.decode())).then(() => {
+    if (!canvas.isConnected || canvas !== $(".canvas") || !config) return;
+    for (const src of sources) {
+      if (preparedPages.has(src)) continue;
+      const img = new Image();
+      img.fetchPriority = "low";
+      img.onerror = () => { if (preparedPages.get(src) === img) preparedPages.delete(src); };
+      preparedPages.set(src, img);
+      img.src = src;
+    }
+  });
+}
+function mountReader(markup) {
+  if (!preparedPages.size) {
+    root.innerHTML = markup;
+    return;
+  }
+  const template = document.createElement("template");
+  template.innerHTML = markup;
+  const replacements = [];
+  for (const target of template.content.querySelectorAll(".page-image")) {
+    const src = target.getAttribute("src");
+    const img = preparedPages.get(src);
+    if (!img) continue;
+    preparedPages.delete(src);
+    img.onerror = null;
+    img.fetchPriority = "auto";
+    for (const attr of target.attributes) {
+      if (attr.name !== "src") img.setAttribute(attr.name, attr.value);
+    }
+    target.removeAttribute("src");
+    replacements.push([target, img]);
+  }
+  root.replaceChildren(template.content);
+  for (const [target, img] of replacements) target.replaceWith(img);
+}
 let lastRender = "",
   lastFocusPage = "";
 function render() {
@@ -678,13 +729,15 @@ function render() {
   const expanded = same && screen === "book" ? [...root.querySelectorAll("details[open] .pages")].map(el => el.dataset.chapter) : [];
   const hidden = same && $(".reader")?.classList.contains("clean");
   clearTimeout(hideTimer);
-  root.innerHTML = reading
-    ? reader(book, chapter, page)
-    : screen === "settings"
+  if (reading) mountReader(reader(book, chapter, page));
+  else {
+    keepPrepared([]);
+    root.innerHTML = screen === "settings"
       ? preferences()
       : screen === "book" && book
         ? detail(book)
         : library();
+  }
   document.title =
     (reading
       ? book.title + " · " + chapter.title
@@ -706,6 +759,7 @@ function render() {
     if (hidden) $(".reader").classList.add("clean");
     else showChrome();
     const canvas = $(".canvas");
+    prepareNext(book, chapter, page, canvas);
     const keepScroll = same && oldCanvas?.className === canvas.className;
     if (keepScroll) canvas.scrollTop = oldScroll;
     if (canvas.classList.contains("continuous")) {
@@ -836,7 +890,6 @@ function modal(title, html) {
   if (!sheet.open) sheet.showModal();
 }
 function closeSheet() {
-  if (uploadBusy) return;
   sheet.close();
 }
 sheet.addEventListener("close", () => {
@@ -847,10 +900,11 @@ sheet.addEventListener("close", () => {
   focusReturn?.focus();
   showChrome();
 });
-sheet.addEventListener("cancel", (e) => {
-  if (uploadBusy) e.preventDefault();
-});
 function addBook(id = "", files = []) {
+  if (pendingImport) {
+    $("#import-status").scrollIntoView();
+    return toast("Finish or dismiss the current import first.");
+  }
   draft = {
     book: id,
     title: "",
@@ -896,7 +950,7 @@ function drawAdd() {
       '<details' + (!selected || editing ? ' open' : '') + '><summary>' +
       (selected ? 'Edit details' : 'Choose files and destination') + '</summary><div class="fields"><div class="drop">' +
       icon("upload") +
-      "<b>Drop manga pages here</b><small>PNG, JPEG, WebP, PDF, CBZ or ZIP · Up to 4 GiB per import</small>" +
+      "<b>Import manga pages</b><small>PNG, JPEG, WebP, PDF, CBZ or ZIP · Up to 4 GiB per import</small>" +
       btn("choose", "Choose pages") +
       '<input id="files" type="file" accept="image/png,image/jpeg,image/webp,application/pdf,application/zip,application/x-zip-compressed,application/vnd.comicbook+zip,application/x-cbz,.cbz,.zip" multiple hidden></div>' +
       (draft.files.length
@@ -1052,7 +1106,13 @@ function menu(kind) {
         btn("delete-confirm", "Delete manga", "danger") +
         "</div>",
     );
-  if (kind === "page-menu")
+  if (kind === "page-menu") {
+    const {chapter} = current();
+    const index = chapter.pages.indexOf(page);
+    const shown = prefs.layout === "spread" && view !== "compare" ? chapter.pages.slice(index, index + 2) : [page];
+    const transcripts = shown.filter(p => p.has_text).map(p =>
+      '<button type="button" data-action="transcript" data-id="' + esc(p.id) + '">Read English' +
+      (shown.length > 1 ? ' · Page ' + (chapter.pages.indexOf(p) + 1) : '') + '</button>').join("");
     return modal(
       "Page actions",
       '<div class="menu-list"><a class="btn" href="' +
@@ -1065,10 +1125,12 @@ function menu(kind) {
             best(page) +
             '" download="translated.png">Download translation</a>'
           : "") +
+        transcripts +
         (["queued", "running", "waiting"].includes(page.status) ? btn("skip-page", "Skip translation") : btn("retry-page", "Translate again")) +
         btn("fullscreen", "Toggle full screen") +
         "</div>",
     );
+  }
 }
 async function openReading(pageId, point) {
   const page = pagesOf(current().book).find(p => p.id === pageId);
@@ -1094,6 +1156,13 @@ async function openReading(pageId, point) {
   if (index >= 0) sheet.querySelectorAll(".reading-text li")[index].scrollIntoView({block:"center"});
 }
 async function act(action, pageId) {
+  if (action === "offline-library") return offline?.list();
+  if (action === "save-offline") {
+    const {book} = current();
+    const chapter = book?.chapters.find(c => c.id === pageId);
+    if (offline && chapter) return offline.save({id: chapter.id, book: book.title, title: chapter.title, originals: chapter.pages.filter(p => !p.ready).length, urls: chapter.pages.map(best)});
+    return;
+  }
   if (action === "transcript") return openReading(pageId);
   if (action === "skip-page") {
     const {book, page} = current();
@@ -1239,15 +1308,47 @@ document.addEventListener("input", (e) => {
   }
 });
 function showChatGPTConsent(model) {
+  const phonePlugin = window.Capacitor?.isPluginAvailable?.("PhoneSignIn");
+  const androidBrowser = (/Android/i.test(navigator.userAgent) || navigator.userAgentData?.platform === "Android") && !phonePlugin;
+  if (androidBrowser) {
+    modal("Connect on your phone",
+      '<p>Open Tralens and choose a GPT model in Settings → Translation to sign in.</p>' +
+      '<a id="open-tralens" class="btn primary" href="intent://signin/return#Intent;scheme=tralens-reader;package=app.tralens.reader;end">Open Tralens</a>' +
+      '<div role="status" id="chatgpt-connect"></div>');
+    const panel = $("#chatgpt-connect");
+    const onReturn = async () => {
+      if (document.hidden || !sheet.open || !panel.isConnected) return;
+      try {
+        const result = await api("chatgpt/models");
+        if (sheet.open && panel.isConnected && result.state === "connected") useChatGPTModel(model, result);
+      } catch (err) {
+        if (panel.isConnected) panel.textContent = err.message;
+      }
+    };
+    $("#open-tralens").onclick = () => document.addEventListener("visibilitychange", onReturn);
+    sheet.addEventListener("close", () => document.removeEventListener("visibilitychange", onReturn), {once: true});
+    return;
+  }
   modal("Connect to ChatGPT",
-    '<p>Use your own ChatGPT plan on a Tralens server you control. The server stores your account ID, email and sign-in tokens. When you choose ChatGPT for an import or retry, Tralens sends the selected page images and detected text to OpenAI and processes the queue in the background.</p>' +
-    '<p>You can disconnect in Tralens Settings. Read the <a href="/privacy" target="_blank" rel="noopener">Tralens privacy notice</a> and the <a href="https://openai.com/policies/privacy-policy/" target="_blank" rel="noopener">OpenAI Privacy Policy</a>.</p>' +
-    '<button id="consent-chatgpt" class="primary" type="button">Agree &amp; continue</button>' +
+    '<div id="chatgpt-consent"><p>GPT translations send selected pages and text to OpenAI using your ChatGPT plan.</p>' +
+    '<details><summary>Privacy details</summary><p>Your server stores your account ID, email and sign-in tokens. Translations can finish in the background. Disconnect anytime in Settings.</p>' +
+    '<a href="/privacy" target="_blank" rel="noopener">Tralens privacy notice</a> · <a href="https://openai.com/policies/privacy-policy/" target="_blank" rel="noopener">OpenAI Privacy Policy</a></details>' +
+    '<button id="consent-chatgpt" class="primary" type="button">Continue with ChatGPT</button></div>' +
     '<div id="chatgpt-connect" role="status"></div>');
-  $("#consent-chatgpt").addEventListener("click", (event) => {
-    event.currentTarget.remove();
+  $("#consent-chatgpt").onclick = () => {
+    $("#chatgpt-consent").remove();
     selectChatGPT(model, $("#chatgpt-connect"));
-  }, {once: true});
+  };
+}
+
+function useChatGPTModel(model, result) {
+  config.chatgpt_connected = true;
+  config.chatgpt_models = result.models;
+  if (!result.models.includes(model)) throw Error("Your ChatGPT account does not offer this model.");
+  prefs.translator = model;
+  save();
+  closeSheet();
+  render();
 }
 
 async function selectChatGPT(model, panel) {
@@ -1265,7 +1366,7 @@ async function selectChatGPT(model, panel) {
         result = await api("chatgpt/phone/start", {port});
         if (!active()) return;
         if (result.state === "authorize") {
-          panel.textContent = "Finish signing in with ChatGPT in your phone’s browser, then return to Tralens.";
+          panel.textContent = "Finish signing in, then tap Open Tralens.";
           const fields = await phone.authorize({url: result.url});
           if (!active()) return;
           result = await api("chatgpt/phone/finish", fields);
@@ -1285,12 +1386,11 @@ async function selectChatGPT(model, panel) {
         displayedURL = result.url;
         const remote = config.owner_mode && !["localhost", "127.0.0.1"].includes(location.hostname);
         panel.innerHTML = remote
-          ? '<p>Finish sign-in in the browser on your Tralens server. This reader will reconnect automatically.</p>' +
-            '<details><summary>Using a headless server?</summary><p>Forward port ' + esc(url.port) +
+          ? '<p>Finish signing in on your server.</p>' +
+            '<details><summary>Use an SSH tunnel</summary><p>Forward port ' + esc(url.port) +
             ' from your computer to the same loopback port on the server over SSH, then open this link on your computer.</p>' +
             '<a href="' + esc(url.href) + '" target="_blank" rel="noopener noreferrer">Continue with ChatGPT</a></details>'
-          : '<p>Connect your ChatGPT account to use this model for manga translation.</p>' +
-            '<a class="btn primary" href="' + esc(url.href) + '" target="_blank" rel="noopener noreferrer">Continue with ChatGPT</a>';
+          : '<a class="btn primary" href="' + esc(url.href) + '" target="_blank" rel="noopener noreferrer">Continue with ChatGPT</a>';
       }
       await new Promise(resolve => setTimeout(resolve, 800));
       if (!active()) return;
@@ -1299,13 +1399,7 @@ async function selectChatGPT(model, panel) {
     }
     if (!active()) return;
     if (result.state !== "connected") throw Error(result.error || "Sign-in did not finish.");
-    config.chatgpt_connected = true;
-    config.chatgpt_models = result.models;
-    if (!result.models.includes(model)) throw Error("Your ChatGPT account does not offer this model.");
-    prefs.translator = model;
-    save();
-    closeSheet();
-    render();
+    useChatGPTModel(model, result);
   } catch (err) {
     if (active()) panel.textContent = err.message;
   }
@@ -1316,7 +1410,9 @@ document.addEventListener("change", async (e) => {
     if (el.dataset.pref === "translator" && el.value !== "local" && config.frontier_provider === "chatgpt" &&
         !(config.chatgpt_connected && config.chatgpt_models?.includes(el.value))) {
       const requested = el.value;
-      el.value = prefs.translator;
+      const previous = el.closest("fieldset").querySelector('input[value="' + CSS.escape(prefs.translator) + '"]');
+      if (previous) previous.checked = true;
+      else el.checked = false;
       if (config.chatgpt_connected) {
         let result;
         try { result = await api("chatgpt/models"); } catch (err) { toast(err.message); return; }
@@ -1330,9 +1426,12 @@ document.addEventListener("change", async (e) => {
       } else showChatGPTConsent(requested);
       return;
     }
+    const restoreFocus = el === document.activeElement;
     prefs[el.dataset.pref] = el.value;
     save();
     render();
+    if (restoreFocus && !el.isConnected)
+      root.querySelector('input[data-pref="' + el.dataset.pref + '"]:checked')?.focus({preventScroll:true});
   }
   if (el.id === "scrub") {
     const { book, chapter } = current();
@@ -1351,44 +1450,128 @@ document.addEventListener("change", async (e) => {
     drawAdd();
   }
 });
+function importStatus(message, percent = null, failed = false) {
+  $("#import-status").hidden = false;
+  $("#import-name").textContent = pendingImport.name;
+  $("#import-message").textContent = message;
+  const progress = $("#import-progress");
+  progress.hidden = failed;
+  if (percent === null) progress.removeAttribute("value");
+  else progress.value = percent;
+  $("#import-stop").hidden = failed || !pendingImport.request;
+  $("#import-retry").hidden = $("#import-dismiss").hidden = !failed;
+}
+
+function clearImport() {
+  pendingImport?.request?.abort();
+  pendingImport = null;
+  $("#import-status").hidden = true;
+}
+
+function sendImport(url, opts) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const item = pendingImport;
+    item.request = xhr;
+    $("#import-stop").hidden = false;
+    $("#import-stop").textContent = "Stop upload";
+    xhr.open("POST", url);
+    xhr.setRequestHeader("X-Tralens-Token", opts.headers["X-Tralens-Token"]);
+    let timer;
+    function watch(ms) {
+      clearTimeout(timer);
+      timer = setTimeout(() => xhr.abort(), ms);
+    }
+    xhr.upload.onprogress = event => {
+      watch(90000);
+      if (event.lengthComputable) {
+        const percent = Math.round(100 * event.loaded / event.total);
+        importStatus("Uploading · " + percent + "%", percent);
+      }
+    };
+    xhr.upload.onload = () => {
+      $("#import-stop").textContent = "Stop waiting";
+      watch(6 * 60000);
+      importStatus("Upload sent. Preparing pages on your server…");
+    };
+    xhr.onload = () => resolve(new Response(xhr.responseText || null, {status: xhr.status}));
+    xhr.onerror = () => reject(Error("Connection lost. Reconnect and retry."));
+    xhr.onabort = () => reject(Error(item.stopped ? "Stopped waiting. Retry checks whether your chapter was saved." :
+      "Your server stopped responding. Check your connection and retry."));
+    xhr.onloadend = () => clearTimeout(timer);
+    watch(90000);
+    xhr.send(opts.body);
+  });
+}
+
+async function runImport(item, retry = false) {
+  item.request = null;
+  item.stopped = false;
+  importStatus(retry ? "Checking your library…" : "Uploading…");
+  const receipt = () => api("library/imports/" + item.id);
+  let added;
+  try {
+    if (retry) added = await receipt();
+    if (pendingImport !== item) return;
+    if (!added) {
+      importStatus("Uploading…");
+      added = await api("library/add", item.form, true, sendImport);
+    }
+  } catch (err) {
+    if (pendingImport !== item) return;
+    // A disconnect after the upload can hide a successful commit.
+    item.request = null;
+    importStatus("Checking whether your chapter was saved…");
+    try { added = await receipt(); } catch { /* Keep the files available for retry. */ }
+    if (pendingImport !== item) return;
+    if (!added) {
+      const network = err instanceof TypeError || err.name === "TimeoutError";
+      importStatus(network ? "Couldn’t reach your server. Reconnect and retry." : err.message, null, true);
+      return;
+    }
+  }
+  if (pendingImport !== item) return;
+  clearImport();
+  toast("Added to your library.");
+  try {
+    await refresh(true);
+  } catch {
+    if (config) toast("Added to your library. Reconnect to see your pages.");
+    schedulePoll();
+    return;
+  }
+  const book = catalog.books.find(b => b.id === added.book);
+  const chapter = book?.chapters.find(c => c.id === added.chapter);
+  if (chapter?.pages.length && location.hash === item.route && !sheet.open) {
+    history.replaceState(null, "", "#book/" + book.id);
+    location.hash = readURL(book, chapter.pages[0]);
+  }
+}
+$("#import-stop").onclick = () => {
+  pendingImport.stopped = true;
+  pendingImport.request?.abort();
+};
+$("#import-retry").onclick = () => runImport(pendingImport, true);
+$("#import-dismiss").onclick = clearImport;
+
 document.addEventListener("submit", async (e) => {
   e.preventDefault();
-  if (uploadBusy || e.target.id === "account-form") return;
+  if (e.target.id === "account-form") return;
+  if (e.target.id === "import") {
+    if (pendingImport) return;
+    const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
+    const form = new FormData();
+    form.append("metadata", JSON.stringify({import_id: id, book: draft.book,
+      title: draft.title, chapter: draft.chapter, options: settings()}));
+    draft.files.forEach(f => form.append("page", f.file));
+    pendingImport = {id, form, name: draft.title || draft.chapter, route: location.hash};
+    closeSheet();
+    return runImport(pendingImport);
+  }
   const button = e.target.querySelector('button:not([type="button"])');
   if (button) button.disabled = true;
   try {
-    if (e.target.id === "import") {
-      uploadBusy = true;
-      e.target.inert = true;
-      button.textContent = "Adding…";
-      const form = new FormData();
-      form.append(
-        "metadata",
-        JSON.stringify({
-          book: draft.book,
-          title: draft.title,
-          chapter: draft.chapter,
-          options: settings(),
-        }),
-      );
-      draft.files.forEach((f) => form.append("page", f.file));
-      let added;
-      try {
-        added = await api("library/add", form);
-      } finally {
-        uploadBusy = false;
-        e.target.inert = false;
-      }
-      closeSheet();
-      await refresh(true);
-      const book = catalog.books.find(b => b.id === added.book);
-      const chapter = book?.chapters.find(c => c.id === added.chapter);
-      if (chapter?.pages.length) {
-        history.replaceState(null, "", "#book/" + book.id);
-        location.hash = readURL(book, chapter.pages[0]);
-      }
-      toast("Added to your library.");
-    } else if (e.target.id === "rename") {
+    if (e.target.id === "rename") {
       await api("library/rename", {
         book: current().book.id,
         title: $("#new-title").value,
@@ -1397,12 +1580,8 @@ document.addEventListener("submit", async (e) => {
       await refresh(true);
     }
   } catch (err) {
-    if ($("#import-error")) $("#import-error").textContent = err.message;
-    else toast(err.message);
+    toast(err.message);
   } finally {
-    if (e.target.id === "import") {
-      button.textContent = prefs.translator === "local" ? "Add & translate" : "Add & translate with ChatGPT";
-    }
     if (button) button.disabled = false;
   }
 });
@@ -1415,7 +1594,7 @@ document.addEventListener("dragover", (e) => {
 });
 document.addEventListener("drop", (e) => {
   e.preventDefault();
-  if (!config || uploadBusy) return;
+  if (!config) return;
   if (e.dataTransfer.files.length) {
     if (!draft) addBook("", e.dataTransfer.files);
     else {
@@ -1430,7 +1609,7 @@ document.addEventListener("drop", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (
-    sheet.open ||
+    sheet.open || offline?.isOpen() ||
     !current().page ||
     e.target.matches("input,select,textarea")
   )
@@ -1466,9 +1645,10 @@ document.addEventListener(
 );
 addEventListener("resize", () => { if (config && route()[0] === "read" && !sheet.open) render(); });
 addEventListener("tralens-back", event => {
+  if (offline?.back()) { event.preventDefault(); return; }
   if (sheet.open) closeSheet();
   else if ($("#keep-server")) $("#keep-server").click();
-  else if ($('#account-form input[autocomplete="new-password"]')) $(".account-switch").click();
+  else if ($('#account-form input[autocomplete="new-password"]') && $(".account-switch:not([hidden])")) $(".account-switch").click();
   else if (current().page) location.replace("#book/" + current().book.id);
   else if (config && ["book", "settings"].includes(route()[0])) location.replace("#library");
   else return;
@@ -1481,6 +1661,7 @@ addEventListener("hashchange", () => {
   window.scrollTo(0, 0);
 });
 function accountChanged() {
+  bindDownloads(null);
   try { localStorage.setItem("tralens-account-change", crypto.randomUUID()); } catch {}
   location.reload();
 }
@@ -1502,6 +1683,21 @@ function serverOrigin(value) {
 }
 const nativeConnection = window.Capacitor?.isPluginAvailable?.("ReaderConnection")
   ? window.Capacitor.Plugins.ReaderConnection : null;
+const offlineModule = nativeConnection ? await import("./offline.js") : null;
+const offlineKey = "tralens-offline-account";
+let offline, offlineUser;
+function bindDownloads(user) {
+  if (!offlineModule) return;
+  if (user) localStorage.setItem(offlineKey, user);
+  else localStorage.removeItem(offlineKey);
+  if (offlineUser === user) return;
+  offline?.dispose();
+  offlineUser = user;
+  offline = user ? offlineModule.downloads(user, {
+    escape: esc, notify: toast, direction: () => prefs.direction,
+    unauthorized: () => { config = null; bindDownloads(null); showAccountForm(); }
+  }) : null;
+}
 const serverKey = "tralens-verified-server";
 let selectedServer = "";
 try {
@@ -1532,6 +1728,8 @@ function verifyServer(origin) {
   });
 }
 function accountCard(title, intro, content) {
+  keepPrepared([]);
+  if (pendingImport) clearImport();
   if (sheet.open) sheet.close();
   clearTimeout(pollTimer);
   catalog = {books: [], bytes: 0};
@@ -1585,7 +1783,31 @@ function showAccountForm(message = "") {
   if (selectedServer === location.origin) showCredentials(message);
   else showServerForm(message);
 }
-function showCredentials(message = "") {
+function requestSetupLink(form, message) {
+  $(".account-card h1").textContent = "Use your setup link";
+  document.title = "Owner setup · Tralens";
+  $(".account-intro").textContent = "Open the private link from your server, or paste it here to continue in the app.";
+  form.innerHTML = `
+    <label class="field">Private setup link<input name="link" type="url" required autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+    <p class="account-guidance">On the server, find the link in <code>/library/owner-setup.url</code> inside the reader container.</p>
+    <p class="error" role="alert"></p><button class="primary">Continue setup</button>`;
+  const alert = form.querySelector('[role="alert"]');
+  alert.textContent = message;
+  form.onsubmit = event => {
+    event.preventDefault();
+    const prefix = location.origin + "/#setup=";
+    const link = form.elements.link.value.trim();
+    const token = link.slice(prefix.length);
+    if (!link.startsWith(prefix) || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
+      alert.textContent = "Paste the full setup link for this server, including #setup=.";
+      return;
+    }
+    form.reset();
+    showCredentials("", token);
+    $('input[name="username"]')?.focus();
+  };
+}
+function showCredentials(message = "", setupToken = "") {
   accountCard("Sign in", "Open your manga library.", `
     <div class="account-server"><span>${esc(location.origin)}</span><button type="button" id="change-server" aria-label="Change server">Change</button></div>
     <form id="account-form" method="post">
@@ -1598,22 +1820,34 @@ function showCredentials(message = "") {
   const submit = form.querySelector("button"), toggle = $(".account-switch"), alert = form.querySelector('[role="alert"]');
   const change = $("#change-server");
   change.onclick = () => { showServerForm(); $(".account-card h1").focus(); };
-  let register = false;
+  let action = "login";
+  function setMode(next) {
+    action = next;
+    const creating = next !== "login", owner = next === "setup";
+    password.value = "";
+    password.autocomplete = creating ? "new-password" : "current-password";
+    password.minLength = creating ? 15 : 1;
+    form.elements.username.pattern = creating ? "[a-zA-Z0-9][a-zA-Z0-9._\\-]{2,31}" : ".*";
+    $(".account-guidance").hidden = !creating;
+    submit.textContent = owner ? "Create owner account" : creating ? "Create account" : "Sign in";
+    $(".account-card h1").textContent = owner ? "Create your owner account" : creating ? "Create an account" : "Sign in";
+    document.title = $(".account-card h1").textContent + " · Tralens";
+    $(".account-intro").textContent = owner ? "As owner, you can connect ChatGPT. Each reader gets a separate library." :
+      creating ? "Start a private library on this server." : "Open your manga library.";
+    toggle.textContent = creating ? "Back to sign in" : "Create an account";
+  }
   fetch("/api/auth/settings", {redirect:"error"}).then(r => r.ok ? r.json() : null).then(data => {
-    if (form.isConnected) toggle.hidden = data?.registration !== true;
+    if (!form.isConnected || !data) return;
+    if (data.setup_required) {
+      if (data.setup_link_required && !setupToken) requestSetupLink(form, message);
+      else setMode("setup");
+    } else {
+      toggle.hidden = !data.registration;
+      if (setupToken) alert.textContent = "This server already has an owner. Sign in to continue.";
+    }
   }).catch(() => {});
   toggle.onclick = () => {
-    register = !register;
-    password.value = "";
-    password.autocomplete = register ? "new-password" : "current-password";
-    password.minLength = register ? 15 : 1;
-    form.elements.username.pattern = register ? "[a-zA-Z0-9][a-zA-Z0-9._\\-]{2,31}" : ".*";
-    $(".account-guidance").hidden = !register;
-    submit.textContent = register ? "Create account" : "Sign in";
-    $(".account-card h1").textContent = register ? "Create an account" : "Sign in";
-    document.title = $(".account-card h1").textContent + " · Tralens";
-    $(".account-intro").textContent = register ? "Start a private library on this server." : "Open your manga library.";
-    toggle.textContent = register ? "Back to sign in" : "Create an account";
+    setMode(action === "register" ? "login" : "register");
     alert.textContent = "";
     form.elements.username.focus();
   };
@@ -1623,11 +1857,19 @@ function showCredentials(message = "") {
     submit.disabled = toggle.disabled = change.disabled = true;
     alert.textContent = "";
     try {
-      const response = await fetch("/api/auth/" + (register ? "register" : "login"), {
+      const response = await fetch("/api/auth/" + action, {
         method: "POST", redirect: "error", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({username: form.elements.username.value, password: password.value}),
+        body: JSON.stringify({username: form.elements.username.value, password: password.value,
+          ...(action === "setup" && setupToken ? {setup_token: setupToken} : {})}),
       });
-      if (!response.ok) throw Error((await response.json()).error || "Sign-in failed.");
+      if (!response.ok) {
+        const reason = (await response.json()).error || "Sign-in failed.";
+        if (action === "setup" && (response.status === 403 || response.status === 409)) {
+          showCredentials(reason);
+          return;
+        }
+        throw Error(reason);
+      }
       password.value = "";
       rememberServer(location.origin);
       accountChanged();
@@ -1641,7 +1883,9 @@ function showCredentials(message = "") {
 async function init() {
   root.innerHTML = '<main class="empty"><h1>Connecting to your library…</h1><p>' + esc(location.origin) + '</p></main>';
   try {
+    if (offlineModule && !navigator.onLine && localStorage.getItem(offlineKey)) throw Error("Offline");
     config = await api("config");
+    bindDownloads(config.username);
     rememberServer(location.origin);
     try {
       const saved = localStorage.getItem("tralens-reader:" + config.username) ||
@@ -1659,10 +1903,23 @@ async function init() {
   } catch (err) {
     if ($("#account-form")) return;
     config = null;
-    showAccountForm("Could not open this server. Check its address and try again.");
+    const remembered = offlineModule && localStorage.getItem(offlineKey);
+    if (remembered) bindDownloads(remembered);
+    accountCard("Server unavailable", "Check your connection to " + location.host + " and try again.",
+      (offline ? btn("offline-library", "Open downloads", "", "download") : "") +
+      '<button type="button" class="primary" id="retry-server">Retry connection</button>' +
+      '<button type="button" class="account-switch" id="choose-server">Change server</button>');
+    $("#retry-server").onclick = init;
+    $("#choose-server").onclick = () => showServerForm();
+    if (offline && await offline.hasSaved().catch(() => false)) await offline.list();
   }
 }
-if (location.hash === "#verify-server") {
+if (location.hash.startsWith("#setup=")) {
+  const token = location.hash.slice(7);
+  history.replaceState(null, "", location.pathname);
+  rememberServer(location.origin);
+  showCredentials("", token);
+} else if (location.hash === "#verify-server") {
   history.replaceState(null, "", location.pathname);
   try {
     await verifyServer(location.origin);

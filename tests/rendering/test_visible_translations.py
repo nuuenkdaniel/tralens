@@ -21,6 +21,85 @@ class PlacementTests(unittest.TestCase):
         blocked=np.zeros_like(own) if blocked is None else blocked
         return v.place(self.image,bounds,own,blocked,text,self.font,self.coverage,self.style)
 
+    def test_replace_all_cleans_source_and_preserves_neighbor_pixels(self):
+        art = np.full((280,360,3),247,np.uint8)
+        own = np.zeros(art.shape[:2],bool)
+        own[70:112,120:198] = True
+        art[81:99,128:191:5] = 0
+        protected = np.zeros_like(own)
+        protected[:,193:197] = True
+        art[protected] = 22
+        kind, patch_layer, letters, (x,y), proof, _ = v.replace_at_source(
+            Image.fromarray(art), (120,70,198,112), own, protected, 'Hello!', self.font,self.coverage,self.style)
+        mask = np.asarray(patch_layer.getchannel('A')) != 0
+        self.assertEqual(kind,'aggressive')
+        self.assertEqual(proof['original_text'],'Hello!')
+        self.assertIsNotNone(letters.getchannel('A').getbbox())
+        self.assertFalse((mask & protected[y:y+mask.shape[0],x:x+mask.shape[1]]).any())
+        self.assertTrue((np.asarray(patch_layer)[81-y:99-y,128-x:191-x:5,:3] == 247).all())
+
+    def test_force_draws_edge_and_ruled_cells_after_debug_budget_exhaustion(self):
+        from types import SimpleNamespace
+        raw,units,rows = [],[],[]
+        art = np.full((144,320,3),244,np.uint8)
+        for i,(x,y) in enumerate([(0,0),(116,60),(240,120)]):
+            art[y+2:y+9,x+3:x+12] = 0
+            raw.append(dict(source_id=i,polygon=[[x,y],[x+18,y],[x+18,y+11],[x,y+11]]))
+            units.append(SimpleNamespace(selected=SimpleNamespace(text='元')))
+            rows.append(dict(status='skipped',reason_code='ruled_table_cell',
+                             binding=dict(member_ids=[i],text=('A'*28 if i==0 else 'Hello there!'))))
+        image=Image.fromarray(art)
+        with patch.object(v,'MAX_ATTEMPTS',0):
+            out,_,_,ink,footprint,tiles,summary = v.display(image,raw,units,rows,image,Image.new('RGBA',image.size),
+                image,self.font,self.coverage,self.style,max_displays=0,replace_all=True)
+        self.assertEqual(summary['aggressive_replacements'],3)
+        self.assertEqual(tiles,{})
+        self.assertIsNotNone(ink.getbbox())
+        np.testing.assert_array_equal(np.asarray(out)[~footprint],art[~footprint])
+        for row in rows:
+            self.assertNotIn('patch_artifact',row['display_fallback'])
+            self.assertEqual(row['display_fallback']['layout']['original_text'],row['binding']['text'])
+
+    def test_cleanplate_preserves_crossing_rules_without_joining_unrelated_ends(self):
+        for color in ((249,249,249),(216,239,218)):
+            paper=np.full((72,116,3),color,np.uint8)
+            paper[35:37,:] = (30,65,34)
+            paper[:,57:59] = (85,65,34)
+            original=paper.copy()
+            original[18:54,40:75:7]=0
+            original[41,:32]=original[41,82:]=0
+            source=np.zeros(original.shape[:2],bool)
+            source[13:58,34:80]=True
+            clean,_,method=v.source_cleanplate(original,source,np.zeros_like(source),short_effect=False)
+            self.assertEqual(method,'dominant_source_surface')
+            np.testing.assert_array_equal(clean[35,40:56],paper[35,40:56])
+            np.testing.assert_array_equal(clean[17:34,58],paper[17:34,58])
+            np.testing.assert_array_equal(clean[41,35:56],paper[41,35:56])
+
+    def test_previously_cleaned_source_can_receive_letters_over_its_own_erasure(self):
+        from types import SimpleNamespace
+        rgb = Image.new('RGB',(100,84),'white')
+        erase = np.zeros((84,100),bool)
+        erase[20:62,22:80] = True
+        row = dict(status='skipped',reason_code='coverage_uncertain_geometry',
+                   binding=dict(member_ids=[1],text='Yes!'),
+                   removal_fallback=dict(status='removed',bounds=[22,20,80,62]))
+        raw = [dict(source_id=1,polygon=[[24,22],[78,22],[78,60],[24,60]])]
+        units = [SimpleNamespace(selected=SimpleNamespace(text='はい'))]
+        _,_,_,letters,_,_,summary=v.display(rgb,raw,units,[row],rgb,Image.new('RGBA',rgb.size),rgb,self.font,
+            self.coverage,self.style,native_erase=erase,replace_all=True,
+            cleanup_artifacts={'recovery-final-000-commit-mask.png':Image.new('L',(58,42),255)})
+        self.assertEqual(row['display_status'],'aggressive')
+        self.assertGreater(summary['reused_cleanplate_ink_pixels'],0)
+        self.assertEqual(summary['native_cleanup_changed_pixels'],0)
+        self.assertFalse((np.asarray(letters.getchannel('A'))[~erase]!=0).any())
+
+    def test_heart_glyphs_are_subject_to_the_same_font_coverage_check(self):
+        text = 'Hello ♡♥　★ €5 20°C ½'
+        n.validate_text(text,set(map(ord,text)))
+        with self.assertRaisesRegex(ValueError,'missing glyph'):
+            n.validate_text(text,set(map(ord,text)) - {ord('♡')})
+
     def test_opaque_patch_does_not_need_light_background_or_native_strokes(self):
         with patch('cv2.inpaint',side_effect=AssertionError('no guessed reconstruction')):
             kind,patch_layer,letters,xy,proof,_=self.place((80,60,210,180),'Hello there!')

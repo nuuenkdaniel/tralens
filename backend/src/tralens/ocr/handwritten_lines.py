@@ -385,6 +385,72 @@ def small_stacked_labels(image, boxes, reader):
     return result
 
 
+def painted_sign_headers(image, boxes, reader):
+    """Look just above a short, centered two-line inscription on a painted sign."""
+    from .masked_lines import READ_ERRORS, bind, corrected, source_views
+    from .crop_readings import corrected_compound
+
+    if not boxes or len(boxes)>256 or any(type(v.box_id) is not int for v in boxes):
+        return boxes
+    result = list(boxes)
+    next_id = max(v.box_id for v in boxes)+1
+    attempts = 0
+    claimed = {k for row in boxes for k in row.ocr_metadata.get('masked_passage',{}).get('ids',())}
+    for top in boxes:
+        if top.box_id in claimed or top not in result or not re.fullmatch(r'[ぁ-ゖァ-ヺ一-鿿ー]{2,8}',top.text):
+            continue
+        x,y,r,b = top.bbox
+        w,h = r-x,b-y
+        if not (10<=h<=64 and 1.6*h<=w<=5*h):
+            continue
+        lower = [v for v in result if v is not top and re.fullmatch(r'[一-鿿]{2,4}',v.text)
+                 and abs(v.bbox[0]+v.bbox[2]-x-r)<.32*w and .65*h<v.bbox[1]-y<1.5*h
+                 and .4*h<v.bbox[3]-v.bbox[1]<1.25*h and .38*w<v.bbox[2]-v.bbox[0]<=w]
+        if len(lower)!=1:
+            continue
+        bottom = lower[0]
+        if bottom.box_id in claimed:
+            continue
+        l,t,right,base = bottom.bbox
+        sw,sh = right-l,base-t
+        left,end = l-round(.14*sw),right+round(.14*sw)
+        above,below = y-round(.95*sh),y+round(.14*sh)
+        if left<0 or end>=image.width or above<0 or any(v not in (top,bottom) and
+                v.bbox[0]<end and v.bbox[2]>left and v.bbox[1]<below and v.bbox[3]>above for v in result):
+            continue
+        sample = np.asarray(image.crop((x,y,r,b)))
+        if np.median(np.ptp(sample,axis=2))<24:
+            continue
+        if attempts>=4:
+            break
+        attempts+=1
+        poly = np.float32([[left,above],[end,above],[end,below],[left,below]])
+        try:
+            views = source_views(image,[poly])
+            header = reader(views[0])
+            if not isinstance(header,str) or not re.fullmatch(r'[ぁ-ゖァ-ヺ一-鿿ー]{2,5}',header) or any(reader(v)!=header for v in views[1:]):
+                continue
+            crops = source_views(image,[poly,top.poly,bottom.poly])
+            whole = reader(crops[0])
+            if not isinstance(whole,str) or not whole.startswith(header+top.text) or any(reader(v)!=whole for v in crops[1:]):
+                continue
+            tail = whole[len(header+top.text):]
+            if tail!=bottom.text and not corrected_compound(top.text+bottom.text,top.text+tail):
+                continue
+            if tail!=bottom.text and any(reader(v)!=top.text+tail for v in source_views(image,[top.poly,bottom.poly])):
+                continue
+            rows = [corrected(next_id,0.,poly,header,''),
+                    corrected(top.box_id,top.confidence,top.poly,top.text,top.paddle_text,top),
+                    corrected(bottom.box_id,bottom.confidence,bottom.poly,tail,bottom.paddle_text,bottom)]
+            bind(rows,whole,crops,'horizontal')
+            result = [v for v in result if v not in (top,bottom)]+rows
+            claimed.update(v.box_id for v in rows)
+            next_id += 1
+        except READ_ERRORS:
+            continue
+    return result
+
+
 def forum_header(image, boxes, reader):
     """Read a navigation strip and its aligned account field separately."""
     from . import reader_geometry
@@ -983,6 +1049,75 @@ def possessive_column(image, parent, child, reader):
         return
 
 
+def annotated_note(image, group, singles, reader):
+    """Read a slanted aside where its first column was classified as furigana."""
+    from .masked_lines import bind, corrected, source_views
+    group = sorted(group,key=lambda v:-v.poly[:,0].mean())
+    if not all(1.4*(v.bbox[2]-v.bbox[0]) < v.bbox[3]-v.bbox[1] for v in group):
+        return
+    centers = [v.poly.mean(0) for v in group]
+    steps = [a[0]-b[0] for a,b in zip(centers,centers[1:])]
+    if min(steps)<=0 or max(steps)>2*min(steps) or max(c[1] for c in centers)-min(c[1] for c in centers)>max(steps):
+        return
+    last = centers[-1]
+    tails = [v for v in singles if v.confidence<.7 and len(v.text)==1 and
+             .4*min(steps)<last[0]-v.poly[:,0].mean()<1.5*max(steps) and abs(last[1]-v.poly[:,1].mean())<max(steps)]
+    if len(tails)!=1:
+        return
+    rows = [*group,tails[0]]
+    crops = source_views(image,[v.poly for v in rows])
+    whole = reader(crops[0])
+    punct = re.search(r'[!！?？]{1,4}$',whole) if isinstance(whole,str) else None
+    if not punct or any(reader(v)!=whole for v in crops[1:]):
+        return
+    words = []
+    for row in group:
+        chips = source_views(image,[row.poly])
+        word = reader(chips[0])
+        if (not isinstance(word,str) or not re.fullmatch('[ぁ-ゖァ-ヺ一-鿿ー]{2,12}',word)
+                or SequenceMatcher(None,word,row.text).ratio()<.38 or any(reader(v)!=word for v in chips[1:])):
+            return
+        words.append(word)
+    if ''.join(words)!=whole[:punct.start()]:
+        return
+    if not any(reader(v)==punct[0] for v in source_views(image,[tails[0].poly])):
+        return
+    parts = [corrected(v.box_id,v.confidence,v.poly,word,v.paddle_text,v)
+             for v,word in zip(rows,[*words,punct[0]])]
+    bind(parts,whole,crops,'vertical')
+    return rows,parts
+
+
+def fragmented_noun(image, particle, singles, reader):
+    """Recover two overlapping kanji detections plus their detached case particle."""
+    from .masked_lines import corrected, bind, source_views
+    if particle.text not in ('を','に','が','は') or particle.confidence<.85:
+        return
+    cx,cy = particle.poly.mean(0)
+    h = particle.bbox[3]-particle.bbox[1]
+    neighbors = [v for v in singles if re.fullmatch('[一-鿿]',v.text) and
+                 .30*h < v.poly[:,0].mean()-cx < 1.5*h and cy-1.8*h < v.poly[:,1].mean() < cy+.4*h]
+    if len(neighbors)!=2:
+        return
+    top,bottom = sorted(neighbors,key=lambda v:v.poly[:,1].mean())
+    if (not .45*h<bottom.poly[:,1].mean()-top.poly[:,1].mean()<1.45*h
+            or abs(top.poly[:,0].mean()-bottom.poly[:,0].mean())>.55*h):
+        return
+    rows = [top,bottom,particle]
+    crops = source_views(image,[v.poly for v in rows])
+    whole = reader(crops[0])
+    if (not isinstance(whole,str) or not whole.startswith(top.text+bottom.text) or not whole.endswith(particle.text)
+            or not re.fullmatch('[一-鿿]{3,4}',whole[:-1]) or reader(crops[2])!=whole):
+        return
+    if (any(reader(v)!=whole[:-1] for v in source_views(image,[top.poly,bottom.poly])[1:])
+            or any(reader(v)!=particle.text for v in source_views(image,[particle.poly]))):
+        return
+    parts = [corrected(v.box_id,v.confidence,v.poly,word,v.paddle_text,v)
+             for v,word in zip(rows,[top.text,whole[1:-1],particle.text])]
+    bind(parts,whole,crops,'vertical')
+    return rows,parts
+
+
 def join_slanted_columns(engine,image,reader):
     boxes = engine.raw_detections[0]
     if not boxes or len(boxes)>256:
@@ -995,7 +1130,34 @@ def join_slanted_columns(engine,image,reader):
         dx,dy = base.mean(0)-top.mean(0)
         return dx/max(dy,1)
     changed = False
+    from .masked_lines import READ_ERRORS
+    def accept(result):
+        before,after = result
+        for a,b in zip(before,after):
+            boxes[boxes.index(a)] = b
+            by_id[b.box_id] = b
+            singles.discard(b.box_id)
+
+    for particle in [by_id[k] for k in singles if by_id[k].text in ('を','に','が','は')][:6]:
+        try:
+            result = fragmented_noun(image,particle,[by_id[k] for k in singles],reader)
+        except READ_ERRORS:
+            continue
+        if result:
+            accept(result)
+            changed = True
     for p in proposals:
+        if len(p.main_ids)==2 and len(p.annotation_ids)==1:
+            members = [by_id[k] for k in p.member_ids]
+            if all(.09<abs(tilt(v))<.6 for v in members):
+                try:
+                    result = annotated_note(image,members,[by_id[k] for k in singles],reader)
+                except READ_ERRORS:
+                    result = None
+                if result:
+                    accept(result)
+                    changed = True
+                    continue
         if len(p.main_ids)==1 and len(p.annotation_ids)==1 and len(p.member_ids)==2:
             parent,child = by_id[p.main_ids[0]],by_id[p.annotation_ids[0]]
             if (child.confidence<.82 and 2<=len(child.text)<=5

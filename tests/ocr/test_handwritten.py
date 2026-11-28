@@ -262,6 +262,12 @@ class HandwrittenTests(unittest.TestCase):
         self.assertEqual(run([],'見ていると').text,'見ていると')
         self.assertIsNone(run([],'見ているよ'))
         self.assertIsNone(run([region(2,'別',.99,80,129,140,159)],'見ていると'))
+        parent=region(1,'心よ',.68,50,40,170,120)
+        def read(values):
+            return handwritten.clipped_handwriting(image,parent,[parent],Mock(side_effect=values))
+        self.assertEqual(read(['ひょ','い','ひょい','ひょい','ひょい']).text,'ひょい')
+        self.assertIsNone(read(['ひょ','い','ひょい','ひょい','ひよい']))
+        self.assertIsNone(read(['かけ']))
 
     def test_neighboring_confident_reading_prevents_cluster_retry(self):
         blank = region(1,'',0,110,330,166,415)

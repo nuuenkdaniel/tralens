@@ -24,6 +24,12 @@ DOWNLOAD_PATH = re.compile(rf"/api/library/(?:books/{ID}/(?:original|translated|
 
 
 class ReaderHandler(Handler):
+    def end_headers(self):
+        if getattr(self, "renewed_cookie", None):
+            self.send_header("Set-Cookie", self.renewed_cookie)
+            self.renewed_cookie = None
+        super().end_headers()
+
     def request_token(self):
         return hmac.digest(self.server.app.token.encode(), self.server.accounts.session_id(self), "sha256").hex()
 
@@ -39,16 +45,19 @@ class ReaderHandler(Handler):
             if path == "/healthz":
                 return self.json(200, {"status": "ok"})
             if path == "/privacy":
-                return self.respond(200, (PROJECT / "PRIVACY.md").read_bytes(), "text/plain; charset=utf-8")
+                return self.respond(200, (PROJECT / "PRIVACY.txt").read_bytes(), "text/plain; charset=utf-8")
             if path in (
                 "/",
                 "/reader.js",
+                "/offline.js",
                 "/reader.css",
             ):
                 file = WEB / ("index.html" if path == "/" else path[1:])
                 self.respond(200, file.read_bytes(), mimetypes.guess_type(file.name)[0])
             elif path == "/api/auth/settings":
-                self.json(200, {"registration": self.server.accounts.registration})
+                accounts = self.server.accounts
+                self.json(200, {"registration": accounts.registration, "setup_required": accounts.setup_pending(),
+                                "setup_link_required": bool(accounts.origin)})
             else:
                 ticket = self.headers.get("X-Tralens-Download")
                 if ticket and DOWNLOAD_PATH.fullmatch(path):
@@ -64,7 +73,7 @@ class ReaderHandler(Handler):
             if path == "/api/config":
                 config = self.server.app.public_config()
                 config['owner_mode'] = bool(self.server.owner)
-                config['username'] = self.account
+                config['username'] = self.server.accounts.owner_username() if self.account == 'owner' else self.account
                 config['token'] = self.request_token()
                 if self.account != "owner":
                     config = {k:config[k] for k in ("token", "username", "model", "render_enabled", "max_upload_bytes",
@@ -88,14 +97,18 @@ class ReaderHandler(Handler):
                     (STATIC / "index.html").read_bytes(),
                     "text/html; charset=utf-8",
                 )
+            elif match := re.fullmatch(rf"/api/library/imports/({ID})", path):
+                self.json(200, self.server.library.import_result(self.account, match[1]))
             elif path == "/api/library":
                 self.json(200, self.server.library.catalog(self.account))
             elif match := re.fullmatch(f"/api/library/pages/({ID})/transcript", path):
                 self.json(200, self.server.library.transcript(match[1], self.account))
             elif match := re.fullmatch(
-                f"/api/library/pages/({ID})/(original|translated)", path
+                f"/api/library/pages/({ID})/(original|translated)(/thumbnail)?", path
             ):
-                mime, data = self.server.library.image(*match.groups(), self.account)
+                page, variant, thumb = match.groups()
+                load = self.server.library.thumbnail if thumb else self.server.library.image
+                mime, data = load(page, variant, self.account)
                 self.respond(200, data, mime)
             elif match := re.fullmatch(
                 rf"/api/library/books/({ID})/(original|translated|both)\.zip", path
@@ -128,7 +141,7 @@ class ReaderHandler(Handler):
         path = urlsplit(self.path).path
         try:
             self.local_request()
-            paths = {"/api/auth/login": "login", "/api/auth/register": "register", "/api/auth/logout": "logout",
+            paths = {"/api/auth/setup": "setup", "/api/auth/login": "login", "/api/auth/register": "register", "/api/auth/logout": "logout",
                      "/api/owner/login": "owner", "/api/owner/logout": "logout"}
             if path in paths:
                 return self.server.accounts.handle(self, paths[path])
@@ -268,8 +281,9 @@ def create_reader_server(app, port, *, host, owner=None, registration=True):
     server.upload_slot = threading.BoundedSemaphore(1)
     server.app = app
     try:
+        fresh = not any(app.root.iterdir())
         server.library = Library(app)
-        server.accounts = Accounts(server.library, owner, registration)
+        server.accounts = Accounts(server.library, owner, registration, fresh=fresh)
     except BaseException:
         server.server_close()
         raise

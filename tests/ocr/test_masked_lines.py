@@ -14,6 +14,83 @@ def rectangle(x,y,w,h):
 
 
 class MaskedLinesTests(unittest.TestCase):
+    def test_detached_lettering_requires_separate_strokes_and_agreement(self):
+        from tralens.ocr.detached_kana import readings
+        probability = np.zeros((80, 80), np.uint8)
+        for top in (20, 29, 38):
+            probability[top:top+5, 25:40] = 220
+        page = Image.fromarray(255 - probability).convert('RGB')
+        def recover(words, polygons=()):
+            return list(readings(page, probability, polygons, Mock(side_effect=words)))
+
+        self.assertEqual(recover(['あれ', 'あれ', '', ''])[0][:2], ('あれ', (25, 20, 40, 43)))
+        self.assertFalse(recover(['あれ', 'それ']))
+        self.assertFalse(recover(['あれ', 'あれ', '', 'DATA']))
+        self.assertFalse(recover([], [rectangle(24, 19, 17, 25)]))
+        engine = SimpleNamespace(raw_detections=[[]], automatic_unit_proposals=[None],
+                                 image_path='/sample.png', ocr=Mock())
+        engine.ocr.predict.return_value = []
+        with patch.object(masked_lines, 'propose_page_from_boxes', return_value='rebuilt'):
+            masked_lines.discover(engine, page, Mock(side_effect=['あれ', 'あれ', '', '']), probability)
+        recovered, = engine.raw_detections[0]
+        self.assertEqual((recovered.box_id, recovered.text), (0, 'あれ'))
+        self.assertEqual(engine.automatic_unit_proposals, ['rebuilt'])
+        probability[38:] = 0
+        self.assertFalse(recover([]))
+
+    def test_detached_dot_must_be_below_the_hook_and_change_the_reading(self):
+        from PIL import ImageDraw
+        from tralens.ocr.detached_kana import terminal_dot
+        page = Image.new('RGB', (75, 85), 'white')
+        draw = ImageDraw.Draw(page)
+        draw.line((35, 30, 33, 48), fill='black', width=3)
+        draw.ellipse((32, 53, 34, 55), fill='black')
+        bounds = (15, 15, 41, 49)
+        self.assertEqual(terminal_dot(page, bounds, 'えっ', Mock(return_value='え？')),
+                         ('え?', (15, 15, 41, 56), (32, 53, 35, 56)))
+        self.assertIsNone(terminal_dot(page, bounds, 'えっ', Mock(side_effect=['え?', 'えっ'])))
+        draw.ellipse((23, 53, 25, 55), fill='black')
+        self.assertIsNone(terminal_dot(page, bounds, 'えっ', Mock()))
+
+    def test_sign_header_needs_local_and_whole_sign_agreement_and_an_empty_location(self):
+        from tralens.ocr.handwritten_lines import painted_sign_headers
+        page=Image.new('RGB',(200,160),(140,96,65))
+        top=Text_Box(1,.98,rectangle(66,72,64,28),'森の')
+        base=Text_Box(2,.98,rectangle(81,95,34,18),'入口')
+        boxes=[top,base]
+        whole='案内森の入口'
+        trial=painted_sign_headers(page,boxes,Mock(side_effect=['案内']*3+[whole]*3))
+        self.assertEqual([v.text for v in trial],['案内','森の','入口'])
+        self.assertEqual(trial[0].ocr_metadata['masked_passage']['ids'],[3,1,2])
+        self.assertEqual(painted_sign_headers(page,boxes,Mock(side_effect=['案内','注意'])),boxes)
+        occupied=[*boxes,Text_Box(3,.99,rectangle(80,54,30,16),'別館')]
+        self.assertEqual(painted_sign_headers(page,occupied,Mock(side_effect=AssertionError)),occupied)
+
+    def test_slanted_note_requires_the_punctuation_to_be_visible_in_isolation(self):
+        from tralens.ocr.handwritten_lines import annotated_note
+        page=Image.new('RGB',(220,120),'white')
+        columns=[Text_Box(i,.9,rectangle(x,20,25,64),word) for i,(x,word) in
+                 enumerate([(146,'そして'),(110,'学校'),(74,'に行く')])]
+        weak=Text_Box(3,.5,rectangle(39,20,22,64),'二')
+        whole='そして学校に行く!!'
+        reads=[whole]*3+[v.text for v in columns for _ in range(3)]
+        self.assertIsNone(annotated_note(page,columns,[weak],Mock(side_effect=reads+['い']*3)))
+        result=annotated_note(page,columns,[weak],Mock(side_effect=reads+['!!']))
+        self.assertEqual(result[1][0].ocr_metadata['masked_passage']['reading'],whole)
+        self.assertEqual(result[1][-1].text,'!!')
+
+    def test_handwritten_noun_preserves_the_separate_particle_and_rejects_a_disputed_ending(self):
+        from tralens.ocr.handwritten_lines import fragmented_noun
+        page=Image.new('RGB',(180,180),'white')
+        top=Text_Box(1,.95,rectangle(78,31,30,31),'美')
+        base=Text_Box(2,.75,rectangle(82,57,35,39),'術')
+        tail=Text_Box(3,.95,rectangle(55,73,22,36),'を')
+        boxes=[top,base,tail]
+        reads=['美術館を']*2+['美術館']*2+['を']*3
+        result=fragmented_noun(page,tail,boxes,Mock(side_effect=reads))
+        self.assertEqual([v.text for v in result[1]],['美','術館','を'])
+        self.assertIsNone(fragmented_noun(page,tail,boxes,Mock(side_effect=['美術館を','美術館で'])))
+
     def test_handwritten_repeat_needs_the_same_opening_beat_when_read_separately(self):
         from PIL import ImageDraw
         page=Image.new('RGB',(240,230),'white')

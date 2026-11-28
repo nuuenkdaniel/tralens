@@ -1,0 +1,25 @@
+name: Provision Android tools
+description: Set up the pinned toolchain for Tralens APK builds
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: '22'
+        package-manager-cache: false
+    - shell: bash
+      run: |
+        export JAVA_HOME="$JAVA_HOME_21_X64"
+        export GRADLE_HOME="$RUNNER_TEMP/gradle-8.11.1"
+        distribution="$GRADLE_HOME-bin.zip"
+        curl --fail --silent --show-error --location --retry 3 \
+          https://services.gradle.org/distributions/gradle-8.11.1-bin.zip \
+          --output "$distribution"
+        printf '%s  %s\n' \
+          f397b287023acdba1e9f6fc5ea72d22dd63669d59ed4a289a29b1a76eee151c6 \
+          "$distribution" | sha256sum --check
+        unzip -q "$distribution" -d "$RUNNER_TEMP"
+        if [[ ! -d "$ANDROID_HOME/platforms/android-35" || ! -d "$ANDROID_HOME/build-tools/35.0.0" ]]; then
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platforms;android-35' 'build-tools;35.0.0'
+        fi
+        frontend/android/provision
