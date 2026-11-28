@@ -424,7 +424,14 @@ const readingFields = [
     ],
   ],
 ];
-const field = ([key, label, choices]) => choicesField(key, choices, label);
+function field([key, label, choices]) {
+  return '<label class="field">' + esc(label) + '<select data-pref="' + key + '">' +
+    choices.map(([value, text, unavailable]) =>
+      '<option value="' + esc(value) + '"' + (prefs[key] === value ? ' selected' : '') +
+      (unavailable ? ' disabled' : '') + '>' + esc(text) +
+      (unavailable ? ' · unavailable' : '') + '</option>'
+    ).join('') + '</select></label>';
+}
 
 function preferences() {
   const translators = [
@@ -483,6 +490,15 @@ function preferences() {
     ' MiB of page images.</p><p class="hint">Reading preferences are saved on this device.</p></section></main>'
   );
 }
+function offlineButtonContent(id) {
+  const state = offline.progress(id);
+  if (!state) return icon("download") + "Save offline";
+  const {running, saved, total} = state;
+  if (saved === total) return icon("check") + "Saved offline";
+  if (!running) return icon("download") + "Resume · " + saved + "/" + total;
+  return '<span class="chapter-download">Downloading · ' + saved + '/' + total +
+    '<progress aria-label="Pages saved" value="' + saved + '" max="' + total + '"></progress></span>';
+}
 function detail(b) {
   const pages = pagesOf(b);
   return (
@@ -495,32 +511,32 @@ function detail(b) {
     esc(b.title) +
     '</h1><p class="meta">' +
     b.chapters.length +
-    " chapters · " +
+    (b.chapters.length === 1 ? " chapter · " : " chapters · ") +
     pages.length +
-    ' pages</p><div class="actions"><a class="btn primary" href="' +
+    (pages.length === 1 ? " page" : " pages") +
+    '</p><div class="actions"><a class="btn primary" href="' +
     readURL(b, lastPage(b)) +
     '">' +
     icon("play") +
     (b.position ? "Continue reading" : "Start reading") +
     "</a>" +
-    btn("download-book", "Export ZIP", "", "download") +
+    ib("download-book", "Export ZIP", "download") +
     ib("book-menu", "Manga actions", "more") +
     '</div><div class="line"><h2>Chapters</h2>' +
     btn("add-chapter", "Add chapter", "", "plus") +
     "</div>" +
     b.chapters
       .map(
-        (c, i) =>
-          '<a class="chapter btn" href="' +
+        (c) => {
+          const status = statusText(c.pages);
+          return '<article class="chapter-card"><a class="chapter" href="' +
           readURL(b, c.pages.find((p) => p.id === c.position) || c.pages[0]) +
           '"><span>' +
           esc(c.title) +
           "</span><small>" +
-          c.pages.length +
-          " pages " +
           esc(
             [
-              statusText(c.pages),
+              c.pages.length + (c.pages.length === 1 ? " page" : " pages"),
               c.position
                 ? c.pages.at(-1).id === c.position
                   ? "Read"
@@ -531,13 +547,16 @@ function detail(b) {
               .filter(Boolean)
               .join(" · "),
           ) +
-          "</small></a>" + '<button class="btn" data-action="chapter-language" data-id="' + c.id +
-          '">Language · ' + sourceLanguages[c.source_language || "ja"] +
+          "</small>" + (status ? '<small>' + esc(status) + "</small>" : "") +
+          '</a><div class="chapter-tools"><button data-action="chapter-language" data-id="' + c.id +
+          '" title="Change chapter language">' + icon("lang") + sourceLanguages[c.source_language || "ja"] +
           (c.source_language === "auto" && c.detected_language ? " (" + sourceLanguages[c.detected_language] + (c.language_uncertain ? ", uncertain" : "") + ")" : "") +
-          '</button>' + (offline ? '<button class="btn" data-action="save-offline" data-id="' + c.id +
-            '">' + icon("download") + 'Save offline</button>' : "") + "<details><summary>Pages in " +
-          esc(c.title) +
-          '</summary><div class="pages" data-chapter="' + c.id + '"></div></details>',
+          '</button>' + (offline ? '<button data-action="save-offline" data-id="' + c.id +
+            '">' + offlineButtonContent(c.id) + '</button>' : "") +
+          '</div><details class="chapter-pages"><summary aria-label="Browse pages in ' + esc(c.title) + '">' +
+          icon("page") + "Browse pages" + icon("chev-d") +
+          '</summary><div class="pages" data-chapter="' + c.id + '"></div></details></article>';
+        },
       )
       .join("") +
     "</div></main>"
@@ -551,7 +570,7 @@ root.addEventListener("toggle", (event) => {
   const chapter = book?.chapters.find(c => c.id === list.dataset.chapter);
   if (chapter) list.innerHTML = chapter.pages.map((p, i) =>
     '<a href="' + readURL(book, p) + '"><img loading="lazy" src="' + thumbnail(p) +
-    '" alt="Page ' + (i + 1) + '">' + (i + 1) + '</a>').join("");
+    '" alt="">Page ' + (i + 1) + '</a>').join("");
 }, true);
 function pageImage(p, mode) {
   const columns = prefs.layout === "spread" || (view === "compare" && prefs.comparison === "side") ? 2 : 1;
@@ -789,7 +808,7 @@ function render() {
     oldScroll = oldCanvas?.scrollTop,
     same = lastRender === location.hash;
   const expanded = same && screen === "book" ? [...root.querySelectorAll("details[open] .pages")].map(el => el.dataset.chapter) : [];
-  const hidden = same && $(".reader")?.classList.contains("clean");
+  const hidden = !oldCanvas || $(".reader").classList.contains("clean");
   clearTimeout(hideTimer);
   if (reading) mountReader(reader(book, chapter, page));
   else {
@@ -1222,8 +1241,6 @@ async function openReading(pageId, point) {
   const index = point ? lines.findIndex(({box: [left, top, right, bottom]}) =>
     point.x >= left && point.x <= right && point.y >= top && point.y <= bottom) : -1;
   if (point && index < 0) {
-    if ($(".reader").classList.contains("clean")) showChrome();
-    else $(".reader").classList.add("clean");
     return;
   }
   modal("Page text", '<ol class="reading-text">' + lines.map(({box, text}) => {
@@ -1375,6 +1392,7 @@ document.addEventListener("click", (e) => {
   }
   const a = e.target.closest("[data-action]");
   if (a) {
+    if (a.matches(".edge")) a.closest(".reader").classList.add("clean");
     act(a.dataset.action, a.dataset.id).catch((err) => toast(err.message));
     return;
   }
@@ -1389,20 +1407,28 @@ document.addEventListener("click", (e) => {
     }
     return;
   }
+  const canvas = e.target.closest(".canvas");
+  if (!canvas || e.target.closest("input")) return;
+  const reader = canvas.closest(".reader");
+  const bounds = reader.getBoundingClientRect();
+  const y = (e.clientY - bounds.top) / bounds.height;
+  if (y < 0.2 || y > 0.8) {
+    if (reader.classList.contains("clean")) showChrome();
+    else reader.classList.add("clean");
+    return;
+  }
+  const x = (e.clientX - bounds.left) / bounds.width;
   const original = e.target.closest("[data-reading-fallback] .page-image");
-  if (original) {
-    const bounds = original.getBoundingClientRect();
+  if (original && x > 0.25 && x < 0.75) {
+    const image = original.getBoundingClientRect();
     openReading(original.parentElement.dataset.page, {
-      x: (e.clientX - bounds.left) * original.naturalWidth / bounds.width,
-      y: (e.clientY - bounds.top) * original.naturalHeight / bounds.height,
+      x: (e.clientX - image.left) * original.naturalWidth / image.width,
+      y: (e.clientY - image.top) * original.naturalHeight / image.height,
     }).catch(err => toast(err.message));
     return;
   }
-  if (e.target.closest(".canvas") && !e.target.closest("input,.wipe")) {
-    const r = $(".reader");
-    if (r.classList.contains("clean")) showChrome();
-    else r.classList.add("clean");
-  }
+  reader.classList.add("clean");
+  turn((x < 0.5) === (prefs.direction === "rtl") ? 1 : -1);
 });
 document.addEventListener("input", (e) => {
   if (e.target.id === "search") {
@@ -1523,9 +1549,7 @@ document.addEventListener("change", async (e) => {
     if (el.dataset.pref === "translator" && el.value !== "local" && config.frontier_provider === "chatgpt" &&
         !(config.chatgpt_connected && config.chatgpt_models?.includes(el.value))) {
       const requested = el.value;
-      const previous = el.closest("fieldset").querySelector('input[value="' + CSS.escape(prefs.translator) + '"]');
-      if (previous) previous.checked = true;
-      else el.checked = false;
+      el.value = prefs.translator;
       if (config.chatgpt_connected) {
         let result;
         try { result = await api("chatgpt/models"); } catch (err) { toast(err.message); return; }
@@ -1544,7 +1568,7 @@ document.addEventListener("change", async (e) => {
     save();
     render();
     if (restoreFocus && !el.isConnected)
-      root.querySelector('input[data-pref="' + el.dataset.pref + '"]:checked')?.focus({preventScroll:true});
+      root.querySelector('select[data-pref="' + el.dataset.pref + '"], input[data-pref="' + el.dataset.pref + '"]:checked')?.focus({preventScroll:true});
   }
   if (el.id === "scrub") {
     const { book, chapter } = current();
@@ -1786,7 +1810,7 @@ document.addEventListener(
   "touchstart",
   (e) => {
     touch =
-      e.target.closest(".canvas") && !e.target.closest("input,.wipe")
+      e.touches.length === 1 && e.target.closest(".canvas") && !e.target.closest("input,.wipe")
         ? e.touches[0]
         : null;
   },
@@ -1799,10 +1823,13 @@ document.addEventListener(
     const dx = e.changedTouches[0].clientX - touch.clientX,
       dy = e.changedTouches[0].clientY - touch.clientY;
     touch = null;
-    if (Math.abs(dx) > 65 && Math.abs(dx) > Math.abs(dy) * 1.6)
+    if (Math.abs(dx) > 65 && Math.abs(dx) > Math.abs(dy) * 1.6) {
+      if (e.cancelable) e.preventDefault();
+      $(".reader")?.classList.add("clean");
       turn(dx > 0 === (prefs.direction === "rtl") ? 1 : -1);
+    }
   },
-  { passive: true },
+  { passive: false },
 );
 addEventListener("resize", () => { if (config && route()[0] === "read" && !sheet.open) render(); });
 addEventListener("tralens-back", event => {
@@ -1859,6 +1886,10 @@ function bindDownloads(user) {
   offlineUser = user;
   offline = user ? offlineModule.downloads(user, {
     escape: esc, notify: toast, direction: () => prefs.direction,
+    progressChanged(id) {
+      const button = root.querySelector('[data-action="save-offline"][data-id="' + CSS.escape(id) + '"]');
+      if (button && offline) button.innerHTML = offlineButtonContent(id);
+    },
     unauthorized: () => { config = null; bindDownloads(null); showAccountForm(); }
   }) : null;
 }
@@ -2127,14 +2158,20 @@ function dragDivider(e) {
   $("#wipe").value = value;
   setWipe(value);
 }
+let wipeStart;
 document.addEventListener("pointerdown", (e) => {
   const area = e.target.closest(".wipe");
-  if (area && $(".reader").classList.contains("clean")) showChrome();
-  if (area && !e.target.matches("input")) {
-    area.setPointerCapture(e.pointerId);
-    dragDivider(e);
-  }
+  wipeStart = area && !e.target.matches("input") ? {area, x: e.clientX, dragging: false} : null;
 });
 document.addEventListener("pointermove", (e) => {
-  if (e.target.closest(".wipe")?.hasPointerCapture(e.pointerId)) dragDivider(e);
+  if (!wipeStart || !e.buttons || !e.target.closest(".wipe")) return;
+  if (!wipeStart.dragging && Math.abs(e.clientX - wipeStart.x) < 8) return;
+  wipeStart.dragging = true;
+  wipeStart.area.setPointerCapture(e.pointerId);
+  dragDivider(e);
 });
+document.addEventListener("pointercancel", () => { wipeStart = null; });
+document.addEventListener("click", (e) => {
+  if (wipeStart?.dragging && wipeStart.area.contains(e.target)) e.stopImmediatePropagation();
+  wipeStart = null;
+}, true);

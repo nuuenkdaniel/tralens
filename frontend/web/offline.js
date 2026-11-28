@@ -77,25 +77,40 @@ export class OfflineLibrary {
 }
 
 // A separate dialog keeps offline navigation independent of online jobs, polling and reading position.
-export function downloads(username, {escape, notify, direction, unauthorized}) {
+export function downloads(username, {escape, notify, direction, unauthorized, progressChanged}) {
   const store = new OfflineLibrary(username);
   const native = window.Capacitor?.isPluginAvailable?.("ReaderDownloads") ? window.Capacitor.Plugins.ReaderDownloads : null;
   const scope = {user: username, origin: location.origin};
   let timer, previousRows = "";
   async function records() {
-    const rows = await store.list();
-    if (!native || !rows.length) return rows;
-    const {jobs} = await native.status(scope);
-    return rows.map(row => {
-      const job = jobs[row.generation];
-      return job ? {...row, localSaved: row.saved, saved: Math.max(row.saved, job.saved), state: job.state, error: job.error} : row;
-    });
+    const read = ++reads;
+    let rows = await store.list();
+    if (native && rows.length) {
+      const {jobs} = await native.status(scope);
+      rows = rows.map(row => {
+        const job = jobs[row.generation];
+        return job ? {...row, localSaved: row.saved, saved: Math.max(row.saved, job.saved), state: job.state, error: job.error} : row;
+      });
+    }
+    // A newer read owns the buttons. The web download loop reports its own chapter.
+    if (read === reads) for (const row of rows)
+      if (row.id !== saving) remember(row.id, row.saved, row.urls.length, row.state === "queued");
+    return rows;
   }
   const dialog = document.createElement("dialog");
   dialog.className = "offline-library";
   dialog.setAttribute("aria-label", "Downloads");
   document.body.append(dialog);
   let controller, saving, active, objectURL, serial = 0, disposed = false, feedback = "";
+  const progress = new Map();
+  let reads = 0, startingUntil = 0;
+  function remember(id, saved, total, running = saving === id) {
+    if (disposed) return;
+    const old = progress.get(id);
+    if (old?.saved === saved && old.total === total && old.running === running) return;
+    progress.set(id, {saved, total, running});
+    progressChanged(id);
+  }
   const button = (action, label) => '<button class="btn" data-local="' + action + '">' + label + '</button>';
   function releaseImage() {
     if (objectURL?.startsWith("blob:")) URL.revokeObjectURL(objectURL);
@@ -103,6 +118,13 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
   }
   function errorMessage(err) {
     return err.name === "QuotaExceededError" ? "Device storage is full. Remove a download and resume." : err.message;
+  }
+  // Load saved progress now, and keep following Android downloads that are still running.
+  const restored = records().then(schedule).catch(() => {});
+  async function refresh() {
+    if (disposed) return;
+    if (dialog.open && !active) return list();
+    schedule(await records());
   }
   async function list() {
     const version = ++serial;
@@ -138,18 +160,20 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
   }
   function schedule(rows) {
     clearTimeout(timer);
-    if (native && !document.hidden && dialog.open && rows.some(r => r.saved < r.urls.length))
+    // Android reports "paused" until its service has started, so keep checking briefly after a start.
+    if (native && !disposed && !document.hidden && rows.some(r => r.saved < r.urls.length &&
+        (dialog.open || r.state === "queued" || Date.now() < startingUntil)))
       timer = setTimeout(() => sync().catch(err => notify(errorMessage(err))), 1200);
   }
   async function sync() {
-    if (!native || disposed || !dialog.open || document.hidden) return;
+    if (!native || disposed || document.hidden) return;
     const version = serial;
     const rows = await records();
-    if (version !== serial || disposed || !dialog.open) return;
+    if (version !== serial || disposed) return;
     if (active) {
       const row = rows.find(r => r.generation === active.generation);
       if (row) updateTotal(row.saved);
-    } else if (JSON.stringify(rows) !== previousRows) return list();
+    } else if (dialog.open && JSON.stringify(rows) !== previousRows) return list();
     schedule(rows);
   }
   function visibility() {
@@ -193,25 +217,31 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
     }
   }
   async function save(record) {
+    await restored;
+    if (disposed) return;
+    const previous = progress.get(record.id);
+    if (controller || previous?.running || (previous && previous.saved === previous.total)) { await list(); return; }
     if (native) {
       navigator.storage?.persist?.().catch(() => {});
       feedback = "";
       const row = await store.begin(record);
       if (row.saved < row.urls.length) {
         await native.start({...scope, generation: row.generation, title: row.title, urls: row.urls, offset: row.saved});
+        startingUntil = Date.now() + 5000;
       }
-      if (!disposed) await list();
+      await refresh();
       return;
     }
-    if (controller) { await list(); return; }
     const abort = new AbortController();
     feedback = "";
     controller = abort;
     saving = record.id;
+    remember(record.id, previous?.saved ?? 0, previous?.total ?? record.urls.length);
     try {
       navigator.storage?.persist?.().catch(() => {});
       const row = await store.begin(record);
-      await list();
+      remember(row.id, row.saved, row.urls.length);
+      if (dialog.open && !active) await list();
       for (let i = row.saved; i < row.urls.length; i++) {
         const response = await fetch(row.urls[i], {signal: abort.signal, redirect: "error"});
         if (response.status === 401) { unauthorized(); return; }
@@ -220,6 +250,7 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
         if (!blob.size) throw Error("Empty page. Resume to try again.");
         abort.signal.throwIfAborted();
         await store.append(row, i, blob);
+        remember(row.id, i + 1, row.urls.length);
         const status = dialog.querySelector('[data-chapter-id="' + row.id + '"] [role=status]');
         if (status) {
           status.textContent = (i+1) + " of " + row.urls.length + " pages saved";
@@ -235,6 +266,8 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
       }
     } finally {
       controller = saving = null;
+      const last = progress.get(record.id);
+      if (last) remember(record.id, last.saved, last.total);
       if (!disposed && dialog.open && !active) await list();
     }
   }
@@ -249,7 +282,7 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
     return true;
   }
   dialog.oncancel = e => { e.preventDefault(); back(); };
-  dialog.onclose = () => { if (location.hash === "#downloads") history.replaceState(null, "", "#library"); clearTimeout(timer); ++serial; active = null; releaseImage(); };
+  dialog.onclose = () => { if (location.hash === "#downloads") history.replaceState(null, "", "#library"); clearTimeout(timer); ++serial; active = null; releaseImage(); sync().catch(err => notify(errorMessage(err))); };
   dialog.onchange = e => { if (active && e.target.matches('input[type="range"]')) read(active.id, Number(e.target.value) - 1).catch(err => notify(errorMessage(err))); };
   dialog.onkeydown = e => {
     if (!active || e.target.matches('input[type="range"]')) return;
@@ -283,14 +316,19 @@ export function downloads(username, {escape, notify, direction, unauthorized}) {
         const row = (await store.list()).find(r => r.id === id);
         if (native && row) await native.change({...scope, generation: row.generation, remove: cmd === "remove"});
         if (cmd === "pause") controller?.abort();
-        if (cmd === "remove") await store.remove(id);
+        if (cmd === "remove") {
+          await store.remove(id);
+          ++reads;
+          progress.delete(id);
+          if (!disposed) progressChanged(id);
+        }
         feedback = "";
         await list();
       }
       if (cmd === "resume") { const row = (await records()).find(r => r.id === id); if (row) await save(row); }
     } catch (err) { notify(errorMessage(err)); }
   };
-  return {list, save, back, isOpen: () => dialog.open,
+  return {list, save, back, progress: id => progress.get(id), isOpen: () => dialog.open,
     hasSaved: async () => (await store.list()).length > 0,
     dispose() { document.removeEventListener("visibilitychange", visibility); clearTimeout(timer); disposed = true; ++serial; controller?.abort(); dialog.remove(); releaseImage(); store.database.then(db => db.close(), () => {}); }};
 }
