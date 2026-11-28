@@ -47,7 +47,7 @@ def face_metadata(data):
 
 def resolve_style(style, face):
     check(type(style) is dict, 'style object required')
-    allowed = {'preset', 'min_size', 'max_size', 'fill', 'outline_fill', 'outline', 'leading', 'align', 'rotation'}
+    allowed = {'preset', 'min_size', 'max_size', 'fill', 'outline_fill', 'outline', 'leading', 'align', 'rotation', 'readability_floor'}
     check(set(style) <= allowed, 'unknown style control')
     preset = style.get('preset', 'legacy')
     check(type(preset) is str and (preset == 'legacy' or preset in PRESETS), 'unknown explicit role preset')
@@ -57,6 +57,11 @@ def resolve_style(style, face):
     for key, lo, hi in (('min_size', 8, 144), ('max_size', 8, 144), ('outline', 0, 8)):
         check(type(base[key]) is int and lo <= base[key] <= hi, 'bounded integer '+key)
     check(base['min_size'] <= base['max_size'], 'ordered size bounds required')
+    if 'readability_floor' in base:
+        floor = base['readability_floor']
+        check(type(floor) is int and 8 <= floor <= 144, 'bounded integer readability_floor')
+        base['min_size'] = max(base['min_size'], floor)
+        base['max_size'] = max(base['max_size'], floor)
     for key, lo, hi in (('leading', 0, 1), ('rotation', -20, 20)):
         check(type(base[key]) in (int, float) and math.isfinite(base[key]) and lo <= base[key] <= hi,
               'bounded finite '+key)

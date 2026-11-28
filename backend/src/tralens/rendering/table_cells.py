@@ -8,19 +8,19 @@ from ..ocr.table_rows import interior, tab_interiors, title_surface
 from . import natural
 
 
-def lettering(target, font_data, width, height):
+def lettering(target, font_data, width, height, minimum=10):
     """Choose the largest readable fit, allowing one break at a word boundary."""
     if not 0<len(target)<=120 or '\n' in target:
         return
     words = target.split(' ')
     lines = [[target]] + [[' '.join(words[:i]),' '.join(words[i:])] for i in range(1,len(words))]
-    for size in range(min(28,height+1),9,-1):
+    for size in range(min(max(28,minimum),height+1),minimum-1,-1):
         font = ImageFont.truetype(BytesIO(font_data),size)
         for attempt in lines:
             boxes = [font.getbbox(v) for v in attempt]
             w = max(rr-l for l,t,rr,bb in boxes)
             h = sum(bb-t for l,t,rr,bb in boxes)+len(attempt)-1
-            if not (0<w<=width*1.23 and 0<h<=height):
+            if not (0<w<=width*min(1.23,size/minimum) and 0<h<=height):
                 continue
             letters = Image.new('L',(w,h))
             offset = 0
@@ -124,7 +124,7 @@ def checklist_line(clean, polygon, existing, probability):
     return (x,y,r,b),erase,forbidden,(xx.min(),xx.max(),yy.min(),yy.max())
 
 
-def place_checklist_lines(clean,text,erase,layout,rows,by_id,existing,font_resolver,probability):
+def place_checklist_lines(clean,text,erase,layout,rows,by_id,existing,font_resolver,probability,minimum):
     headings = [np.asarray(d['polygon']) for d in by_id.values() if d.get('ocr_metadata',{}).get('checkbox_heading')]
     if not headings or probability is None:
         return False
@@ -152,7 +152,7 @@ def place_checklist_lines(clean,text,erase,layout,rows,by_id,existing,font_resol
         except ValueError:
             continue
         for height in range(bottom-top+1,9,-1):
-            fit = lettering(binding['text'],font,right-left+1,height)
+            fit = lettering(binding['text'],font,right-left+1,height,minimum)
             if not fit:
                 continue
             glyphs,size,lines = fit
@@ -177,7 +177,7 @@ def place_checklist_lines(clean,text,erase,layout,rows,by_id,existing,font_resol
     return changed
 
 
-def place(rgb, clean, text, erase, layout, rows, proposals, detections, font_resolver, *, probability=None):
+def place(rgb, clean, text, erase, layout, rows, proposals, detections, font_resolver, *, probability=None, minimum=10):
     candidates = [row for row in rows if row['status']=='skipped' and row.get('binding')
                   and row.get('reason_code') not in ('uncorroborated_source','evaluation_cap','runtime_locality',
                         'alpha_containment','erasure_obstacle','typography_containment','replacement_unchanged_text')
@@ -192,7 +192,7 @@ def place(rgb, clean, text, erase, layout, rows, proposals, detections, font_res
     existing = np.asarray(text.getchannel('A'))!=0
     by_id = {v['source_id']:v for v in detections}
     outlines = {v['source_id']: np.asarray(v['polygon']) for v in detections}
-    any_placed = place_checklist_lines(clean,text,erase,layout,rows,by_id,existing,font_resolver,probability)
+    any_placed = place_checklist_lines(clean,text,erase,layout,rows,by_id,existing,font_resolver,probability,minimum)
     for row in candidates:
         detection = by_id[row['binding']['member_ids'][0]]
         strip = detection.get('ocr_metadata',{}).get('tab_strip')
@@ -255,7 +255,7 @@ def place(rgb, clean, text, erase, layout, rows, proposals, detections, font_res
         # Prefer the unobstructed span. Ink at the far edge of a row can
         # also fall in the blank space above or between English letters.
         for span in dict.fromkeys((width,r-x)):
-            fit = lettering(target,font_data,span-1,height)
+            fit = lettering(target,font_data,span-1,height,minimum)
             if fit is None:
                 continue
             letters,size,lines = fit

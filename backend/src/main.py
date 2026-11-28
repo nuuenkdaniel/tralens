@@ -432,7 +432,7 @@ def crop_reader_refiner(model_path, *, ink_column_groups=False, ink_boundary_gro
 
 
 @serialized
-def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28, max_title_size=None,
+def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28, max_title_size=None, enforce_min_size=False,
                  max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort',
                  replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', quality_reread=False,
                  reread_model='qwen3.8:latest', manga_reread_model=None, source_localization=False,
@@ -622,6 +622,8 @@ def run_pipeline(image, output, *, fonts, font_id=None, min_size=16, max_size=28
                 persist()
                 render_preview = output/'preview/preview.json'
                 render_options = dict(rendering_options)
+                if enforce_min_size:
+                    render_options['enforce_min_size'] = True
                 if max_title_size is not None:
                     render_options['max_title_size'] = max_title_size
                 if page_mask is not None:

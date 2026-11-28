@@ -181,10 +181,12 @@ def execute_job(config, job):
                 kwargs['timeout'] = min(300, config.job_seconds)
             from PIL import Image
             with Image.open(job['image']) as page:
-                phone_size = min(144, max(16, math.ceil(page.width * 12 / 390)))
-            # Dense balloons need the option to fit smaller type. The reader already
-            # measures the actual lettering and offers a zoomable English transcript.
-            kwargs.update(max_title_size=144, min_size=max(12, phone_size // 2), max_size=min(144, max(28, math.ceil(phone_size * 1.3))))
+                page_width = page.width
+            phone_size = min(144, max(16, math.ceil(page_width * 12 / 390)))
+            # Keep English readable when the page is fitted to a phone's width.
+            minimum = min(144, max(12, math.ceil(page_width * 10 / 390)))
+            kwargs.update(max_title_size=144, min_size=minimum, enforce_min_size=True,
+                          max_size=min(144, max(28, math.ceil(phone_size * 1.3))))
         model_configs = {'lama': config.reconstruction_config, 'sdxl': config.sdxl_config}
         reconstruction = settings.get('reconstruction_policy', 'classical')
         return run_pipeline(job['image'], job['directory']/'run', fonts=config.fonts,

@@ -367,7 +367,7 @@ def derive_plan(rgb, detections, member_ids, *, context=None):
 
 def implementation_hash():
     return n.revision({name: n.digest(n.read_explicit(Path(__file__).parent.resolve()/name, 256*1024))
-                       for name in ('automatic.py', 'natural.py', 'font_faces.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'source_support.py', 'source_extents.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'printed_contours.py', 'outlined_sound_cleanup.py', 'table_cells.py', 'repeated_strokes.py', '../ocr/table_rows.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/crop_readings.py', '../ocr/upright_latin.py', '../ocr/sound_readings.py', '../ocr/outlined_sounds.py', '../ocr/handwritten.py', '../ocr/handwritten_lines.py', '../ocr/repeated_effects.py', '../ocr/masked_lines.py', '../ocr/detached_kana.py', '../ocr/sideways_sound.py', '../ocr/display_readings.py', '../ocr/ink_groups.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
+                       for name in ('automatic.py', 'natural.py', 'font_faces.py', 'styles.py', 'preparation.py', 'review.py', 'typography.py', 'restoration.py', 'segmentation.py', 'source_support.py', 'source_extents.py', 'best_effort.py', 'replacement_confidence.py', 'layout_enclosures.py', 'localized_strokes.py', 'localization_requests.py', 'visible_translations.py', 'aggressive.py', 'printed_contours.py', 'outlined_sound_cleanup.py', 'table_cells.py', 'compact_lettering.py', 'repeated_strokes.py', '../ocr/table_rows.py', 'replacement.py', 'reconstruction.py', 'reconstruction_worker.py', '../translation/coverage.py', '../translation/context.py', '../translation/contracts.py', '../ocr/manga_dialogue.py', '../ocr/crop_readings.py', '../ocr/upright_latin.py', '../ocr/sound_readings.py', '../ocr/outlined_sounds.py', '../ocr/handwritten.py', '../ocr/handwritten_lines.py', '../ocr/repeated_effects.py', '../ocr/masked_lines.py', '../ocr/detached_kana.py', '../ocr/sideways_sound.py', '../ocr/display_readings.py', '../ocr/ink_groups.py', '../ocr/quality_reread.py', '../ocr/quality_lines.py', '../ocr/quality_groups.py', '../ocr/source_localization.py')})
 
 
 def _report_html(report):
@@ -518,7 +518,7 @@ def preflight_automatic(*, image, fonts, font_id=None, min_size=16, max_size=28,
     return checked
 
 
-def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_title_size=None, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', plan_localization=False, visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical', reconstruction_config=None, prepared_text_mask=None):
+def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, max_size=28, max_title_size=None, enforce_min_size=False, max_units=None, background_method='auto', text_mask_model=None, render_policy='best-effort', replacement_policy='all', min_ocr_confidence=None, layout_policy='source-local', cleanup_policy='native', plan_localization=False, visibility_policy='replacement-only', removal_policy='legacy', reconstruction_policy='classical', reconstruction_config=None, prepared_text_mask=None):
     """All current strict translated candidates, with explicit machine skip states."""
     from . import aggressive, reconstruction, visible_translations
     confidence_settings, reconstruction_spec = _render_policies(
@@ -555,6 +555,8 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
     from .font_faces import ApprovedFaces, handwritten_columns
     faces = ApprovedFaces(fonts_doc, font_id)
     style = {'min_size': min_size, 'max_size': max_size, 'outline': 0}
+    if enforce_min_size:
+        style['readability_floor'] = min_size
     candidates = preview_doc['ocr'].get('automatic_recognition_results', [])
     units = n.automatic_units(preview_doc['ocr']['batches'][0], candidates[0] if candidates else ()) if raw else ()
     from ..ocr.crop_readings import confirms_raw
@@ -1307,7 +1309,7 @@ def run_automatic(*, preview, image, fonts, output, font_id=None, min_size=16, m
         if reconstruction_policy == 'auto':
             from . import table_cells
             if table_cells.place(rgb,clean,text,erase_union,layout_union,report['units'],proposals,raw,faces.resolve,
-                                 probability=text_mask.raw if text_mask is not None else None):
+                                 minimum=style.get('readability_floor', 10), probability=text_mask.raw if text_mask is not None else None):
                 composite = Image.alpha_composite(clean.convert('RGBA'),text).convert('RGB')
         alpha_union = np.asarray(text.getchannel('A')) != 0
         protected = ~(erase_union | layout_union)
