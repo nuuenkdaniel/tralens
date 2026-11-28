@@ -39,6 +39,25 @@ class BalloonExpansion(unittest.TestCase):
         ink = np.asarray(layer.getchannel('A')) != 0
         self.assertTrue((np.asarray(self.page)[ink] == 255).all())
 
+    def test_outlined_balloon_can_rewrap_without_painting_its_rim(self):
+        ImageDraw.Draw(self.page).ellipse((38, 32, 157, 101), outline='black', width=2)
+        self.proof['contrast_backing'] = True
+        layer, proof = self.finish()
+        self.assertEqual(proof['balloon_backing'], 'rewrapped_inside')
+        alpha = np.asarray(layer.getchannel('A')) != 0
+        self.assertTrue((np.asarray(self.page)[alpha] == 255).all())
+
+    def test_rejected_relettering_restores_original_readable_layer(self):
+        better = Image.new('RGBA', self.page.size)
+        ImageDraw.Draw(better).rectangle((119, 61, 160, 70), fill='black')
+        self.blocked[62, 160] = True
+        with patch.object(natural, 'layout', side_effect=[
+            ValueError('no contained fit'), (better, dict(self.proof))
+        ]):
+            layer, proof = self.finish()
+        self.assertIs(layer, self.layer)
+        self.assertIs(proof, self.proof)
+
     def test_shallow_growth_preserves_letters_and_tail(self):
         layer, proof = self.grow()
         self.assertEqual(proof['balloon_backing'], 'expanded')

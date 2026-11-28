@@ -23,6 +23,10 @@ def wrap(text, font, width):
             cut = max((i+1 for i,c in enumerate(paragraph[:lo]) if c.isspace()), default=lo)
             if cut == 0:
                 return None
+            # If a forced break lands just before closing punctuation, carry
+            # the last letter across with it. Keep explicit newlines intact.
+            if cut > 1 and paragraph[cut:cut + 1] in ('.', ',', '!', '?', ':', ';', ')', ']', '…'):
+                cut -= 1
             while cut < len(paragraph) and unicodedata.combining(paragraph[cut]):
                 cut += 1
             lines.append(paragraph[:cut])
@@ -51,6 +55,9 @@ def fit(text, font_data, bounds, blocked, style, clean):
         preferred = int(size * math.sqrt(max(1,len(text))) * 1.1)
         spans = [right-left, int(1.35*(right-left)), preferred, 2*preferred, w-2]
         if 'readability_floor' in style:
+            words = text.split()
+            if words:
+                spans.append(math.ceil(max(font.getlength(word) for word in set(words))) + 2)
             spans.extend(range(max(size * 3, preferred // 2), min(w, 2 * preferred), size))
         widths = sorted({min(w-2,max(8,v)) for v in spans})
         for width in widths:

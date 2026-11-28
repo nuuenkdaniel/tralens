@@ -78,6 +78,17 @@ class PlacementTests(unittest.TestCase):
         self.assertGreater(ink.getbbox()[2],15)
         self.assertIsNone(ink.crop((56,0,109,23)).getbbox())
 
+    def test_forced_word_break_keeps_trailing_punctuation_with_letters(self):
+        from io import BytesIO
+        from PIL import ImageFont
+        from tralens.rendering.compact_lettering import wrap
+        font = ImageFont.truetype(BytesIO(self.font), 24)
+        for word in ('understand.', 'Yaginari,', 'Wait!'):
+            lines = wrap(word, font, font.getlength(word[:-1]))
+            self.assertEqual(''.join(lines), word)
+            self.assertTrue(lines[-1][0].isalpha())
+            self.assertGreater(len(lines[-1]), 1)
+
     def test_dense_reader_caption_can_use_space_beyond_the_first_search_window(self):
         from tralens.rendering import compact_lettering
         blocked = np.ones((240,1200),bool)
