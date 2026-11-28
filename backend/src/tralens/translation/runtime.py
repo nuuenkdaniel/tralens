@@ -421,11 +421,12 @@ class PreviewTranslator:
         if not fragment and not alternate and any(u.disposition == "blocked" for u in request.units):
             return result("blocked", failure="structural_block", detail="blocked target or context unit")
         try:
-            if not fragment and not alternate and request.style.source_language in ("Chinese", "Korean"):
+            if (not fragment and not alternate and len(request.target_ids) == 1
+                    and request.style.source_language in ("Chinese", "zh", "Korean", "ko")):
                 from ..ocr.chapter_language import HAN, HANGUL
-                target = request.units[0]
-                text = target.selected.text
-                if not HAN.search(text) and not (request.style.source_language == "Korean" and HANGUL.search(text)):
+                target = next(u for u in request.units if u.unit_id == request.target_ids[0])
+                text = unicodedata.normalize("NFC", target.selected.text)
+                if not HAN.search(text) and not (request.style.source_language in ("Korean", "ko") and HANGUL.search(text)):
                     outcome = UnitOutcome(target.unit_id, "abstained", "", ("original_lettering",), "unverified", target.selected_revision)
                     return result("abstained", outcomes=(outcome,), attempts=0)
             if alternate:
@@ -435,7 +436,7 @@ class PreviewTranslator:
                 payload = (make_fragment_payload(request,self.profile,images=images) if fragment
                            else make_payload(request, self.profile, images=images))
             if (not fragment and not alternate and self.profile.specialist_chat and request.mode == "A"
-                    and request.style.source_language == "Korean"):
+                    and len(request.target_ids) == 1 and request.style.source_language in ("Korean", "ko")):
                 guide = ""
                 if HAN.search(text) and HANGUL.search(text):
                     korean_context = [u.selected.text[:192] for u in self.terminology_units if u.page_json == target.page_json

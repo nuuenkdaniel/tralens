@@ -141,6 +141,20 @@ class RuntimeTests(unittest.TestCase):
         result = PreviewTranslator(runtime).translate(self.request, cancelled=Mock(side_effect=[False, True]))
         self.assertEqual((result.status, result.attempts, result.translations), ("cancelled", 1, ()))
 
+    def test_chinese_and_korean_script_check_uses_the_target(self):
+        _, _, units = fixture(two=True)
+        context, target = units
+        for language, text in (("Chinese", "你好"), ("ko", "한글")):
+            reading = replace(target.selected, text=text)
+            changed = replace(target, readings=(reading,), selected_revision=reading.revision)
+            req = TranslationRequest((context, changed), (changed.unit_id,), (context.unit_id,),
+                                     style=Style(source_language=language), mode="B")
+            runtime = Mock()
+            runtime.generate.return_value = response(req.target_ids)
+            output = PreviewTranslator(runtime, model="test", profile=GENERALIST).translate(req)
+            self.assertEqual(output.translations, ((changed.unit_id, "Hello"),))
+            runtime.generate.assert_called_once()
+
     def test_context_ids_not_output_ids_and_languages_are_configurable(self):
         _, _, units = fixture(two=True)
         request = TranslationRequest(units, (units[0].unit_id,), (units[1].unit_id,),

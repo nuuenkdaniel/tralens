@@ -45,6 +45,8 @@ def propose(image, polygons, model, timeout, *, repeated=(), language="Japanese"
 def extend(engine, image, size, model, timeout, *, repeated=(), language="Japanese"):
     """Rebuild one coherent batch so grouping sees the old and new lettering together."""
     import re
+    import unicodedata
+    from ..ocr.chapter_language import HAN, HANGUL, KANA
     from ..ocr.automatic_units import propose_page_from_boxes
     from ..ocr.types import OCREngine, Text_Box
 
@@ -70,6 +72,7 @@ def extend(engine, image, size, model, timeout, *, repeated=(), language="Japane
     recovered = set()
     report = dict(model=model, proposed=len(proposals), added_ids=[], skipped=[])
     next_id = max((box.box_id for box in original if isinstance(box.box_id, int)), default=-1) + 1
+    scripts = {"Japanese": (KANA, HAN), "Chinese": (HAN,), "Korean": (HANGUL, HAN)}[language]
     for i,row in enumerate(proposals):
         coords = row.get('box') if isinstance(row, dict) else None
         if (not isinstance(coords, list) or len(coords) != 4
@@ -77,7 +80,8 @@ def extend(engine, image, size, model, timeout, *, repeated=(), language="Japane
             report['skipped'].append([i,'invalid_box'])
             continue
         source = row.get('source')
-        if not isinstance(source,str) or len(source)>512 or not re.search(r'[가-힣ㄱ-ㅎㅏ-ㅣ一-鿿]' if language == 'Korean' else r'[ぁ-ゖァ-ヺ一-鿿]',source):
+        if not isinstance(source,str) or len(source)>512 or not any(
+                script.search(unicodedata.normalize("NFC", source)) for script in scripts):
             report['skipped'].append([i,'no_japanese_reading' if language == 'Japanese' else 'no_source_reading'])
             continue
         if repeated and source not in repeated:

@@ -2,17 +2,19 @@
 from pathlib import Path
 import re
 import time
+import unicodedata
 
 LANGUAGES = {"ja": "Japanese", "zh": "Chinese", "ko": "Korean"}
-KANA = re.compile(r"[ぁ-ゖァ-ヺ]")
-HAN = re.compile(r"[㐀-䶿一-鿿]")
+KANA = re.compile(r"[ぁ-ゖァ-ヺｦ-ｯｱ-ﾝ]")
+HAN = re.compile(r"[㐀-䶿一-鿿\U00020000-\U0002a6df\U0002a700-\U0002ebe0\U00030000-\U0003134a]")
 HANGUL = re.compile(r"[가-힣ㄱ-ㅎㅏ-ㅣ]")
 
 
 def language_votes(shared, korean):
     counts = dict.fromkeys(LANGUAGES, 0)
     for (text, score), (other, prob) in zip(shared, korean, strict=True):
-        syllables = len(HANGUL.findall(other))
+        text = unicodedata.normalize("NFC", text)
+        syllables = len(HANGUL.findall(unicodedata.normalize("NFC", other)))
         kana, han = len(KANA.findall(text)), len(HAN.findall(text))
         if syllables and prob >= .68 and (not (kana or han) or prob + .04 >= score):
             counts["ko"] += min(12, syllables)
@@ -27,30 +29,26 @@ def language_votes(shared, korean):
 def detect(model_root, device, pages):
     from PIL import Image
     start = time.monotonic()
-    nonblank = []
-    for path in pages:
-        with Image.open(path) as page:
-            if any(high != low for low, high in page.convert("RGB").getextrema()):
-                nonblank.append(path)
-    if not nonblank:
-        return dict(language="ja", fallback=True, pages=len(pages), seconds=time.monotonic()-start,
-                    votes=dict.fromkeys(LANGUAGES, 0))
     import numpy as np
-    from paddleocr import TextDetection, TextRecognition
-    from .paddle_profiles import PROFILES
 
     def load(cls, name):
         return cls(model_name=name, model_dir=str(Path(model_root)/name), device=device,
                    cpu_threads=2, enable_mkldnn=False)
 
-    det, shared = PROFILES["v6_medium"]
-    detector = load(TextDetection, det)
-    readers = [load(TextRecognition, name) for name in (shared, PROFILES["v6_korean"][1])]
+    detector = None
     votes = dict.fromkeys(LANGUAGES, 0)
     sampled = 0
-    for path in nonblank:
+    for path in pages:
         with Image.open(path) as page:
             rgb = page.convert("RGB")
+        if all(low == high for low, high in rgb.getextrema()):
+            continue
+        if detector is None:
+            from paddleocr import TextDetection, TextRecognition
+            from .paddle_profiles import PROFILES
+            det, shared = PROFILES["v6_medium"]
+            detector = load(TextDetection, det)
+            readers = [load(TextRecognition, name) for name in (shared, PROFILES["v6_korean"][1])]
         bgr = np.asarray(rgb)[:, :, ::-1].copy()
         polys = next(iter(detector.predict(bgr, limit_side_len=800, limit_type="max")))["dt_polys"]
         bounds = []
@@ -78,4 +76,4 @@ def detect(model_root, device, pages):
     ranked = sorted(votes, key=votes.get, reverse=True)
     confident = votes[ranked[0]] >= 4 and votes[ranked[0]] > votes[ranked[1]] * 1.3
     return dict(language=ranked[0] if confident else "ja", fallback=not confident,
-                pages=sampled, seconds=round(time.monotonic()-start, 3), votes=votes)
+                pages=sampled or len(pages), seconds=round(time.monotonic()-start, 3), votes=votes)
