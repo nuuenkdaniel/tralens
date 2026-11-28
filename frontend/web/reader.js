@@ -94,9 +94,21 @@ function save() {
 }
 document.documentElement.dataset.theme = prefs.theme;
 function toast(message) {
-  $("#notice").textContent = message;
+  const dialog = document.querySelector("dialog[open]:focus-within") || document.querySelector("dialog[open]");
+  let notice = $("#notice");
+  if (dialog) {
+    notice = dialog.querySelector(".dialog-notice");
+    if (!notice) {
+      notice = document.createElement("div");
+      notice.className = "dialog-notice";
+      notice.setAttribute("role", "status");
+      dialog.append(notice);
+    }
+  }
+  for (const other of document.querySelectorAll("#notice,.dialog-notice")) other.textContent = "";
+  notice.textContent = message;
   clearTimeout(noticeTimer);
-  noticeTimer = setTimeout(() => ($("#notice").textContent = ""), 4500);
+  noticeTimer = setTimeout(() => (notice.textContent = ""), 4500);
 }
 async function api(path, body, reconnect = true, send = fetch) {
   const opts =
@@ -220,8 +232,8 @@ function header(back) {
       ? '<a href="#library" class="btn">' + icon("chev-l") + "Library</a>"
       : '<a href="#library" class="brand"><span class="mark">文<b>A</b></span>Tralens</a>') +
     '<span class="grow"></span>' +
-    (route()[0] === "queue" ? "" : '<a class="btn" href="#queue">' + icon("list") + 'Queue</a>') +
-    (offline ? '<button type="button" data-action="offline-library" aria-label="Downloads on this device">' + icon("download") + "Downloads</button>" : "") +
+    (route()[0] === "queue" ? "" : '<a class="btn" href="#queue" aria-label="Queue" title="Queue">' + icon("list") + '<span>Queue</span></a>') +
+    (offline ? '<button type="button" data-action="offline-library" aria-label="Downloads on this device" title="Downloads">' + icon("download") + "<span>Downloads</span></button>" : "") +
     (!back ? btn("add", "Add manga", "primary wide", "plus") : "") +
     (route()[0] === "settings" ? "" : '<a class="btn icon-btn" href="#settings" aria-label="Settings">' + icon("gear") + "</a>") +
     ib("theme", "Switch theme", "contrast") +
@@ -1066,16 +1078,16 @@ function drawAdd() {
                 '<small>' +
                 esc(f.file.name) +
                 "</small><div>" +
-                ["←", "×", "→"]
+                ["←", "→", "×"]
                   .map(
                     (l, x) =>
                       '<button type="button" aria-label="' +
-                      ["Move earlier", "Remove page", "Move later"][x] +
+                      ["Move earlier", "Move later", "Remove page"][x] +
                       '" data-item="' +
                       i +
                       '" data-move="' +
-                      (x - 1) +
-                      '">' +
+                      [-1, 1, 0][x] +
+                      (x === 0 && i === 0 || x === 1 && i === selected - 1 ? '" disabled>' : '">') +
                       l +
                       "</button>",
                   )
@@ -1344,6 +1356,7 @@ async function act(action, pageId) {
       }
       return render();
     }
+    if (action === "dismiss-upload" && !window.confirm("Remove this upload from the queue?")) return;
     await nativeUploads.change({id: pageId, user: config.username, retry: action === "retry-upload"});
     return refresh(true);
   }
@@ -1698,12 +1711,17 @@ async function runImport(item, retry = false) {
   }
 }
 $("#import-stop").onclick = () => {
+  if (!pendingImport || !window.confirm("Stop this upload?")) return;
   pendingImport.stopped = true;
   pendingImport.request?.abort();
 };
 $("#import-retry").onclick = () => runImport(pendingImport, true);
 $("#import-dismiss").onclick = () => clearImport(true);
 
+document.addEventListener("invalid", e => {
+  const details = e.target.closest("#import details");
+  if (details) details.open = true;
+}, true);
 document.addEventListener("submit", async (e) => {
   e.preventDefault();
   if (e.target.id === "account-form") return;

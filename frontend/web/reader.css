@@ -1,5 +1,6 @@
 :root {
   color-scheme: light dark;
+  --danger: #a32f22;
   --bg: #f7f8f6;
   --panel: #fff;
   --text: #1b2927;
@@ -18,7 +19,8 @@
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #131a19;
+    --danger: #ffa799;
+  --bg: #131a19;
     --panel: #1a2321;
     --text: #edf5ef;
     --muted: #abbcb6;
@@ -30,6 +32,7 @@
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
+  --danger: #ffa799;
   --bg: #131a19;
   --panel: #1a2321;
   --text: #edf5ef;
@@ -467,7 +470,7 @@ dialog::backdrop {
   text-overflow: ellipsis;
 }
 .error {
-  color: #b74731;
+  color: var(--danger);
   font-size: 0.9rem;
 }
 .menu-list {
@@ -479,9 +482,9 @@ dialog::backdrop {
   justify-content: flex-start;
 }
 .danger {
-  color: #ab3826;
+  color: var(--danger);
 }
-#notice:not(:empty) {
+#notice:not(:empty), .dialog-notice:not(:empty) {
   position: fixed;
   bottom: 22px;
   left: 50%;
@@ -1001,3 +1004,21 @@ select:hover:not(:disabled) {
 .queue-items li + li { border-top: 1px solid var(--line); }
 .queue-items small { color: var(--muted); }
 .queue-items progress { width: min(100%, 23rem); accent-color: var(--accent); }
+
+.dialog-in, .fields { grid-template-columns: minmax(0, 1fr); }
+.dialog-in > *, .fields > *, #import details, .book, .hero > div { min-width: 0; }
+.dialog-in, .offline-library, .hero, .queue { overflow-wrap: anywhere; }
+.dialog-in > .line:first-child { flex-wrap: nowrap; }
+.dialog-in > .line:first-child h2 { min-width: 0; }
+.dialog-in > .line:first-child button { flex-shrink: 0; }
+.offline-library > header { position: sticky; top: 0; z-index: 1; background: var(--panel); }
+@media (max-width: 620px), (pointer: coarse) {
+  .thumb { flex-basis: 156px; }
+  .thumb > div { display: flex; gap: 6px; }
+  .thumb button { min-width: 48px; min-height: 48px; }
+  button, a.btn, summary { min-height: 48px; }
+}
+@media (max-width: 620px) {
+  .hdr a[href="#queue"] span, .hdr [data-action="offline-library"] span { display: none; }
+  .hdr a[href="#queue"], .hdr [data-action="offline-library"] { width: 48px; padding-inline: 0; }
+}
