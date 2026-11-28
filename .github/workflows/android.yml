@@ -41,5 +41,5 @@ jobs:
       - name: Verify the versioned release build
         env:
           TRALENS_ANDROID_VERSION_CODE: '2'
-          TRALENS_ANDROID_VERSION_NAME: '0.1.0-beta.1'
+          TRALENS_ANDROID_VERSION_NAME: '0.2.0-beta.1'
         run: frontend/android/build-apk --online --release
