@@ -292,7 +292,13 @@ def make_payload(request, profile, *, images=()):
         if request.mode != "A" or len(request.target_ids) != 1 or request.context_ids or images:
             raise ValueError("specialist supports one text-only utterance per request")
         unit = next(u for u in request.units if u.unit_id == request.target_ids[0])
-        return _specialist_payload(unit.selected.text, request.style, profile)
+        text = unit.selected.text
+        if request.style.source_language == "Korean" and unit.selected.origin == "raw_main_reading":
+            rows = strict_json(unit.selected.evidence_json)
+            lines = [row["text"] for row in rows]
+            if "".join(lines) == text:
+                text = " ".join(lines)
+        return _specialist_payload(text, request.style, profile)
     if not profile.schema_json:
         raise ValueError("profile needs schema JSON or an explicit specialist template")
     data = compile_source(request)
@@ -405,6 +411,13 @@ class PreviewTranslator:
         if not fragment and not alternate and any(u.disposition == "blocked" for u in request.units):
             return result("blocked", failure="structural_block", detail="blocked target or context unit")
         try:
+            if not fragment and not alternate and request.style.source_language in ("Chinese", "Korean"):
+                from ..ocr.chapter_language import HAN, HANGUL
+                target = request.units[0]
+                text = target.selected.text
+                if not HAN.search(text) and not (request.style.source_language == "Korean" and HANGUL.search(text)):
+                    outcome = UnitOutcome(target.unit_id, "abstained", "", ("original_lettering",), "unverified", target.selected_revision)
+                    return result("abstained", outcomes=(outcome,), attempts=0)
             if alternate:
                 from .ocr_review import alternate_payload
                 payload = alternate_payload(request,self.profile,images)

@@ -813,8 +813,51 @@ def _regroup_companions(groups, regions, by_id, glyphs, ink, annotations, detect
     return groups,tuple(accepted),tuple(rejected[key] for key in sorted(rejected,key=lambda ids:tuple(map(_key,ids))))
 
 
+def join_chinese_inline(groups, pixels):
+    """Join enlarged Han initials/finals touching the rest of a horizontal caption."""
+    left_to_right = sorted(groups, key=lambda g: g.group[0].bbox[0])
+    result = []
+    for group in left_to_right:
+        if len(group.group) != 1:
+            result.append(group)
+            continue
+        right = group.group[0]
+        matches = []
+        for candidate in result:
+            if len(candidate.group) != 1 and candidate.method != "inline_chinese_caption":
+                continue
+            left = candidate.group[-1]
+            if not all(re.search(r'[一-鿿]', box.text) for box in (left, right)):
+                continue
+            if min(len(left.text.strip()), len(right.text.strip())) > 2:
+                continue
+            x, y, r, b = left.bbox
+            xx, yy, rr, bb = right.bbox
+            height = min(b-y, bb-yy)
+            gap = xx-r
+            if (height > 0 and xx > x and rr > r and -.55*height <= gap <= .32*height
+                    and min(b,bb)-max(y,yy) >= .75*height
+                    and max(r-x,rr-xx) > 1.4*height):
+                if gap > 0:
+                    # Even a narrow gap may contain a panel border separating two captions.
+                    top = max(0, min(y,yy)-height//2)
+                    bottom = min(pixels.shape[0], max(b,bb)+height//2)
+                    strip = pixels[top:bottom, r:xx]
+                    if strip.size and (strip.max(axis=2) < 145).mean(axis=0).max() > .70:
+                        continue
+                matches.append(candidate)
+        if len(matches) == 1:
+            previous = matches[0]
+            result[result.index(previous)] = Text_Group([*previous.group,right], method="inline_chinese_caption",
+                                                        direction="horizontal")
+        else:
+            result.append(group)
+    original_order = {box.box_id: i for i, group in enumerate(groups) for box in group.group}
+    return sorted(result, key=lambda group: min(original_order[box.box_id] for box in group.group))
+
+
 def propose_automatic_units(detections, image, *, max_detections=512, complementary_ownership=False,
-                            regroup_companions=False, policy=POLICY):
+                            regroup_companions=False, policy=POLICY, source_language="ja"):
     """Concrete engine-free proposals from immutable snapshots + original RGB image.
 
     Every valid in-page detection is exactly one main OR tentative annotation;
@@ -1146,6 +1189,8 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
                                          direction='horizontal' if curved or (masked and masked.get('direction')=='horizontal') else 'vertical'))
     # A newly discovered effect beside an already lettered logo needs its own erase region.
     independent = []
+    if source_language == "zh":
+        groups = join_chinese_inline(groups, bgr)
     for group in groups:
         if len(group.group) == 2:
             first, second = sorted(group.group, key=lambda box: box.bbox[0])
@@ -1247,7 +1292,7 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
         companion_regroupings=companion_regroupings,companion_rejections=companion_rejections)
 
 
-def propose_page_from_boxes(boxes, image_path, *, complementary_ownership=False, regroup_companions=False):
+def propose_page_from_boxes(boxes, image_path, *, complementary_ownership=False, regroup_companions=False, source_language="ja"):
     """Explicit production coordination: original file + unchanged Paddle snapshots."""
     content = Path(image_path).read_bytes()
     with Image.open(BytesIO(content)) as source:
@@ -1260,4 +1305,4 @@ def propose_page_from_boxes(boxes, image_path, *, complementary_ownership=False,
         hashlib.sha256(content).hexdigest(), hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest(),
         image_fingerprint(image))
     return propose_automatic_units(snapshot_detections(boxes, page), image,
-        complementary_ownership=complementary_ownership,regroup_companions=regroup_companions)
+        complementary_ownership=complementary_ownership,regroup_companions=regroup_companions,source_language=source_language)

@@ -159,6 +159,32 @@ class ReaderLibraryTests(unittest.TestCase):
         self.library.change("delete", dict(book=book["id"]))
         self.assertEqual(self.library.catalog()["books"], [])
 
+    def test_chapter_language_is_cached_and_can_be_overridden(self):
+        added = self.library.add(self.meta, [self.file, self.file])
+        chapter = self.finished()["chapters"][0]
+        self.assertEqual((chapter["source_language"], chapter["detected_language"]), ("auto", "ja"))
+        self.assertTrue(chapter["language_uncertain"])  # The test pages are blank.
+        duration = chapter["detection_seconds"]
+        self.assertGreater(duration, 0)
+        change = {**added, "source_language": "ko"}
+        with self.assertRaises(RequestError):
+            self.library.change("chapter-language", change, "another-account")
+        self.library.change("chapter-language", change)
+        self.finished()
+        self.assertEqual([call["source_language"] for call in self.calls], ["ja", "ja", "ko", "ko"])
+        self.library.change("chapter-language", {**change, "source_language": "auto"})
+        chapter = self.finished()["chapters"][0]
+        self.assertEqual(chapter["detection_seconds"], duration)
+        self.assertEqual(self.calls[-1]["source_language"], "ja")
+        with self.assertRaises(RequestError):
+            self.library.change("chapter-language", {**change, "source_language": "xx"})
+
+    def test_explicit_chinese_skips_detection(self):
+        self.library.add({**self.meta, "source_language": "zh"}, [self.file])
+        chapter = self.finished()["chapters"][0]
+        self.assertIsNone(chapter["detection_seconds"])
+        self.assertEqual(self.calls[-1]["source_language"], "zh")
+
     def test_archive_name_uses_current_title_and_fits_android_downloads(self):
         added = self.library.add(self.meta, [self.file])
         book = added["book"]

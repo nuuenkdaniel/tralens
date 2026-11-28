@@ -60,7 +60,7 @@ class Config:
 
 def options(value, *, render_enabled):
     if type(value) is not dict or set(value) - {'mode', 'max_attempts', 'allow_fragments', 'render_policy', 'translation_policy',
-                                             'replacement_policy', 'quality_reread', 'layout_policy', 'source_localization', 'visibility_policy', 'removal_policy', 'reconstruction_policy', 'translation_model', 'luna_mode', 'related_jobs'}:
+                                             'replacement_policy', 'quality_reread', 'layout_policy', 'source_localization', 'visibility_policy', 'removal_policy', 'reconstruction_policy', 'translation_model', 'luna_mode', 'related_jobs', 'source_language'}:
         raise RequestError('Unknown run options.')
     result = dict(mode='render' if render_enabled else 'ocr', max_attempts=64,
         allow_fragments=False, render_policy='best-effort', translation_policy='coverage-first',
@@ -107,6 +107,8 @@ def options(value, *, render_enabled):
         raise RequestError('Unknown removal or reconstruction policy.')
     if result['reconstruction_policy']!='classical' and (result['mode']!='render' or result['removal_policy']!='aggressive'):
         raise RequestError('Learned inpainting requires Final rendering and Aggressive removal.')
+    if result.get('source_language', 'ja') not in ('ja', 'zh', 'ko'):
+        raise RequestError('Unknown source language.')
     from ..translation import luna
     model = result.get('translation_model', 'local')
     mode = result.get('luna_mode', 'reviewed')
@@ -155,6 +157,8 @@ def execute_job(config, job):
         run_local_model=settings['mode'] != 'ocr', model=config.model, profile=config.profile,
         endpoint=config.endpoint, max_attempts=settings['max_attempts'],
         allow_fragment_previews=settings['allow_fragments'], translation_policy=settings['translation_policy'])
+    language = settings.get('source_language', 'ja')
+    kwargs['source_language'] = language
     from ..translation.luna import MODELS
     model = settings.get('translation_model', 'local')
     if model in MODELS and settings['mode'] != 'ocr':
@@ -168,7 +172,7 @@ def execute_job(config, job):
         kwargs.update(model=model, luna_mode=settings.get('luna_mode', 'reviewed'), related_pages=related)
     if settings['mode'] == 'render':
         from main import run_pipeline
-        if (config.crop_reader_model is not None and settings['translation_policy']=='coverage-first'
+        if (language == 'ja' and config.crop_reader_model is not None and settings['translation_policy']=='coverage-first'
                 and not settings.get('quality_reread')):
             kwargs.update(crop_reader_model=config.crop_reader_model, reader_presentations=not config.reader_mode)
         if config.reader_mode:
@@ -193,8 +197,8 @@ def execute_job(config, job):
             reconstruction_policy=reconstruction,
             reconstruction_config=model_configs if reconstruction == 'auto' else model_configs.get(reconstruction),
             text_mask_model=config.text_mask_model,
-            quality_reread=settings.get('quality_reread', False), reread_model=config.reread_model,
-            manga_reread_model=config.manga_reread_model if settings.get('translation_policy','coverage-first')=='coverage-first' and 'crop_reader_model' not in kwargs else None, **kwargs)
+            quality_reread=language == 'ja' and settings.get('quality_reread', False), reread_model=config.reread_model,
+            manga_reread_model=config.manga_reread_model if language == 'ja' and settings.get('translation_policy','coverage-first')=='coverage-first' and 'crop_reader_model' not in kwargs else None, **kwargs)
     from ..translation.workflow import run_preview
     return run_preview(job['image'], job['directory']/'run'/'preview', **kwargs)
 

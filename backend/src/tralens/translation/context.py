@@ -2,7 +2,7 @@
 from dataclasses import asdict, replace
 import math
 
-from .contracts import TranslationRequest, Utterance, canonical, revision, strict_json
+from .contracts import Style, TranslationRequest, Utterance, canonical, revision, strict_json
 
 
 POLICY = 'nearby_bound_text_single_rendition_v1'
@@ -163,7 +163,7 @@ def sound_plan(request,pool):
         'scene_order':'detector order, reading order unverified','context_characters':characters}
 
 
-def page_plan(units, records, batch,policy='nearby'):
+def page_plan(units, records, batch,policy='nearby', *, style=Style()):
     """Shared reconstruction for execution AND render-time binding validation."""
     from . import coverage
     if len(units) != len(records) or len(units) > 512:
@@ -182,7 +182,7 @@ def page_plan(units, records, batch,policy='nearby'):
         else:
             derived = unit
         pool.append(derived)
-        bases[unit.unit_id] = TranslationRequest((derived,), (derived.unit_id,))
+        bases[unit.unit_id] = TranslationRequest((derived,), (derived.unit_id,), style=style)
     bounds = {p['proposal_id']: p['crop_bounds'] for p in batch['proposals']}
     if len(bounds) != len(units) or set(bounds) != set(bases):
         raise ValueError('translation context proposal identity mismatch')
@@ -194,8 +194,19 @@ def page_plan(units, records, batch,policy='nearby'):
 def saved_requests(preview, units):
     """Do not accept a saved context/style/request merely because hashes match."""
     policy = preview.get('settings', {}).get('translation_context', 'isolated')
+    from ..ocr.chapter_language import LANGUAGES
+    language = preview.get('settings', {}).get('source_language', 'ja')
+    style = Style(source_language=LANGUAGES[language])
     if policy == 'isolated':
-        return {}
+        if language == 'ja':
+            return {}
+        from . import coverage
+        requests = {}
+        for unit, record in zip(units, preview['units'], strict=True):
+            if record.get('input_kind') == coverage.KIND:
+                unit = coverage.derive(unit, record['coverage'].get('reread_selected_revision'))
+            requests[unit.unit_id] = TranslationRequest((unit,), (unit.unit_id,), style=style)
+        return requests
     from .runtime import GENERALIST,TRANSLATEGEMMA,validate_model_profile
     profile=TRANSLATEGEMMA if policy=='sound-effects' else GENERALIST
     validate_policy(policy,profile)
@@ -206,7 +217,7 @@ def saved_requests(preview, units):
     scope = preview['settings'].get('context_scope', 'all_targets')
     if scope not in ('all_targets', 'explicit_candidates'):
         raise ValueError('unknown saved context selection scope')
-    planned = page_plan(units, preview['units'], preview['ocr']['batches'][0],policy)
+    planned = page_plan(units, preview['units'], preview['ocr']['batches'][0],policy,style=style)
     selected = {}
     for record in preview['units']:
         identity=record['unit']['unit_id']
@@ -217,7 +228,7 @@ def saved_requests(preview, units):
         request, proof = planned[identity]
         if scope == 'explicit_candidates' and policy!='sound-effects' and 'context_selection' not in record:
             target = request.units[0]
-            isolated = TranslationRequest((target,), (target.unit_id,))
+            isolated = TranslationRequest((target,), (target.unit_id,), style=style)
             if (canonical(record.get('request')) != canonical(asdict(isolated))
                     or record.get('request_revision') != isolated.revision):
                 raise ValueError('retained primary request is not its original isolated source request')

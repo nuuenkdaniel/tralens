@@ -9,6 +9,7 @@ PROFILES = {
     "v5_server": ("PP-OCRv5_server_det", "PP-OCRv5_server_rec"),
     "v6_tiny": ("PP-OCRv6_tiny_det", "PP-OCRv6_tiny_rec"),
     "v6_small": ("PP-OCRv6_small_det", "PP-OCRv6_small_rec"),
+    "v6_korean": ("PP-OCRv6_medium_det", "korean_PP-OCRv5_mobile_rec"),
     "v6_medium": ("PP-OCRv6_medium_det", "PP-OCRv6_medium_rec"),
 }
 MODEL_FILES = ("inference.yml", "inference.json", "inference.pdiparams")
@@ -89,7 +90,7 @@ class PaddleProfile:
                 "settings": self.settings(), "versions": package_versions(),
                 "local_weights": self.model_dirs is not None,
                 "japanese_support": ("restricted_experimental_not_preferred_for_manga"
-                                     if self.name == "v6_tiny" else "requires_local_quality_validation")}
+                                     if self.name == "v6_tiny" else "korean_recognizer" if self.name == "v6_korean" else "requires_local_quality_validation")}
 
 
 def resolve_profile(model_profile=DEFAULT_PROFILE, device=None, model_root=None, model_dirs=None,

@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from PIL import Image, ImageDraw
 
 
-def propose(image, polygons, model, timeout, *, repeated=()):
+def propose(image, polygons, model, timeout, *, repeated=(), language="Japanese"):
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
         with Image.open(image) as source:
@@ -24,12 +24,12 @@ def propose(image, polygons, model, timeout, *, repeated=()):
         item = dict(type='object', properties=fields, required=list(fields), additionalProperties=False)
         schema = dict(type='object', properties={'regions':dict(type='array', items=item)}, required=['regions'],
                       additionalProperties=False)
-        prompt = ('Scan the entire Japanese comic in image 1 for missed dialogue, handwritten asides, '
+        prompt = (f'Scan the entire {language} comic in image 1 for missed dialogue, handwritten asides, '
                   'signs and sound effects. Image 2 is the identical page with cyan outlines around EVERY '
-                  'existing reading. Return ONLY visible Japanese lettering outside the existing polygons. '
+                  f'existing reading. Return ONLY visible {language} lettering outside the existing polygons. '
                   'For partially detected phrases report only separate uncovered characters if independently meaningful. '
                   'Exclude furigana repeating a detected word, pure punctuation, Latin lettering, motion lines, '
-                  'and drawings. Empty regions is a valid result. Give exact Japanese transcription, concise '
+                  f'and drawings. Empty regions is a valid result. Give exact {language} transcription, concise '
                   'English lettering, landmark and tight [left,top,right,bottom] box in normalized 0..1000 '
                   'page coordinates. When the same glyph repeats as separate beats across artwork, give '
                   'each visible occurrence its own tight box. Keep the gaps between beats outside the boxes. '
@@ -42,7 +42,7 @@ def propose(image, polygons, model, timeout, *, repeated=()):
     return result['regions']
 
 
-def extend(engine, image, size, model, timeout, *, repeated=()):
+def extend(engine, image, size, model, timeout, *, repeated=(), language="Japanese"):
     """Rebuild one coherent batch so grouping sees the old and new lettering together."""
     import re
     from ..ocr.automatic_units import propose_page_from_boxes
@@ -51,7 +51,10 @@ def extend(engine, image, size, model, timeout, *, repeated=()):
     original = engine.raw_detections[0]
     unread = {box.box_id:box for box in original if not box.selected_text.strip()}
     polygons = [box.paddle_poly.tolist() for box in original if box.box_id not in unread]
-    proposals = propose(image, polygons, model, timeout, repeated=repeated) if repeated else propose(image, polygons, model, timeout)
+    options = {"language": language} if language != "Japanese" else {}
+    if repeated:
+        options["repeated"] = repeated
+    proposals = propose(image, polygons, model, timeout, **options)
     if not isinstance(proposals, list):
         raise ValueError('invalid frontier discovery response')
     counts = Counter(row['source'] for row in proposals if isinstance(row,dict)
@@ -74,8 +77,8 @@ def extend(engine, image, size, model, timeout, *, repeated=()):
             report['skipped'].append([i,'invalid_box'])
             continue
         source = row.get('source')
-        if not isinstance(source,str) or len(source)>512 or not re.search(r'[ぁ-ゖァ-ヺ一-鿿]',source):
-            report['skipped'].append([i,'no_japanese_reading'])
+        if not isinstance(source,str) or len(source)>512 or not re.search(r'[가-힣ㄱ-ㅎㅏ-ㅣ一-鿿]' if language == 'Korean' else r'[ぁ-ゖァ-ヺ一-鿿]',source):
+            report['skipped'].append([i,'no_japanese_reading' if language == 'Japanese' else 'no_source_reading'])
             continue
         if repeated and source not in repeated:
             report['skipped'].append([i,'outside_repeated_sequence'])
@@ -139,7 +142,8 @@ def extend(engine, image, size, model, timeout, *, repeated=()):
         counts = Counter(box.selected_text for box in added if re.fullmatch(r'[ぁ-ゖァ-ヺ]', box.selected_text))
         report['repeated_kana'] = [word for word,count in counts.items() if 4<=count<=16]
         combined = [box for box in original if box.box_id not in recovered] + added
-        batch = propose_page_from_boxes(combined,str(image),complementary_ownership=True,regroup_companions=True)
+        batch = propose_page_from_boxes(combined,str(image),complementary_ownership=True,regroup_companions=True,
+                                        source_language=getattr(engine,"source_language","ja"))
         engine.raw_detections = [combined]
         engine.automatic_unit_proposals = [batch]
     return report
