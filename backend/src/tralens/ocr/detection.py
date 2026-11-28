@@ -109,53 +109,6 @@ class OCR(GroupingMixin, ReviewMixin):
             images_text_box.append(text_boxes)
         return images_text_box
 
-    def _read_caption_initials(self, image, boxes):
-        """Confirm a weak enlarged initial both alone and in the printed caption."""
-        from .chapter_language import HAN
-        recognizer = None
-        attempts = 0
-        for index, box in enumerate(boxes):
-            x,y,r,b = box.bbox
-            height = b-y
-            if (attempts >= 6 or box.confidence >= .75 or not 12 <= height <= 250
-                    or not .65*height <= r-x <= 1.5*height):
-                continue
-            neighbors = [n for n in boxes if n.confidence >= .85 and len(HAN.findall(n.text)) >= 2
-                         and x < n.bbox[0] and -.45*height <= n.bbox[0]-r <= .20*height
-                         and n.bbox[2]-n.bbox[0] >= 1.5*height
-                         and y <= (n.bbox[1]+n.bbox[3])/2 <= b]
-            if len(neighbors) != 1:
-                continue
-            neighbor = neighbors[0]
-            if recognizer is None:
-                from paddleocr import TextRecognition
-                settings = self.paddle_provenance['settings']
-                recognizer = TextRecognition(model_name=settings['text_recognition_model_name'],
-                    model_dir=settings.get('text_recognition_model_dir'), device=settings.get('device'),
-                    cpu_threads=settings['cpu_threads'], enable_mkldnn=False)
-            attempts += 1
-            _,top,right,bottom = neighbor.bbox
-            # A detector rectangle around a drop cap can extend into the artwork below the line.
-            top = max(0, min(y, top))
-            x = max(0, x)
-            base = min(b + 1, bottom + max(2, height // 6))
-            if x >= r or top >= base:
-                continue
-            cap = image[top:base, x:r]
-            pad = max(2, round(height * .08))
-            framed = cv2.copyMakeBorder(cap, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=(255,255,255))
-            initial, framed_initial, line = recognizer.predict([cap, framed, image[top:base, x:right+1]])
-            initial = max((initial, framed_initial), key=lambda res: res['rec_score'] if HAN.fullmatch(res['rec_text']) else 0)
-            glyph = initial['rec_text']
-            confidence = min(float(initial['rec_score']), float(line['rec_score']))
-            if HAN.fullmatch(glyph) and confidence >= .90 and line['rec_text'].startswith(glyph + neighbor.text[:2]):
-                confirmed = Text_Box(box.box_id, confidence, box.paddle_poly, glyph)
-                confirmed.ocr_metadata.update(deepcopy(box.ocr_metadata))
-                confirmed.ocr_metadata["candidates"][OCREngine.PADDLE.value] = glyph
-                confirmed.ocr_metadata['caption_reread'] = dict(previous_text=box.text, previous_confidence=box.confidence,
-                    crop=glyph, caption=line['rec_text'], neighbor=neighbor.box_id)
-                boxes[index] = confirmed
-
     def _short_reading_alternates(self, image, boxes):
         """Retain two agreeing local reads for a short, low-confidence vertical line."""
         import re
@@ -271,8 +224,10 @@ class OCR(GroupingMixin, ReviewMixin):
         proposals = []
         for text_boxes in images_text_boxes:
             image = cv2.imread(self.image_path) if text_boxes else None
-            if image is not None and getattr(self, "source_language", "ja") == "zh":
-                self._read_caption_initials(image, text_boxes)
+            language = getattr(self, "source_language", "ja")
+            if image is not None and language in ("zh", "ko"):
+                from .mixed_script import reread_lettering
+                reread_lettering(image, text_boxes, language, self.paddle_provenance["settings"])
             self.review_boxes(text_boxes, image, media_type=media)
             if propose_units and identity.get("profile") == "v6_medium" and getattr(self,"source_language","ja") == "ja":
                 self._short_reading_alternates(image,text_boxes)

@@ -813,6 +813,72 @@ def _regroup_companions(groups, regions, by_id, glyphs, ink, annotations, detect
     return groups,tuple(accepted),tuple(rejected[key] for key in sorted(rejected,key=lambda ids:tuple(map(_key,ids))))
 
 
+def group_slanted_caption_rows(groups):
+    """Compare slanted baselines in the lettering's own frame before joining rows."""
+    rows = {}
+    for group in groups:
+        if len(group.group) > 5:
+            continue
+        candidates = {}
+        for box in group.group:
+            if len(box.poly) != 4 or not re.search(r'[一-鿿]', box.text):
+                break
+            top = box.poly[1] - box.poly[0]
+            angle = math.atan2(top[1], top[0])
+            width = float(np.linalg.norm(top))
+            height = float(np.linalg.norm(box.poly[3] - box.poly[0]))
+            if not 7 <= abs(math.degrees(angle)) <= 35 or width < 1.9*height or height < 8:
+                break
+            candidates[box.box_id] = (box, box.poly.mean(axis=0), angle, width, height)
+        else:
+            rows.update(candidates)
+    if not 3 <= len(rows) <= 96:
+        return groups
+    above, below = {}, {}
+    for left, (_, center, angle, width, height) in rows.items():
+        axis = np.array([math.cos(angle), math.sin(angle)])
+        normal = np.array([-axis[1], axis[0]])
+        for right, (_, other, tilt, w, h) in rows.items():
+            if abs(angle-tilt) > math.radians(6) or max(h,height) > 1.4*min(h,height):
+                continue
+            offset = other - center
+            distance = float(offset @ normal)
+            if (.65*min(h,height) <= distance <= 1.38*(height+h)/2
+                    and abs(offset @ axis) <= .32*max(width,w)):
+                if left not in below or distance < below[left][0]:
+                    below[left] = (distance, right)
+                if right not in above or distance < above[right][0]:
+                    above[right] = (distance, left)
+    links = {a:b for a,(_,b) in below.items() if above[b][1] == a}
+    if not links:
+        return groups
+    # Only rebuild groups which participate in at least one corroborated pair.
+    linked = set(links) | set(links.values())
+    affected = [g for g in groups if any(b.box_id in linked for b in g.group)]
+    boxes = {b.box_id:b for g in affected for b in g.group}
+    chains = {}
+    following = set(links.values())
+    for start in boxes.keys() - following:
+        ids = [start]
+        while ids[-1] in links:
+            ids.append(links[ids[-1]])
+        for identity in ids:
+            chains[identity] = ids
+    if len(chains) != len(boxes):
+        return groups
+    output, used = [], set()
+    for group in groups:
+        if group not in affected:
+            output.append(group)
+            continue
+        for box in group.group:
+            ids = chains.get(box.box_id)
+            if ids and ids[0] not in used:
+                used.add(ids[0])
+                output.append(Text_Group([boxes[i] for i in ids], method="slanted_caption_rows", direction="horizontal"))
+    return output
+
+
 def join_chinese_inline(groups, pixels):
     """Join enlarged Han initials/finals touching the rest of a horizontal caption."""
     left_to_right = sorted(groups, key=lambda g: g.group[0].bbox[0])
@@ -1190,7 +1256,7 @@ def propose_automatic_units(detections, image, *, max_detections=512, complement
     # A newly discovered effect beside an already lettered logo needs its own erase region.
     independent = []
     if source_language == "zh":
-        groups = join_chinese_inline(groups, bgr)
+        groups = join_chinese_inline(group_slanted_caption_rows(groups), bgr)
     for group in groups:
         if len(group.group) == 2:
             first, second = sorted(group.group, key=lambda box: box.bbox[0])

@@ -293,11 +293,18 @@ def make_payload(request, profile, *, images=()):
             raise ValueError("specialist supports one text-only utterance per request")
         unit = next(u for u in request.units if u.unit_id == request.target_ids[0])
         text = unit.selected.text
-        if request.style.source_language == "Korean" and unit.selected.origin == "raw_main_reading":
+        if request.style.source_language in ("Korean", "Chinese") and unit.selected.origin == "raw_main_reading":
             rows = strict_json(unit.selected.evidence_json)
             lines = [row["text"] for row in rows]
-            if "".join(lines) == text:
-                text = " ".join(lines)
+            if "".join(lines) == text and len(lines) > 1:
+                if request.style.source_language == "Korean":
+                    text = " ".join(lines)
+                elif all(len(line.strip()) >= 2 for line in lines):
+                    # Preserve stacked sign rows, while keeping inline drop caps attached.
+                    heights = [[p[1] for p in row["polygon"]] for row in rows]
+                    if all(sum(b)/len(b) - sum(a)/len(a) > .45*min(max(a)-min(a), max(b)-min(b))
+                           for a,b in zip(heights, heights[1:])):
+                        text = "\n".join(lines)
         return _specialist_payload(text, request.style, profile)
     if not profile.schema_json:
         raise ValueError("profile needs schema JSON or an explicit specialist template")
@@ -396,6 +403,9 @@ class PreviewTranslator:
             if 'context_crop' in rendition_evidence or 'toolbar_crop' in rendition_evidence:
                 metadata['reduced_capabilities'] = [v for v in metadata['reduced_capabilities'] if v != 'no_context_or_images']
                 metadata['images_supplied'] = True
+            if 'korean_mixed_script_context' in rendition_evidence:
+                metadata['reduced_capabilities'] = [v for v in metadata['reduced_capabilities'] if v != 'no_context_or_images']
+                metadata['images_supplied'] = False
             return TranslationResult(request.revision, status, provider=type(self.runtime).__name__,
                 model=self.model, profile=self.profile.name,
                 execution_metadata_json=canonical({**metadata,
@@ -424,6 +434,25 @@ class PreviewTranslator:
             else:
                 payload = (make_fragment_payload(request,self.profile,images=images) if fragment
                            else make_payload(request, self.profile, images=images))
+            if (not fragment and not alternate and self.profile.specialist_chat and request.mode == "A"
+                    and request.style.source_language == "Korean"):
+                guide = ""
+                if HAN.search(text) and HANGUL.search(text):
+                    korean_context = [u.selected.text[:192] for u in self.terminology_units if u.page_json == target.page_json
+                                      and u.unit_id != target.unit_id and HANGUL.search(u.selected.text)][:4]
+                    if korean_context:
+                        guide = ("Use the page context to resolve ambiguous words. Translate Hangul and Hanja together, "
+                                 "retaining the verbs and parallel structure. Render common nouns in English unless "
+                                 "context supports a personal name. Nearby OCR for context only: "
+                                 + json.dumps(korean_context, ensure_ascii=False) + ". ")
+                        rendition_evidence["korean_mixed_script_context"] = korean_context
+                elif re.search(r"[ㅋㅎ]{2,}", text):
+                    guide = ("In dialogue, preserve laughter and casual tone. When the speaker leaves the subject "
+                             "unstated, avoid inventing one. Translate suggestions and softening expressions idiomatically. ")
+                if guide:
+                    message = payload["messages"][0]
+                    message["content"] = message["content"].replace("Please translate the following",
+                                                                    guide + "Please translate the following", 1)
             if (self.page_context and self.single_rendition and self.model in ("translategemma:12b","translategemma:27b")
                     and self.profile.specialist_chat and not fragment and not alternate
                     and request.style.source_language in ('Japanese', 'ja') and request.style.target_language in ('English', 'en')
