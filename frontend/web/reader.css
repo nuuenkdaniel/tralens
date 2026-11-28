@@ -948,3 +948,9 @@ select:hover:not(:disabled) {
   .offline-progress input { height: 48px; }
   summary { align-content: center; cursor: pointer; }
 }
+
+.queue-items { list-style: none; padding: 0; margin: 0; }
+.queue-items li { display: grid; gap: .35rem; padding-block: .85rem; overflow-wrap: anywhere; }
+.queue-items li + li { border-top: 1px solid var(--line); }
+.queue-items small { color: var(--muted); }
+.queue-items progress { width: min(100%, 23rem); accent-color: var(--accent); }

@@ -293,6 +293,22 @@ class ReaderLibraryTests(unittest.TestCase):
         with self.library.archive(book["id"], "original") as file, zipfile.ZipFile(file) as z:
             self.assertEqual(z.read("original/chapter-001/page-0003.webp"), webp.getvalue())
 
+    def test_queue_uses_worker_order_and_only_includes_this_accounts_pending_chapters(self):
+        self.library.stopped.set()
+        self.library.wake.set()
+        self.library.thread.join(5)
+        first = self.library.add(self.meta, [self.file])
+        second = self.library.add(self.meta, [self.file])
+        later = self.library.add(dict(self.meta, book=first["book"]), [self.file, self.file])
+        other = self.library.add(dict(self.meta, options={"mode": "render"}), [self.file], account="guest")
+        self.assertEqual(self.library.catalog()["queue"], [first["chapter"], second["chapter"], later["chapter"]])
+        with self.library.db() as db:
+            db.execute("UPDATE pages SET status='ready' WHERE chapter=?", (first["chapter"],))
+            db.execute("UPDATE pages SET status='running' WHERE chapter=?", (second["chapter"],))
+            db.execute("UPDATE pages SET status='waiting' WHERE chapter=?", (later["chapter"],))
+        self.assertEqual(self.library.catalog()["queue"], [second["chapter"], later["chapter"]])
+        self.assertEqual(self.library.catalog("guest")["queue"], [other["chapter"]])
+
     def test_archives_use_natural_path_order_and_ignore_metadata(self):
         stream = BytesIO()
         with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:

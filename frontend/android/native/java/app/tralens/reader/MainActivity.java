@@ -47,6 +47,7 @@ public class MainActivity extends BridgeActivity {
         config = new CapConfig.Builder(this).setHostname(port == defaultPort() ? host : host + ":" + port)
             .setAndroidScheme(scheme).setLoggingEnabled(false).create();
         registerPlugin(ReaderConnection.class);
+        registerPlugin(ReaderUploads.class);
         registerPlugin(PhoneSignIn.class);
         super.onCreate(state);
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
@@ -81,6 +82,7 @@ public class MainActivity extends BridgeActivity {
                 super.onPageFinished(view, url);
                 // Login and logout both reload the reader.
                 CookieManager.getInstance().flush();
+                openQueueIfRequested(view);
             }
 
             @Override
@@ -106,6 +108,20 @@ public class MainActivity extends BridgeActivity {
                 return super.shouldInterceptRequest(view, request);
             }
         });
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (bridge != null && bridge.getWebView().getProgress() == 100) openQueueIfRequested(bridge.getWebView());
+    }
+
+    private void openQueueIfRequested(WebView view) {
+        if ("app.tralens.reader.QUEUE".equals(getIntent().getAction())) {
+            getIntent().setAction(null);
+            view.evaluateJavascript("location.hash = 'queue'", null);
+        }
     }
 
     @Override

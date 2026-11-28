@@ -31,6 +31,8 @@ let pendingPosition = Promise.resolve(),
   focusReturn,
   dismissed = "",
   pendingImport = null;
+const webUploads = [], failedUploads = [];
+let deviceUploads = [];
 const esc = (text) =>
   String(text ?? "").replace(
     /[&<>"']/g,
@@ -141,9 +143,10 @@ let pollTimer, refreshId = 0;
 function schedulePoll() {
   clearTimeout(pollTimer);
   if (document.hidden || !config) return;
-  const busy = catalog.books.some(b => b.chapters.some(c =>
+  const busy = deviceUploads.some(j => ["queued", "uploading"].includes(j.state)) || catalog.books.some(b => b.chapters.some(c =>
     c.pages.some(p => ["queued", "running", "waiting"].includes(p.status))));
-  pollTimer = setTimeout(poll, busy ? 2500 : 60000);
+  const idleInterval = route()[0] === "queue" ? 6000 : 60000;
+  pollTimer = setTimeout(poll, busy ? 2500 : idleInterval);
 }
 async function poll() {
   if (!config || document.hidden) return schedulePoll();
@@ -152,8 +155,20 @@ async function poll() {
 }
 async function refresh(force = false) {
   const id = ++refreshId;
-  const data = await api("library");
+  const uploads = nativeUploads ? await nativeUploads.list({user: config.username}) : {jobs: []};
+  let data;
+  try { data = await api("library"); }
+  catch (error) {
+    if (id === refreshId && config) {
+      deviceUploads = uploads.jobs;
+      if (route()[0] === "queue") render();
+      schedulePoll();
+    }
+    throw error;
+  }
   if (id !== refreshId || !config) return;
+  const uploadsChanged = JSON.stringify(deviceUploads) !== JSON.stringify(uploads.jobs);
+  deviceUploads = uploads.jobs;
   const before = current();
   const previous = catalog;
   catalog = data;
@@ -179,7 +194,7 @@ async function refresh(force = false) {
     }
     return;
   }
-  if (force || JSON.stringify(previous) !== JSON.stringify(data)) render();
+  if (force || (uploadsChanged && route()[0] === "queue") || JSON.stringify(previous) !== JSON.stringify(data)) render();
 }
 function settings() {
   const protect = prefs.protection === "protect";
@@ -205,6 +220,7 @@ function header(back) {
       ? '<a href="#library" class="btn">' + icon("chev-l") + "Library</a>"
       : '<a href="#library" class="brand"><span class="mark">文<b>A</b></span>Tralens</a>') +
     '<span class="grow"></span>' +
+    (route()[0] === "queue" ? "" : '<a class="btn" href="#queue">' + icon("list") + 'Queue</a>') +
     (offline ? '<button type="button" data-action="offline-library" aria-label="Downloads on this device">' + icon("download") + "Downloads</button>" : "") +
     (!back ? btn("add", "Add manga", "primary wide", "plus") : "") +
     (route()[0] === "settings" ? "" : '<a class="btn icon-btn" href="#settings" aria-label="Settings">' + icon("gear") + "</a>") +
@@ -212,6 +228,49 @@ function header(back) {
     "</header>"
   );
 }
+function queueView() {
+  const groups = [];
+  const order = new Map((catalog.queue || []).map((id, i) => [id, i]));
+  for (const book of catalog.books) for (const chapter of book.chapters) {
+    const pages = chapter.pages;
+    const active = pages.findIndex(p => p.status === "running");
+    const counts = {};
+    for (const p of pages) counts[p.status] = (counts[p.status] || 0) + 1;
+    const pending = (counts.queued || 0) + (counts.waiting || 0) + (counts.running || 0);
+    if (!pending) continue;
+    const details = [active >= 0 ? "Translating page " + (active + 1) : "",
+      counts.queued ? counts.queued + " queued" : "",
+      counts.waiting ? counts.waiting + " waiting for the local translator" : "",
+      counts.failed ? counts.failed + " failed" : ""].filter(Boolean);
+    groups.push({rank: active >= 0 ? 0 : counts.queued ? 1 : 2, order: order.get(chapter.id) ?? Infinity,
+      html: '<li><a href="#book/' + book.id + '"><b>' + esc(book.title) + '</b> · ' + esc(chapter.title) +
+        '</a><small>' + esc(details.join(" · ")) + '</small><progress value="' + (pages.length - pending) +
+        '" max="' + pages.length + '"></progress><small>' + (pages.length - pending) + ' of ' + pages.length + ' processed</small></li>'});
+  }
+  groups.sort((a,b) => a.rank - b.rank || a.order - b.order);
+  const uploads = nativeUploads ? deviceUploads : [pendingImport, ...webUploads, ...failedUploads].filter(Boolean);
+  const rows = uploads.map(j => {
+    const title = j.name || catalog.books.find(b => b.id === j.book)?.title || j.title;
+    const progress = j.state === "uploading" && j.percent >= 0;
+    let status = j.state === "paused" ? "Upload paused" : j.message || "Queued";
+    if (j.state === "uploading") status = j.percent === 100 ? "Preparing pages on server" :
+      progress ? "Uploading · " + j.percent + "%" : "Preparing upload";
+    const action = (key, label) => '<button data-action="' + key + '" data-id="' + esc(j.id) + '">' + label + '</button>';
+    const buttons = j.state === "failed" ? action("retry-upload", "Retry") + action("dismiss-upload", "Dismiss") :
+      nativeUploads && j.state === "paused" ? action("retry-upload", "Resume") + action("dismiss-upload", "Remove") :
+      nativeUploads && ((j.state === "uploading" && j.percent !== 100) || j.state === "queued") ? action("dismiss-upload", "Stop upload") : "";
+    return '<li><b>' + esc(title) + '</b><span>' + esc(j.chapter) + '</span><small>' + esc(status) + '</small>' +
+      (progress ? '<progress max="100" value="' + j.percent + '"></progress>' : '') +
+      (buttons ? '<div class="line">' + buttons + '</div>' : '') + '</li>';
+  });
+  const section = (heading, entries) => entries.length ? '<section class="panel"><h2>' + heading +
+    '</h2><ol class="queue-items">' + entries.join("") + '</ol></section>' : "";
+  return header(true) + '<main class="wrap"><div class="line"><h1>Queue</h1>' + btn("add", "Add manga", "", "plus") +
+    '</div>' + section("Uploads", rows) +
+    section("Translation", groups.map(g => g.html)) +
+    (!uploads.length && !groups.length ? '<p class="meta">No uploads or translations in your queue.</p>' : "") + '</main>';
+}
+
 function statusText(pages) {
   const working = pages.filter((p) =>
       ["queued", "running"].includes(p.status),
@@ -735,7 +794,7 @@ function render() {
   if (reading) mountReader(reader(book, chapter, page));
   else {
     keepPrepared([]);
-    root.innerHTML = screen === "settings"
+    root.innerHTML = screen === "queue" ? queueView() : screen === "settings"
       ? preferences()
       : screen === "book" && book
         ? detail(book)
@@ -746,7 +805,7 @@ function render() {
       ? book.title + " · " + chapter.title
       : screen === "settings"
         ? "Settings"
-        : book?.title || "Library") + " · Tralens";
+        : screen === "queue" ? "Queue" : book?.title || "Library") + " · Tralens";
   lastRender = location.hash;
   for (const id of expanded) {
     const list = root.querySelector('.pages[data-chapter="' + id + '"]');
@@ -892,14 +951,20 @@ function modal(title, html) {
     "</div>";
   if (!sheet.open) sheet.showModal();
 }
+function releaseDraft() {
+  if (draft) {
+    draft.files.forEach(f => { if (f.url?.startsWith("blob:")) URL.revokeObjectURL(f.url); });
+    nativeUploads?.clearSelection().catch(() => {});
+    draft = null;
+  }
+}
 function closeSheet() {
+  releaseDraft();
   sheet.close();
 }
 sheet.addEventListener("close", () => {
-  if (draft) {
-    draft.files.forEach((f) => URL.revokeObjectURL(f.url));
-    draft = null;
-  }
+  if (sheet.open) return;
+  releaseDraft();
   focusReturn?.focus();
   showChrome();
 });
@@ -911,10 +976,6 @@ function languageSelect(value, autoLabel = sourceLanguages.auto) {
     ).join("") + '</select></label>';
 }
 function addBook(id = "", files = []) {
-  if (pendingImport) {
-    $("#import-status").scrollIntoView();
-    return toast("Finish or dismiss the current import first.");
-  }
   draft = {
     book: id,
     title: "",
@@ -927,7 +988,15 @@ function addBook(id = "", files = []) {
   };
   addFiles(files);
   drawAdd();
-  if (!files.length && window.Capacitor?.isNativePlatform?.()) $("#files").click();
+  if (!files.length && window.Capacitor?.isNativePlatform?.()) chooseFiles().catch(err => toast(err.message));
+}
+async function chooseFiles() {
+  if (!nativeUploads) return $("#files").click();
+  const target = draft;
+  const {files} = await nativeUploads.choose();
+  if (draft !== target || !files.length) return;
+  addFiles(files);
+  drawAdd();
 }
 function addFiles(files) {
   draft.fileError = "";
@@ -941,7 +1010,7 @@ function addFiles(files) {
       draft.fileError = "Choose PNG, JPEG, WebP, PDF, CBZ or ZIP. Images can be up to 32 MiB each.";
       continue;
     }
-    draft.files.push({ file, url: URL.createObjectURL(file) });
+    draft.files.push({file, url: file.handle ? window.Capacitor.convertFileSrc(file.uri) : URL.createObjectURL(file)});
   }
   if (!draft.title && draft.files.length)
     draft.title = draft.files[0].file.name
@@ -974,7 +1043,7 @@ function drawAdd() {
                 '<div class="thumb" draggable="true" data-index="' +
                 i +
                 '">' +
-                (/\.(pdf|cbz|zip)$/i.test(f.file.name) ? '<span class="pdf-thumb">' + esc(f.file.name.split(".").pop().toUpperCase()) + '</span>' : '<img src="' + f.url + '" alt="">') +
+                (/\.(pdf|cbz|zip)$/i.test(f.file.name) ? '<span class="pdf-thumb">' + esc(f.file.name.split(".").pop().toUpperCase()) + '</span>' : '<img loading="lazy" src="' + esc(f.url) + '" alt="">') +
                 '<small>' +
                 esc(f.file.name) +
                 "</small><div>" +
@@ -1243,7 +1312,24 @@ async function act(action, pageId) {
   if (action === "add" || action === "add-chapter")
     return addBook(action === "add-chapter" ? book.id : "");
   if (action === "chapters") return location.replace("#book/" + book.id);
-  if (action === "choose") return $("#files").click();
+  if (action === "choose") return chooseFiles();
+  if (action === "retry-upload" || action === "dismiss-upload") {
+    if (!nativeUploads) {
+      const index = failedUploads.findIndex(j => j.id === pageId);
+      if (index < 0) return;
+      const [item] = failedUploads.splice(index, 1);
+      if (action === "retry-upload") {
+        item.state = "queued";
+        item.message = "Queued for retry";
+        item.retry = true;
+        if (pendingImport) webUploads.push(item);
+        else runImport(pendingImport = item, true);
+      }
+      return render();
+    }
+    await nativeUploads.change({id: pageId, user: config.username, retry: action === "retry-upload"});
+    return refresh(true);
+  }
   if (action === "next" || action === "prev")
     return turn(action === "next" ? 1 : -1);
   if (action === "next-ch" || action === "prev-ch")
@@ -1478,6 +1564,8 @@ document.addEventListener("change", async (e) => {
   }
 });
 function importStatus(message, percent = null, failed = false) {
+  pendingImport.message = message;
+  if (route()[0] === "queue") render();
   $("#import-status").hidden = false;
   $("#import-name").textContent = pendingImport.name;
   $("#import-message").textContent = message;
@@ -1489,10 +1577,15 @@ function importStatus(message, percent = null, failed = false) {
   $("#import-retry").hidden = $("#import-dismiss").hidden = !failed;
 }
 
-function clearImport() {
+function clearImport(advance = false) {
   pendingImport?.request?.abort();
   pendingImport = null;
   $("#import-status").hidden = true;
+  if (advance && webUploads.length) {
+    pendingImport = webUploads.shift();
+    runImport(pendingImport, pendingImport.retry);
+  }
+  if (route()[0] === "queue") render();
 }
 
 function sendImport(url, opts) {
@@ -1554,11 +1647,17 @@ async function runImport(item, retry = false) {
     if (!added) {
       const network = err instanceof TypeError || err.name === "TimeoutError";
       importStatus(network ? "Couldn’t reach your server. Reconnect and retry." : err.message, null, true);
+      if (webUploads.length) {
+        item.state = "failed";
+        failedUploads.push(item);
+        clearImport(true);
+        toast("An upload needs attention in Queue.");
+      }
       return;
     }
   }
   if (pendingImport !== item) return;
-  clearImport();
+  clearImport(true);
   toast("Added to your library.");
   try {
     await refresh(true);
@@ -1569,7 +1668,7 @@ async function runImport(item, retry = false) {
   }
   const book = catalog.books.find(b => b.id === added.book);
   const chapter = book?.chapters.find(c => c.id === added.chapter);
-  if (chapter?.pages.length && location.hash === item.route && !sheet.open) {
+  if (chapter?.pages.length && !pendingImport && route()[0] !== "queue" && location.hash === item.route && !sheet.open) {
     history.replaceState(null, "", "#book/" + book.id);
     location.hash = readURL(book, chapter.pages[0]);
   }
@@ -1579,21 +1678,48 @@ $("#import-stop").onclick = () => {
   pendingImport.request?.abort();
 };
 $("#import-retry").onclick = () => runImport(pendingImport, true);
-$("#import-dismiss").onclick = clearImport;
+$("#import-dismiss").onclick = () => clearImport(true);
 
 document.addEventListener("submit", async (e) => {
   e.preventDefault();
   if (e.target.id === "account-form") return;
   if (e.target.id === "import") {
-    if (pendingImport) return;
+    const button = e.target.querySelector("button.primary");
+    if (button.disabled) return;
+    button.disabled = true;
     const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
+    const metadata = {import_id: id, book: draft.book, title: draft.title, chapter: draft.chapter,
+      source_language: draft.sourceLanguage, options: settings()};
+    if (nativeUploads) {
+      try {
+        await nativeUploads.enqueue({metadata, user: config.username, origin: location.origin,
+          handles: draft.files.map(f => f.file.handle)});
+      } catch (err) {
+        button.disabled = false;
+        if ($("#import-error")) $("#import-error").textContent = err.message;
+        return;
+      }
+      closeSheet();
+      location.hash = "queue";
+      try { await refresh(true); } catch (err) { toast(err.message); }
+      return;
+    }
     const form = new FormData();
-    form.append("metadata", JSON.stringify({import_id: id, book: draft.book,
-      title: draft.title, chapter: draft.chapter, source_language: draft.sourceLanguage, options: settings()}));
+    form.append("metadata", JSON.stringify(metadata));
     draft.files.forEach(f => form.append("page", f.file));
-    pendingImport = {id, form, name: draft.title || draft.chapter, route: location.hash};
+    const item = {id, form, name: catalog.books.find(b => b.id === draft.book)?.title || draft.title,
+      chapter: draft.chapter, route: location.hash};
     closeSheet();
-    return runImport(pendingImport);
+    if (!pendingImport) return runImport(pendingImport = item);
+    webUploads.push(item);
+    if (!pendingImport.request && !$("#import-retry").hidden) {
+      pendingImport.state = "failed";
+      failedUploads.push(pendingImport);
+      clearImport(true);
+    }
+    location.hash = "queue";
+    render();
+    return toast("Upload queued.");
   }
   const button = e.target.querySelector('button:not([type="button"])');
   if (button) button.disabled = true;
@@ -1630,6 +1756,7 @@ document.addEventListener("drop", (e) => {
   e.preventDefault();
   if (!config) return;
   if (e.dataTransfer.files.length) {
+    if (nativeUploads) { toast("Use Choose pages for background uploads."); return; }
     if (!draft) addBook("", e.dataTransfer.files);
     else {
       addFiles(e.dataTransfer.files);
@@ -1684,7 +1811,7 @@ addEventListener("tralens-back", event => {
   else if ($("#keep-server")) $("#keep-server").click();
   else if ($('#account-form input[autocomplete="new-password"]') && $(".account-switch:not([hidden])")) $(".account-switch").click();
   else if (current().page) location.replace("#book/" + current().book.id);
-  else if (config && ["book", "settings"].includes(route()[0])) location.replace("#library");
+  else if (config && ["book", "settings", "queue"].includes(route()[0])) location.replace("#library");
   else return;
   event.preventDefault();
 });
@@ -1692,6 +1819,7 @@ addEventListener("hashchange", () => {
   if (!config) return;
   if (sheet.open) closeSheet();
   render();
+  if (route()[0] === "queue") poll();
   window.scrollTo(0, 0);
 });
 function accountChanged() {
@@ -1717,6 +1845,7 @@ function serverOrigin(value) {
 }
 const nativeConnection = window.Capacitor?.isPluginAvailable?.("ReaderConnection")
   ? window.Capacitor.Plugins.ReaderConnection : null;
+const nativeUploads = window.Capacitor?.isPluginAvailable?.("ReaderUploads") ? window.Capacitor.Plugins.ReaderUploads : null;
 const offlineModule = nativeConnection ? await import("./offline.js") : null;
 const offlineKey = "tralens-offline-account";
 let offline, offlineUser;
@@ -1763,6 +1892,8 @@ function verifyServer(origin) {
 }
 function accountCard(title, intro, content) {
   keepPrepared([]);
+  webUploads.length = failedUploads.length = 0;
+  deviceUploads = [];
   if (pendingImport) clearImport();
   if (sheet.open) sheet.close();
   clearTimeout(pollTimer);
@@ -1920,6 +2051,11 @@ async function init() {
     if (offlineModule && !navigator.onLine && localStorage.getItem(offlineKey)) throw Error("Offline");
     config = await api("config");
     bindDownloads(config.username);
+    if (nativeUploads && !document.hidden) {
+      const user = config.username;
+      const paused = (await nativeUploads.list({user})).jobs.find(j => j.state === "paused");
+      if (paused) await nativeUploads.change({id: paused.id, user, retry: true}).catch(() => {});
+    }
     rememberServer(location.origin);
     try {
       const saved = localStorage.getItem("tralens-reader:" + config.username) ||
