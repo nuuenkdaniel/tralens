@@ -4,8 +4,8 @@
 !uv.lock
 !README.md
 !LICENSE
-!THIRD_PARTY_NOTICES.md
-!PRIVACY.md
+!THIRD_PARTY_NOTICES.txt
+!PRIVACY.txt
 !deploy/
 !deploy/*.py
 !deploy/*.sh
