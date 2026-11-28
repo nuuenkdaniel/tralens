@@ -60,6 +60,47 @@ class PlacementTests(unittest.TestCase):
             self.assertNotIn('patch_artifact',row['display_fallback'])
             self.assertEqual(row['display_fallback']['layout']['original_text'],row['binding']['text'])
 
+    def test_reader_floor_overflows_edge_box_without_covering_other_text(self):
+        from types import SimpleNamespace
+        raw = [dict(source_id=i, polygon=poly) for i, poly in enumerate((
+            [[0,0],[14,0],[14,12],[0,12]], [[56,0],[108,0],[108,22],[56,22]]))]
+        target = 'Keep the entire message, including punctuation!'
+        row = dict(status='skipped', reason_code='ruled_table_cell',
+                   binding=dict(member_ids=[0], text=target))
+        units = [SimpleNamespace(selected=SimpleNamespace(text='元'))]
+        _,_,_,ink,_,_,summary = v.display(self.image,raw,units,[row],self.image,
+            Image.new('RGBA',self.image.size),self.image,self.font,self.coverage,
+            dict(min_size=24,max_size=30,readability_floor=24),replace_all=True)
+        self.assertEqual(summary['displayed_translations'],1)
+        proof = row['display_fallback']['layout']
+        self.assertEqual(proof['original_text'],target)
+        self.assertGreaterEqual(proof['size'],24)
+        self.assertGreater(ink.getbbox()[2],15)
+        self.assertIsNone(ink.crop((56,0,109,23)).getbbox())
+
+    def test_forced_word_break_keeps_trailing_punctuation_with_letters(self):
+        from io import BytesIO
+        from PIL import ImageFont
+        from tralens.rendering.compact_lettering import wrap
+        font = ImageFont.truetype(BytesIO(self.font), 24)
+        for word in ('understand.', 'Yaginari,', 'Wait!'):
+            lines = wrap(word, font, font.getlength(word[:-1]))
+            self.assertEqual(''.join(lines), word)
+            self.assertTrue(lines[-1][0].isalpha())
+            self.assertGreater(len(lines[-1]), 1)
+
+    def test_dense_reader_caption_can_use_space_beyond_the_first_search_window(self):
+        from tralens.rendering import compact_lettering
+        blocked = np.ones((240,1200),bool)
+        blocked[30:210,920:1195] = False
+        art = np.full((*blocked.shape,3),250,np.uint8)
+        target = 'Words stay legible even on a densely lettered page.'
+        layer,proof = compact_lettering.letters(art,(440,95,490,110),blocked,target,self.font,
+            {'min_size':8,'readability_floor':24})
+        self.assertEqual(proof['size'],24)
+        self.assertEqual(''.join(proof['lines']),target)
+        self.assertFalse((np.asarray(layer.getchannel('A')).astype(bool) & blocked).any())
+
     def test_cleanplate_preserves_crossing_rules_without_joining_unrelated_ends(self):
         for color in ((249,249,249),(216,239,218)):
             paper=np.full((72,116,3),color,np.uint8)

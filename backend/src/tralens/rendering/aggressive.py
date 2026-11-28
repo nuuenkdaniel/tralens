@@ -1967,6 +1967,28 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
                 if np.mean(delta) <= 12:
                     mask = mask & ~overlap
                     entry['retained_neighbor_cleanup_pixels'] = int(overlap.sum())
+        if ('readability_floor' in style and not (mask & reserved[y:b,x:r]).any()
+                and (layer is None or (local_alpha & blocked).any())):
+            # Keep the selected cleanplate. Only the English may cross the source box.
+            from .compact_lettering import letters
+            if font_resolver is not None:
+                font_data,coverage = font_resolver(row)
+            try:
+                target = row['binding']['text']
+                n.validate_text(target,coverage)
+                layer,metrics = letters(candidate,(sx,sy,sx+sw,sy+sh),job['protected'] | blocked,
+                                        target,font_data,style)
+            except ValueError:
+                pass
+            else:
+                if (backend is not None and backend.config.get('backend') == 'auto'
+                        and method in ('dominant_surface_fill','measured_uniform_fill') and not row.get('effect_style')):
+                    from . import balloon_expansion
+                    layer,metrics = balloon_expansion.finish(candidate,job['own'],job['protected'] | blocked,
+                                                             layer,metrics,font_data,coverage)
+                local_alpha = np.asarray(layer.getchannel('A'))!=0
+                entry.update(layout=metrics,placement_frame='readable_overflow')
+                job['proof'] = metrics
         if layer is None or (mask&reserved[y:b,x:r]).any() or (local_alpha&blocked).any():
             # Retain candidate evidence. Automatic reuse in final cleanup was
             # rejected after visual trials showed copied/hallucinated lettering.

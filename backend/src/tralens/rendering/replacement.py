@@ -194,6 +194,8 @@ def compact_paper_label(crop, own, support, protected, text, font, coverage, sty
             continue
         layer = layer.crop(layer.getchannel('A').getbbox())
         for aspect in (1,.9,.8,.72,.66):
+            if proof['size'] * aspect < style.get('readability_floor', 0):
+                continue
             glyph = layer if aspect==1 else layer.resize((max(1,round(layer.width*aspect)),layer.height),Image.Resampling.LANCZOS)
             if angle:
                 glyph = glyph.rotate(angle,Image.Resampling.BICUBIC,expand=True)

@@ -364,14 +364,15 @@ def replace_at_source(rgb, bounds, own, blocked, text, font_data, coverage, styl
     return 'aggressive', patch, layer, (x,y), proof, [{'route':'source_local_replacement','cleanup':method}]
 
 
-def source_window(rgb, polygons, members, reserved, native_clean, native_erase, lettering_taken, row, font, style, commit_mask):
+def source_window(rgb, polygons, members, reserved, native_clean, native_erase, lettering_taken, row, font, style, commit_mask, cleared_sources=None, earlier_patches=None):
     """Work in source coordinates. A saved cleanplate can receive its own lettering."""
     pts = [pt for k in members for pt in polygons[k]]
     xs,ys = zip(*pts)
     l,t = max(0,int(min(xs))),max(0,int(min(ys)))
     r,b = min(rgb.width,int(max(xs))+1),min(rgb.height,int(max(ys))+1)
     n.require(r>l and b>t,'empty clipped source region')
-    pad = min(256,max(64,int(1.8*style['min_size']*math.sqrt(len(row['binding']['text'])))))
+    window_limit = 512 if 'readability_floor' in style else 256
+    pad = min(window_limit,max(64,int(1.8*style['min_size']*math.sqrt(len(row['binding']['text'])))))
     x,y = max(0,l-pad),max(0,t-pad)
     end,base = min(rgb.width,r+pad),min(rgb.height,b+pad)
     window = (x,y,end,base)
@@ -419,11 +420,34 @@ def source_window(rgb, polygons, members, reserved, native_clean, native_erase, 
         source = own & ~blocked
         n.require(source.any(),'no owned source pixels to replace')
         crop = np.asarray(region)
-        if source.size <= 4*MAX_LOCAL_PIXELS and (~p.dilate(source,2)).any():
-            clean,erase,method = source_cleanplate(crop,source,blocked,short_effect=len(label)<=20 and max(r-l,b-t)<=200)
+        # A wider lettering search must not enlarge the inpainting mask.
+        # Estimate the background next to the source, even on a large page.
+        left,top,right,bottom = bounds
+        area = (np.s_[:,:] if source.size <= 4*MAX_LOCAL_PIXELS else
+                np.s_[max(0,top-32):bottom+32,max(0,left-32):right+32])
+        clean = crop.copy()
+        erase = np.zeros_like(source)
+        if source[area].size <= 4*MAX_LOCAL_PIXELS and (~p.dilate(source[area],2)).any():
+            clean[area],erase[area],method = source_cleanplate(crop[area],source[area],blocked[area],
+                short_effect=len(label)<=20 and max(r-l,b-t)<=200)
         else:
-            clean = np.full_like(crop,255)
+            clean[source] = 255
             erase,method = source,'opaque_source_backing'
+    if cleared_sources is not None:
+        # Cleared sign rows can share paper. Keep their English and all
+        # still-visible source lettering protected, even when boxes overlap.
+        retained = Image.new('1',own.shape[::-1])
+        for identity,points in nearby.items():
+            if identity not in cleared_sources and identity not in members:
+                ImageDraw.Draw(retained).polygon(points,fill=1)
+        type_blocked = np.asarray(retained) | p.dilate(lettering_taken[roi],2)
+        # Preserve every earlier cleanup under antialiased type that lands there.
+        background = native_clean.crop(window).convert('RGBA')
+        background.alpha_composite(earlier_patches.crop(window))
+        plate = np.asarray(background.convert('RGB')).copy()
+        plate[erase] = clean[erase]
+        clean = plate
+        blocked = type_blocked & ~erase
     patch,letters,proof = compact_lettering.paint(clean,erase,bounds,blocked,label,font[0],style)
     return ('aggressive',patch,letters,(0,0),proof,[{'route':'compact_source_lettering','cleanup':method}]),window,own,blocked,bounds
 
@@ -454,11 +478,16 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
         else:
             counts += np.asarray(n.polygon_mask(polygon,rgb.size,evidence=True)) != 0
         polygons[key(detection['source_id'])] = polygon
+    cleared_sources = ({key(k) for row in rows if row['status']=='automatic_composed'
+                        for k in row['binding']['member_ids']} if replace_all and 'readability_floor' in style else None)
     tiles = {}
     attempts = 0
     order = list(enumerate(zip(units,rows)))
     order.sort(key=lambda pair: (pair[1][1].get('reason_code') != 'replacement_layout_confidence',
         -(pair[1][1].get('replacement_confidence',{}).get('minimum_main_line_score') or 0), pair[0]))
+    if cleared_sources is not None:
+        # A short label can move into a gap that a paragraph cannot use.
+        order.sort(key=lambda item: -len(item[1][1].get('binding',{}).get('text','')))
     for i,(unit,row) in order:
         if row['status'] == 'automatic_composed':
             row.update(display_status=composed_status(row),source_visibility='clean_replacement_unverified' if composed_status(row)=='clean' else 'aggressive_removal_unverified')
@@ -496,7 +525,7 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
                 members = {key(k) for k in row['binding']['member_ids']}
                 placement,window,own,blocked,bounds = source_window(rgb,polygons,members,reserved,native_clean,native_erase,
                     lettering_taken,row,(font_data,coverage),style,
-                    (cleanup_artifacts or {}).get(f'recovery-final-{i:03d}-commit-mask.png'))
+                    (cleanup_artifacts or {}).get(f'recovery-final-{i:03d}-commit-mask.png'),cleared_sources,patch_layer)
                 ox,oy,_,_ = window
                 x,y,right,bottom = bounds
                 x,y,w,h = x+ox,y+oy,right-x,bottom-y
@@ -528,8 +557,11 @@ def display(rgb, raw, units, rows, native_clean, native_text, native_composite, 
             dest = np.s_[py:py+ph,px:px+pw]
             if kind=='aggressive':
                 reserved[dest] |= mask
-                lettering_taken[dest] |= mask
-                if row.get('removal_fallback',{}).get('status')=='removed':
+                lettering_taken[dest] |= alpha if cleared_sources is not None else mask
+                if cleared_sources is not None:
+                    cleared_sources.update(members)
+                    reused_clean[dest] |= alpha & native_erase[dest]
+                elif row.get('removal_fallback',{}).get('status')=='removed':
                     reused_clean[dest] |= alpha & native_erase[dest]
             else:
                 occupied = np.zeros(shape,bool)

@@ -466,13 +466,15 @@ class ViewerTests(unittest.TestCase):
                          crop_reader_model=self.root/'hayai')
         image = self.root/'reader.png'
         from PIL import Image
-        Image.new('RGB',(390,600),'white').save(image)
+        Image.new('RGB',(1200,1600),'white').save(image)
         settings = s.options({'translation_policy':'coverage-first'},render_enabled=True)
         with patch.object(main,'run_pipeline') as pipeline:
             s.execute_job(config,dict(image=image,directory=self.root/'reader',options=settings))
         self.assertEqual(pipeline.call_args.kwargs['crop_reader_model'], config.crop_reader_model)
         self.assertFalse(pipeline.call_args.kwargs['reader_presentations'])
         self.assertEqual(pipeline.call_args.kwargs['timeout'],300)
+        self.assertTrue(pipeline.call_args.kwargs['enforce_min_size'])
+        self.assertEqual(pipeline.call_args.kwargs['min_size'],31)
 
     def test_mode_dispatch_reuses_coordinator_and_preview_workflow(self):
         import main
