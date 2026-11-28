@@ -1,4 +1,6 @@
-"""Rejected presentation diagnostic; see docs/reconstruction-context-results-v2.md.
+"""Rejected presentation diagnostic.
+
+Results: https://github.com/nuuenkdaniel/tralens/blob/b33a1775a1eac1e6e4feef966611969acdaf4755/docs/reconstruction-context-results-v2.md
 
 Not imported by production. Presentation space never grants erase permission.
 """

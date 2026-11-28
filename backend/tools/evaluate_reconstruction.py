@@ -60,7 +60,9 @@ def freeze(root,cases,config):
         for name,image in (('clean',clean),('source',source),('alpha',Image.fromarray(alpha.astype(np.uint8)*255)),('geometry',Image.fromarray(own.astype(np.uint8)*255))):image.save(out/(name+'.png'))
         synthetic.append({'name':kind,'files':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in out.iterdir()}})
     plan={'scope':'reused saved pages, provisional visual assessment; not independent bilingual or untouched-title confirmation',
-        'criteria_document':'docs/production-best-effort-plan.md','model':rec.configuration(config),
+        'criteria_document':('https://github.com/nuuenkdaniel/tralens/blob/'
+                             'b33a1775a1eac1e6e4feef966611969acdaf4755/docs/production-best-effort-plan.md'),
+        'model':rec.configuration(config),
         'maximum_learned_forwards':64,'synthetic_calls':8,'maximum_page_calls':8,
         'cases':frozen,'synthetic':synthetic,'primary_words_changed':False}
     save(root/'evaluation-plan.json',plan)
