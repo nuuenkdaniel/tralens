@@ -15,6 +15,17 @@ for flag in "$@"; do
   esac
 done
 [[ -d "$work" ]] || { echo "Run frontend/android/provision first." >&2; exit 1; }
+gradle_version=()
+if [[ "$variant" == release && ( -n "${TRALENS_ANDROID_VERSION_CODE:-}" || -n "${TRALENS_ANDROID_VERSION_NAME:-}" ) ]]; then
+  code=${TRALENS_ANDROID_VERSION_CODE:-}
+  name=${TRALENS_ANDROID_VERSION_NAME:-}
+  if [[ ! "$code" =~ ^[1-9][0-9]{0,9}$ ]] || (( code > 2100000000 )) \
+    || [[ ! "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
+    echo "Set a valid Android version code and version name for the release build." >&2
+    exit 2
+  fi
+  gradle_version=(--init-script "$src/release-version.gradle")
+fi
 cp -- "$src"/{capacitor.config.json,package.json,package-lock.json} "$work/"
 npm_network=(--offline)
 gradle_network=()
@@ -34,8 +45,16 @@ else
   python3 "$src/network-config.py" "$work/android/app/src/main/res"
   apk=app-debug.apk
 fi
-"$run" gradle "${gradle_network[@]}" -p android ":app:assemble${variant^}"
+"$run" gradle "${gradle_network[@]}" "${gradle_version[@]}" -p android ":app:assemble${variant^}"
+built_apk="$work/android/app/build/outputs/apk/$variant/$apk"
+if (( ${#gradle_version[@]} )); then
+  badging=$("$run" aapt2 dump badging "$built_apk")
+  if [[ "$badging" != "package: name='app.tralens.reader' versionCode='$code' versionName='$name' "* ]]; then
+    echo "The release APK does not contain the expected package and version." >&2
+    exit 1
+  fi
+fi
 mkdir -p "$root/outputs"
 output="$root/outputs/${apk/app-/tralens-}"
-cp -- "$work/android/app/build/outputs/apk/$variant/$apk" "$output"
+cp -- "$built_apk" "$output"
 echo "APK: $output"

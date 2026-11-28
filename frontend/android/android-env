@@ -24,7 +24,7 @@ case "${1:-}" in
   adb)
     export ADB_SERVER_SOCKET=tcp:localhost:5059 ANDROID_ADB_SERVER_PORT=5059
     ;;
-  java|javac|node|npm|aapt2|apksigner|sdkmanager) ;;
-  *) echo 'Usage: android-env {gradle [--online]|java|javac|node|npm|aapt2|apksigner|adb|sdkmanager} [args]' >&2; exit 2 ;;
+  java|javac|node|npm|aapt2|apksigner|sdkmanager|zipalign) ;;
+  *) echo 'Usage: android-env {gradle [--online]|java|javac|node|npm|aapt2|apksigner|adb|sdkmanager|zipalign} [args]' >&2; exit 2 ;;
 esac
 exec env HOME="$root/home" "$@"
