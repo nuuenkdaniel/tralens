@@ -74,6 +74,42 @@ docker compose exec -T reader cat /library/owner-setup.url | tr -d '\r\n' | qren
 ```
 
 If the camera opens a browser, finish setup there, then reopen the app and sign in with the same credentials. Keep the link and QR code private until setup finishes. If the reader restarts before you finish, run the command again for the new link.
+### Android app
+
+Download the signed `tralens-android-<version>.apk` and its `.sha256` file from
+the same [GitHub release](https://github.com/nuuenkdaniel/tralens/releases) as the
+Compose bundle. Verify the download with `sha256sum -c <apk-filename>.sha256`,
+then open the APK on Android to install it. The Android app connects to your
+self-hosted reader. Set up remote HTTPS access,
+then enter the reader's hostname in the app, enable **Use HTTPS**, and use port
+`443` unless your reverse proxy uses a different port.
+
+#### Android release signing
+
+Keep the PKCS#12 keystore and its password in a secure backup outside the
+checkout. Use the same signing key for every public APK so Android can install
+updates. If this is the first release and you need a key, run this from a
+private directory and choose a strong password at the prompt.
+
+```sh
+keytool -genkeypair -storetype PKCS12 -keystore tralens-release.p12 \
+  -alias tralens-release -keyalg RSA -keysize 3072 -validity 10000
+```
+
+Add the base64-encoded keystore and its password as Actions secrets in the
+`public-beta` environment. From an authenticated GitHub CLI, run the following
+and enter the keystore password when prompted by the second command.
+
+```sh
+base64 < tralens-release.p12 | gh secret set ANDROID_RELEASE_KEYSTORE_BASE64 \
+  --env public-beta --repo nuuenkdaniel/tralens
+gh secret set ANDROID_RELEASE_KEYSTORE_PASSWORD \
+  --env public-beta --repo nuuenkdaniel/tralens
+```
+
+For **Stage public beta**, use Android version code `1` for the first public
+APK and a higher code for each later release. Verify the draft's APK and checksum,
+and test installation and reader sign-in before publishing.
 
 ## Translation models
 

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# != 3 ]]; then
+  echo 'Usage: sign-apk UNSIGNED_APK SIGNED_APK RELEASE_KEYSTORE' >&2
+  exit 2
+fi
+if [[ -z ${ANDROID_RELEASE_KEYSTORE_PASSWORD-} ]]; then
+  echo 'Set the Android release keystore password.' >&2
+  exit 2
+fi
+run="$(cd -- "$(dirname -- "$0")" && pwd -P)/android-env"
+input=$(realpath -e -- "$1")
+output=$(realpath -m -- "$2")
+keystore=$(realpath -e -- "$3")
+if [[ "$output" == "$input" || "$output" == "$keystore" ]]; then
+  echo 'Choose a separate path for the signed APK.' >&2
+  exit 2
+fi
+
+work=$(mktemp -d -- "$(dirname -- "$output")/.sign-apk.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+"$run" zipalign -P 16 4 "$input" "$work/aligned.apk"
+"$run" apksigner sign --ks "$keystore" --ks-type PKCS12 --ks-key-alias tralens-release \
+  --out "$work/signed.apk" "$work/aligned.apk" <<< "$ANDROID_RELEASE_KEYSTORE_PASSWORD"
+"$run" zipalign -c -P 16 4 "$work/signed.apk"
+"$run" apksigner verify "$work/signed.apk"
+mv -T -- "$work/signed.apk" "$output"
