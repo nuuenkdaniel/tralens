@@ -473,7 +473,7 @@ function detail(b) {
               .join(" · "),
           ) +
           "</small></a>" + '<button class="btn" data-action="chapter-language" data-id="' + c.id +
-          '">Language · ' + (c.source_language === "auto" ? "Manga" : sourceLanguages[c.source_language || "ja"]) +
+          '">Language · ' + sourceLanguages[c.source_language || "ja"] +
           (c.source_language === "auto" && c.detected_language ? " (" + sourceLanguages[c.detected_language] + (c.language_uncertain ? ", uncertain" : "") + ")" : "") +
           '</button>' + (offline ? '<button class="btn" data-action="save-offline" data-id="' + c.id +
             '">' + icon("download") + 'Save offline</button>' : "") + "<details><summary>Pages in " +
@@ -904,7 +904,7 @@ sheet.addEventListener("close", () => {
   showChrome();
 });
 const sourceLanguages = {auto: "Auto", ja: "Japanese", zh: "Chinese", ko: "Korean"};
-function languageSelect(value, autoLabel = "Auto-detect once for this manga") {
+function languageSelect(value, autoLabel = sourceLanguages.auto) {
   return '<label class="field">Source language<select id="source-language">' +
     Object.entries(sourceLanguages).map(([code, name]) =>
       '<option value="' + code + '"' + (code === value ? " selected" : "") + '>' + (code === "auto" ? autoLabel : name) + '</option>'
@@ -1019,7 +1019,7 @@ function drawAdd() {
       '<label class="field">Chapter<input id="chapter" maxlength="200" required value="' +
       esc(draft.chapter) +
       '"></label>' +
-      '</div></details>' + languageSelect(draft.sourceLanguage, draft.book ? "Use manga language" : undefined) + '<p class="hint">' +
+      '</div></details>' + languageSelect(draft.sourceLanguage) + '<p class="hint">' +
       esc(privacy()) +
       '</p><div class="error" role="alert" id="import-error">' + esc(draft.fileError) + '</div><button class="primary" ' +
       (!draft.files.length || !config.render_enabled ? "disabled" : "") +
@@ -1172,7 +1172,7 @@ async function act(action, pageId) {
     const {book} = current();
     const chapter = action === "chapter-language" ? book.chapters.find(c => c.id === pageId) : null;
     const detected = sourceLanguages[book.detected_language];
-    const autoLabel = chapter ? "Use manga language" : detected
+    const autoLabel = !chapter && detected
       ? "Auto · " + detected + (book.language_uncertain ? " (uncertain)" : "") : undefined;
     modal(chapter ? chapter.title : "Manga language", '<form id="language-form"' +
       (chapter ? ' data-chapter="' + chapter.id + '"' : "") + '>' +
