@@ -141,7 +141,7 @@ class AccountTests(unittest.TestCase):
         catalog = json.loads(self.call("/api/library", cookie=alice)[2])
         page = catalog["books"][0]["chapters"][0]["pages"][0]["id"]
         self.assertGreater(catalog["bytes"], 0)
-        self.assertEqual(json.loads(self.call("/api/library", cookie=bob)[2]), {"books": [], "bytes": 0})
+        self.assertEqual(json.loads(self.call("/api/library", cookie=bob)[2]), {"books": [], "bytes": 0, "queue": []})
         for variant in ["original", "translated", "transcript"]:
             self.assertEqual(self.call(f"/api/library/pages/{page}/{variant}", cookie=bob)[0], 404)
         for variant in ["original", "translated", "both"]:

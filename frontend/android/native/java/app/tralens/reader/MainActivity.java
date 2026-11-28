@@ -47,6 +47,8 @@ public class MainActivity extends BridgeActivity {
         config = new CapConfig.Builder(this).setHostname(port == defaultPort() ? host : host + ":" + port)
             .setAndroidScheme(scheme).setLoggingEnabled(false).create();
         registerPlugin(ReaderConnection.class);
+        registerPlugin(ReaderUploads.class);
+        registerPlugin(ReaderDownloads.class);
         registerPlugin(PhoneSignIn.class);
         super.onCreate(state);
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
@@ -81,6 +83,7 @@ public class MainActivity extends BridgeActivity {
                 super.onPageFinished(view, url);
                 // Login and logout both reload the reader.
                 CookieManager.getInstance().flush();
+                openTransfersIfRequested(view);
             }
 
             @Override
@@ -106,6 +109,21 @@ public class MainActivity extends BridgeActivity {
                 return super.shouldInterceptRequest(view, request);
             }
         });
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (bridge != null && bridge.getWebView().getProgress() == 100) openTransfersIfRequested(bridge.getWebView());
+    }
+
+    private void openTransfersIfRequested(WebView view) {
+        String action = getIntent().getAction();
+        if ("app.tralens.reader.QUEUE".equals(action) || "app.tralens.reader.DOWNLOADS".equals(action)) {
+            getIntent().setAction(null);
+            view.evaluateJavascript("app.tralens.reader.QUEUE".equals(action) ? "location.hash = 'queue'" : "location.hash = 'downloads'", null);
+        }
     }
 
     @Override

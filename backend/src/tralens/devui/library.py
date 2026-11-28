@@ -225,14 +225,17 @@ class Library:
                                 language_uncertain=book["language_uncertain"] if inherited else False,
                                 detection_seconds=book["detection_seconds"] if inherited else None)
                 book["chapters"].append(chap)
+            queue = {}
             for r in db.execute(
                 "SELECT id,chapter,name,width,height,status,error,reading_width,reading IS NOT NULL AND reading != '[]' AS has_text,updated,final IS NOT NULL AS ready FROM pages WHERE chapter IN (SELECT chapters.id FROM chapters JOIN books ON chapters.book=books.id WHERE account=?) ORDER BY rowid", (account,)
             ):
                 chapters[r["chapter"]]["pages"].append(dict(r))
+                if r["status"] in ("queued", "running", "waiting"):
+                    queue.setdefault(r["chapter"], None)
             used = db.execute(
                 "SELECT coalesce(sum(length(source)+coalesce(length(final),0)),0) FROM pages JOIN chapters ON pages.chapter=chapters.id JOIN books ON chapters.book=books.id WHERE books.account=?", (account,)
             ).fetchone()[0]
-        return dict(books=list(books.values()), bytes=used)
+        return dict(books=list(books.values()), bytes=used, queue=list(queue))
 
     def settings(self, supplied, account="owner"):
         settings = options(supplied, render_enabled=self.app.config.fonts is not None)

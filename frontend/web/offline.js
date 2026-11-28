@@ -60,6 +60,14 @@ export class OfflineLibrary {
       return {blob, saved: latest.saved};
     });
   }
+  position(record, index) {
+    return this.run(["chapters"], "readwrite", async c => {
+      const latest = await result(c.get(record.id));
+      if (latest?.generation !== record.generation) throw Error("Download changed. Reopen Downloads.");
+      latest.position = index;
+      c.put(latest);
+    });
+  }
   remove(id) {
     return this.run(["chapters", "pages"], "readwrite", (c, p) => {
       p.delete(IDBKeyRange.bound([id, 0], [id, Number.MAX_SAFE_INTEGER]));
@@ -71,57 +79,124 @@ export class OfflineLibrary {
 // A separate dialog keeps offline navigation independent of online jobs, polling and reading position.
 export function downloads(username, {escape, notify, direction, unauthorized, progressChanged}) {
   const store = new OfflineLibrary(username);
+  const native = window.Capacitor?.isPluginAvailable?.("ReaderDownloads") ? window.Capacitor.Plugins.ReaderDownloads : null;
+  const scope = {user: username, origin: location.origin};
+  let timer, previousRows = "";
+  async function records() {
+    const read = ++reads;
+    let rows = await store.list();
+    if (native && rows.length) {
+      const {jobs} = await native.status(scope);
+      rows = rows.map(row => {
+        const job = jobs[row.generation];
+        return job ? {...row, localSaved: row.saved, saved: Math.max(row.saved, job.saved), state: job.state, error: job.error} : row;
+      });
+    }
+    // A newer read owns the buttons. The web download loop reports its own chapter.
+    if (read === reads) for (const row of rows)
+      if (row.id !== saving) remember(row.id, row.saved, row.urls.length, row.state === "queued");
+    return rows;
+  }
   const dialog = document.createElement("dialog");
   dialog.className = "offline-library";
   dialog.setAttribute("aria-label", "Downloads");
   document.body.append(dialog);
   let controller, saving, active, objectURL, serial = 0, disposed = false, feedback = "";
   const progress = new Map();
-  function remember(id, saved, total) {
+  let reads = 0, startingUntil = 0;
+  function remember(id, saved, total, running = saving === id) {
     if (disposed) return;
-    progress.set(id, {saved, total, running: saving === id});
+    const old = progress.get(id);
+    if (old?.saved === saved && old.total === total && old.running === running) return;
+    progress.set(id, {saved, total, running});
     progressChanged(id);
   }
-  const restored = store.list().then(rows => {
-    for (const row of rows) remember(row.id, row.saved, row.urls.length);
-  }).catch(() => {});
   const button = (action, label) => '<button class="btn" data-local="' + action + '">' + label + '</button>';
   function releaseImage() {
-    if (objectURL) URL.revokeObjectURL(objectURL);
+    if (objectURL?.startsWith("blob:")) URL.revokeObjectURL(objectURL);
     objectURL = null;
   }
   function errorMessage(err) {
     return err.name === "QuotaExceededError" ? "Device storage is full. Remove a download and resume." : err.message;
   }
+  // Load saved progress now, and keep following Android downloads that are still running.
+  const restored = records().then(schedule).catch(() => {});
+  async function refresh() {
+    if (disposed) return;
+    if (dialog.open && !active) return list();
+    schedule(await records());
+  }
   async function list() {
     const version = ++serial;
     active = null;
-    const rows = await store.list();
+    const rows = await records();
     if (version !== serial || disposed) return;
+    previousRows = JSON.stringify(rows);
     releaseImage();
     if (!dialog.open) dialog.showModal();
     dialog.innerHTML = '<header class="line"><h1>Downloads</h1>' + button("close", "Close") + '</header>' +
       (feedback ? '<p role="alert" class="error">' + escape(feedback) + '</p>' : "") +
       (rows.length ? rows.map(r => {
-        const running = r.id === saving;
+        const running = r.id === saving || r.state === "queued";
         return '<section class="panel" data-chapter-id="' + escape(r.id) + '"><h2>' + escape(r.book) + '</h2><p>' +
           escape(r.title) + '</p>' + (r.originals ? '<p class="meta">' + r.originals + ' ' +
             (r.originals === 1 ? 'page uses' : 'pages use') + ' original artwork in this download.</p>' : '') +
+          (r.error ? '<p class="error">' + escape(r.error) + '</p>' : '') +
           '<p class="meta" role="status">' + r.saved + ' of ' + r.urls.length + ' pages saved</p><div class="actions">' +
           ('<button class="btn primary" data-local="read"' + (r.saved ? '' : ' hidden') + '>Read offline</button>') + (running ? button("pause", "Pause") :
             (r.saved < r.urls.length ? button("resume", "Resume download") : "") + button("remove", "Remove download")) +
           '</div></section>';
       }).join("") : '<p>No chapters saved. Open a chapter in your library and choose Save offline.</p>');
+    schedule(rows);
   }
+  function updateTotal(total) {
+    if (!active || total === active.saved) return;
+    active.saved = total;
+    const slider = dialog.querySelector('input[type="range"]');
+    slider.max = String(total);
+    slider.disabled = total <= 1;
+    dialog.querySelector("[data-total]").textContent = total;
+    dialog.querySelector('[data-local="next"]').disabled = active.position + 1 >= total;
+  }
+  function schedule(rows) {
+    clearTimeout(timer);
+    // Android reports "paused" until its service has started, so keep checking briefly after a start.
+    if (native && !disposed && !document.hidden && rows.some(r => r.saved < r.urls.length &&
+        (dialog.open || r.state === "queued" || Date.now() < startingUntil)))
+      timer = setTimeout(() => sync().catch(err => notify(errorMessage(err))), 1200);
+  }
+  async function sync() {
+    if (!native || disposed || document.hidden) return;
+    const version = serial;
+    const rows = await records();
+    if (version !== serial || disposed) return;
+    if (active) {
+      const row = rows.find(r => r.generation === active.generation);
+      if (row) updateTotal(row.saved);
+    } else if (dialog.open && JSON.stringify(rows) !== previousRows) return list();
+    schedule(rows);
+  }
+  function visibility() {
+    if (document.hidden) clearTimeout(timer);
+    else sync().catch(err => notify(errorMessage(err)));
+  }
+  document.addEventListener("visibilitychange", visibility);
   async function read(id, index) {
     const version = ++serial;
-    const row = active?.id === id ? active : (await store.list()).find(r => r.id === id);
+    const row = active?.id === id ? active : (await records()).find(r => r.id === id);
     if (!row || version !== serial || disposed) return;
     const i = index ?? row.position;
-    const {blob, saved} = await store.page(row, i);
+    let blob, path;
+    if (native && row.localSaved !== undefined && i >= row.localSaved) {
+      ({path} = await native.page({...scope, generation: row.generation, index: i}));
+      await store.position(row, i);
+    } else {
+      ({blob} = await store.page(row, i));
+    }
+    const saved = row.saved;
     if (version !== serial || disposed || !dialog.open) return;
     releaseImage();
-    objectURL = URL.createObjectURL(blob);
+    objectURL = path ? window.Capacitor.convertFileSrc(path) : URL.createObjectURL(blob);
     active = {...row, saved, position: i};
     const focused = dialog.querySelector(":focus");
     dialog.innerHTML = '<div class="offline-reader"><header class="line">' + button("list", "Downloads") +
@@ -133,6 +208,7 @@ export function downloads(username, {escape, notify, direction, unauthorized, pr
       '" dir="' + (direction() === "rtl" ? "rtl" : "ltr") + '"' + (saved === 1 ? ' disabled' : '') +
       '></label><button class="btn" data-local="next"' +
       (i+1 < saved ? '' : ' disabled') + '>Next</button></footer></div>';
+    schedule([active]);
     const control = focused?.dataset.local;
     if (focused?.type === "range") dialog.querySelector('input[type="range"]').focus({preventScroll:true});
     else if (control === "prev" || control === "next") {
@@ -144,7 +220,18 @@ export function downloads(username, {escape, notify, direction, unauthorized, pr
     await restored;
     if (disposed) return;
     const previous = progress.get(record.id);
-    if (controller || (previous && previous.saved === previous.total)) { await list(); return; }
+    if (controller || previous?.running || (previous && previous.saved === previous.total)) { await list(); return; }
+    if (native) {
+      navigator.storage?.persist?.().catch(() => {});
+      feedback = "";
+      const row = await store.begin(record);
+      if (row.saved < row.urls.length) {
+        await native.start({...scope, generation: row.generation, title: row.title, urls: row.urls, offset: row.saved});
+        startingUntil = Date.now() + 5000;
+      }
+      await refresh();
+      return;
+    }
     const abort = new AbortController();
     feedback = "";
     controller = abort;
@@ -169,14 +256,7 @@ export function downloads(username, {escape, notify, direction, unauthorized, pr
           status.textContent = (i+1) + " of " + row.urls.length + " pages saved";
           status.closest("section").querySelector('[data-local="read"]').hidden = false;
         }
-        if (active?.generation === row.generation && active.saved <= i) {
-          active.saved = i+1;
-          const slider = dialog.querySelector('input[type="range"]');
-          slider.max = String(active.saved);
-          slider.disabled = false;
-          dialog.querySelector("[data-total]").textContent = active.saved;
-          dialog.querySelector('[data-local="next"]').disabled = false;
-        }
+        if (active?.generation === row.generation) updateTotal(i + 1);
       }
       if (!disposed) notify("Chapter saved for offline reading.");
     } catch (err) {
@@ -187,7 +267,7 @@ export function downloads(username, {escape, notify, direction, unauthorized, pr
     } finally {
       controller = saving = null;
       const last = progress.get(record.id);
-      remember(record.id, last.saved, last.total);
+      if (last) remember(record.id, last.saved, last.total);
       if (!disposed && dialog.open && !active) await list();
     }
   }
@@ -202,7 +282,7 @@ export function downloads(username, {escape, notify, direction, unauthorized, pr
     return true;
   }
   dialog.oncancel = e => { e.preventDefault(); back(); };
-  dialog.onclose = () => { ++serial; active = null; releaseImage(); };
+  dialog.onclose = () => { if (location.hash === "#downloads") history.replaceState(null, "", "#library"); clearTimeout(timer); ++serial; active = null; releaseImage(); sync().catch(err => notify(errorMessage(err))); };
   dialog.onchange = e => { if (active && e.target.matches('input[type="range"]')) read(active.id, Number(e.target.value) - 1).catch(err => notify(errorMessage(err))); };
   dialog.onkeydown = e => {
     if (!active || e.target.matches('input[type="range"]')) return;
@@ -232,12 +312,23 @@ export function downloads(username, {escape, notify, direction, unauthorized, pr
       if (cmd === "list") await list();
       if (cmd === "read") await read(id);
       if (cmd === "prev" || cmd === "next") turn(cmd === "next" ? 1 : -1);
-      if (cmd === "pause") controller?.abort();
-      if (cmd === "remove") { await store.remove(id); progress.delete(id); if (!disposed) progressChanged(id); feedback = ""; await list(); }
-      if (cmd === "resume") { const row = (await store.list()).find(r => r.id === id); if (row) await save(row); }
+      if (cmd === "pause" || cmd === "remove") {
+        const row = (await store.list()).find(r => r.id === id);
+        if (native && row) await native.change({...scope, generation: row.generation, remove: cmd === "remove"});
+        if (cmd === "pause") controller?.abort();
+        if (cmd === "remove") {
+          await store.remove(id);
+          ++reads;
+          progress.delete(id);
+          if (!disposed) progressChanged(id);
+        }
+        feedback = "";
+        await list();
+      }
+      if (cmd === "resume") { const row = (await records()).find(r => r.id === id); if (row) await save(row); }
     } catch (err) { notify(errorMessage(err)); }
   };
   return {list, save, back, progress: id => progress.get(id), isOpen: () => dialog.open,
     hasSaved: async () => (await store.list()).length > 0,
-    dispose() { disposed = true; ++serial; controller?.abort(); dialog.remove(); releaseImage(); store.database.then(db => db.close(), () => {}); }};
+    dispose() { document.removeEventListener("visibilitychange", visibility); clearTimeout(timer); disposed = true; ++serial; controller?.abort(); dialog.remove(); releaseImage(); store.database.then(db => db.close(), () => {}); }};
 }
