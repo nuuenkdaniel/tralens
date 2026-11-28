@@ -278,7 +278,7 @@ function library() {
   if (!catalog.books.length)
     return (
       header(false) +
-      '<main class="empty"><h1>Your library is <em>empty</em></h1><p class="meta">Add Japanese manga pages to read them in English, side by side with the originals.</p>' +
+      '<main class="empty"><h1>Your library is <em>empty</em></h1><p class="meta">Add Japanese, Chinese, or Korean comics to read them in English, side by side with the originals.</p>' +
       btn("add", "Add manga", "primary", "plus") +
       '<p class="hint">PNG, JPEG, WebP, PDF, CBZ or ZIP · Drop files here to get started</p></main>'
     );
@@ -472,7 +472,10 @@ function detail(b) {
               .filter(Boolean)
               .join(" · "),
           ) +
-          "</small></a>" + (offline ? '<button class="btn" data-action="save-offline" data-id="' + c.id +
+          "</small></a>" + '<button class="btn" data-action="chapter-language" data-id="' + c.id +
+          '">Language · ' + (c.source_language === "auto" ? "Manga" : sourceLanguages[c.source_language || "ja"]) +
+          (c.source_language === "auto" && c.detected_language ? " (" + sourceLanguages[c.detected_language] + (c.language_uncertain ? ", uncertain" : "") + ")" : "") +
+          '</button>' + (offline ? '<button class="btn" data-action="save-offline" data-id="' + c.id +
             '">' + icon("download") + 'Save offline</button>' : "") + "<details><summary>Pages in " +
           esc(c.title) +
           '</summary><div class="pages" data-chapter="' + c.id + '"></div></details>',
@@ -900,6 +903,13 @@ sheet.addEventListener("close", () => {
   focusReturn?.focus();
   showChrome();
 });
+const sourceLanguages = {auto: "Auto", ja: "Japanese", zh: "Chinese", ko: "Korean"};
+function languageSelect(value, autoLabel = "Auto-detect once for this manga") {
+  return '<label class="field">Source language<select id="source-language">' +
+    Object.entries(sourceLanguages).map(([code, name]) =>
+      '<option value="' + code + '"' + (code === value ? " selected" : "") + '>' + (code === "auto" ? autoLabel : name) + '</option>'
+    ).join("") + '</select></label>';
+}
 function addBook(id = "", files = []) {
   if (pendingImport) {
     $("#import-status").scrollIntoView();
@@ -913,6 +923,7 @@ function addBook(id = "", files = []) {
         (catalog.books.find((b) => b.id === id).chapters.length + 1)
       : "Chapter 1",
     files: [],
+    sourceLanguage: "auto",
   };
   addFiles(files);
   drawAdd();
@@ -1008,7 +1019,7 @@ function drawAdd() {
       '<label class="field">Chapter<input id="chapter" maxlength="200" required value="' +
       esc(draft.chapter) +
       '"></label>' +
-      '</div></details><p class="hint">' +
+      '</div></details>' + languageSelect(draft.sourceLanguage, draft.book ? "Use manga language" : undefined) + '<p class="hint">' +
       esc(privacy()) +
       '</p><div class="error" role="alert" id="import-error">' + esc(draft.fileError) + '</div><button class="primary" ' +
       (!draft.files.length || !config.render_enabled ? "disabled" : "") +
@@ -1059,6 +1070,7 @@ function menu(kind) {
       book.title,
       '<div class="menu-list">' +
         btn("rename", "Rename manga") +
+        btn("book-language", "Manga language") +
         btn("add-chapter", "Add chapter") +
         btn("retry-book", "Translate again") +
         btn("delete", "Delete from library", "danger") +
@@ -1156,6 +1168,20 @@ async function openReading(pageId, point) {
   if (index >= 0) sheet.querySelectorAll(".reading-text li")[index].scrollIntoView({block:"center"});
 }
 async function act(action, pageId) {
+  if (action === "book-language" || action === "chapter-language") {
+    const {book} = current();
+    const chapter = action === "chapter-language" ? book.chapters.find(c => c.id === pageId) : null;
+    const detected = sourceLanguages[book.detected_language];
+    const autoLabel = chapter ? "Use manga language" : detected
+      ? "Auto · " + detected + (book.language_uncertain ? " (uncertain)" : "") : undefined;
+    modal(chapter ? chapter.title : "Manga language", '<form id="language-form"' +
+      (chapter ? ' data-chapter="' + chapter.id + '"' : "") + '>' +
+      languageSelect((chapter || book).source_language, autoLabel) +
+      (chapter ? '<p>Re-translate this chapter using its saved translation settings.</p>' :
+        '<p>Applies to new chapters and re-translates chapters using the manga language.</p>') +
+      '<button class="primary">Apply and translate</button></form>');
+    return;
+  }
   if (action === "offline-library") return offline?.list();
   if (action === "save-offline") {
     const {book} = current();
@@ -1298,6 +1324,7 @@ document.addEventListener("input", (e) => {
     $("#shelf").innerHTML = shelf();
   }
   if (e.target.id === "wipe") setWipe(e.target.value);
+  if (draft && e.target.id === "source-language") draft.sourceLanguage = e.target.value;
   if (draft && ["title", "chapter"].includes(e.target.id)) {
     draft[e.target.id] = e.target.value;
     const summary = $(".import-summary p");
@@ -1562,7 +1589,7 @@ document.addEventListener("submit", async (e) => {
     const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
     const form = new FormData();
     form.append("metadata", JSON.stringify({import_id: id, book: draft.book,
-      title: draft.title, chapter: draft.chapter, options: settings()}));
+      title: draft.title, chapter: draft.chapter, source_language: draft.sourceLanguage, options: settings()}));
     draft.files.forEach(f => form.append("page", f.file));
     pendingImport = {id, form, name: draft.title || draft.chapter, route: location.hash};
     closeSheet();
@@ -1571,6 +1598,13 @@ document.addEventListener("submit", async (e) => {
   const button = e.target.querySelector('button:not([type="button"])');
   if (button) button.disabled = true;
   try {
+    if (e.target.id === "language-form") {
+      const chapter = e.target.dataset.chapter;
+      await api(chapter ? "library/chapter-language" : "library/book-language", {book: current().book.id, chapter,
+        source_language: $("#source-language").value});
+      closeSheet();
+      await refresh(true);
+    }
     if (e.target.id === "rename") {
       await api("library/rename", {
         book: current().book.id,

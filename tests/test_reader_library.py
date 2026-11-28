@@ -2,10 +2,12 @@ from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 import os
+import subprocess
 from tempfile import TemporaryDirectory
 import time
 import json
 import unittest
+from unittest.mock import patch
 import zipfile
 
 from PIL import Image
@@ -158,6 +160,92 @@ class ReaderLibraryTests(unittest.TestCase):
         self.assertEqual(self.calls[-1]["translation_model"], "local")
         self.library.change("delete", dict(book=book["id"]))
         self.assertEqual(self.library.catalog()["books"], [])
+
+    def test_chapter_language_is_cached_and_can_be_overridden(self):
+        added = self.library.add(self.meta, [self.file, self.file])
+        chapter = self.finished()["chapters"][0]
+        self.assertEqual((chapter["source_language"], chapter["detected_language"]), ("auto", "ja"))
+        self.assertTrue(chapter["language_uncertain"])  # The test pages are blank.
+        duration = chapter["detection_seconds"]
+        self.assertGreater(duration, 0)
+        change = {**added, "source_language": "ko"}
+        with self.assertRaises(RequestError):
+            self.library.change("chapter-language", change, "another-account")
+        self.library.change("chapter-language", change)
+        self.finished()
+        self.assertEqual([call["source_language"] for call in self.calls], ["ja", "ja", "ko", "ko"])
+        self.library.change("chapter-language", {**change, "source_language": "auto"})
+        chapter = self.finished()["chapters"][0]
+        self.assertEqual(chapter["detection_seconds"], duration)
+        self.assertEqual(self.calls[-1]["source_language"], "ja")
+        with self.assertRaises(RequestError):
+            self.library.change("chapter-language", {**change, "source_language": "xx"})
+
+    def test_explicit_chinese_skips_detection(self):
+        self.library.add({**self.meta, "source_language": "zh"}, [self.file])
+        chapter = self.finished()["chapters"][0]
+        self.assertIsNone(chapter["detection_seconds"])
+        self.assertEqual(self.calls[-1]["source_language"], "zh")
+
+    def test_manga_language_is_shared_across_imports_retries_and_restart(self):
+        with patch("tralens.devui.library.subprocess.run", wraps=subprocess.run) as probe:
+            first = self.library.add(self.meta, [self.file, self.file])
+            self.finished()
+            self.library.close()
+            self.library = Library(self.app)
+            another = {**self.meta, "book": first["book"], "chapter": "Two"}
+            second = self.library.add(another, [self.file])
+            self.finished()
+            self.library.add({**another, "chapter": "Extra", "source_language": "ko"}, [self.file])
+            self.finished()
+            self.library.change("retry", {**second, "options": self.meta["options"]})
+            self.finished()
+            change = {"book": first["book"], "source_language": "zh"}
+            with self.assertRaises(RequestError):
+                self.library.change("book-language", change, "another-account")
+            before = len(self.calls)
+            self.library.change("book-language", change)
+            self.finished()
+            self.assertEqual([x["source_language"] for x in self.calls[before:]], ["zh"] * 3)
+            self.library.change("book-language", {**change, "source_language": "auto"})
+            book = self.finished()
+            self.assertEqual(book["detected_language"], "ja")
+            self.assertEqual([c["source_language"] for c in book["chapters"]], ["auto", "auto", "ko"])
+            before = len(self.calls)
+            self.library.change("book-language", {**change, "source_language": "ja"})
+            book = self.finished()
+            self.assertEqual(book["source_language"], "ja")
+            self.assertEqual(len(self.calls), before)
+            self.assertEqual(probe.call_count, 1)
+
+    def test_first_manual_selection_is_the_manga_default(self):
+        first = self.library.add({**self.meta, "source_language": "ko"}, [self.file])
+        self.finished()
+        self.library.add({**self.meta, "book": first["book"]}, [self.file])
+        book = self.finished()
+        self.assertEqual(book["source_language"], "ko")
+        self.assertIsNone(book["detection_seconds"])
+        self.assertEqual([x["source_language"] for x in self.calls], ["ko", "ko"])
+
+    def test_migration_reuses_chapter_detection_and_preserves_mixed_languages(self):
+        first = self.library.add(self.meta, [self.file])
+        self.finished()
+        second = self.library.add({**self.meta, "book": first["book"]}, [self.file])
+        self.finished()
+        self.library.close()
+        with self.library.db() as db:
+            for column in ("source_language", "detected_language", "detection_seconds", "language_uncertain"):
+                db.execute(f"ALTER TABLE books DROP COLUMN {column}")
+            for item, language in ((first, "zh"), (second, "ko")):
+                db.execute("UPDATE chapters SET detected_language=?,language_uncertain=0,detection_seconds=3 WHERE id=?",
+                           (language, item["chapter"]))
+        self.library = Library(self.app)
+        self.library.add({**self.meta, "book": first["book"]}, [self.file])
+        book = self.finished()
+        self.assertEqual(book["detected_language"], "zh")
+        self.assertEqual([c["source_language"] for c in book["chapters"]], ["auto", "ko", "auto"])
+        self.assertEqual(self.calls[-1]["source_language"], "zh")
+        self.assertEqual(len(self.calls), 3)
 
     def test_archive_name_uses_current_title_and_fits_android_downloads(self):
         added = self.library.add(self.meta, [self.file])

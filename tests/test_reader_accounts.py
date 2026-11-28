@@ -292,7 +292,8 @@ class AccountTests(unittest.TestCase):
         self.stop()
         with sqlite3.connect(self.root / "reader.sqlite3") as db:
             db.execute("DROP INDEX book_account")
-            db.execute("ALTER TABLE books DROP COLUMN account")
+            for column in ("account", "source_language", "detected_language", "detection_seconds", "language_uncertain"):
+                db.execute(f"ALTER TABLE books DROP COLUMN {column}")
             db.execute("INSERT INTO books VALUES('legacy','Existing manga',0,0,NULL)")
         self.start()
         cookie, _ = self.register("new-reader")

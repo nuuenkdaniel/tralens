@@ -10,9 +10,9 @@ import time
 import zipfile
 import zlib
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageCms, ImageOps
 
-from ..rendering.preparation import source_rgb
+from ..rendering.preparation import MAX_PIXELS, MAX_SIDE, source_rgb
 from .server import MAX_UPLOAD, RequestError
 
 MAX_PAGES = 256
@@ -29,7 +29,7 @@ def webp_png(data):
     with Image.open(BytesIO(data), formats=("WEBP",)) as im:
         if im.format != "WEBP" or getattr(im, "n_frames", 1) != 1:
             raise ValueError("Choose a still WebP image.")
-        if im.width * im.height > 4_000_000 or max(im.size) > 4096:
+        if im.width * im.height > MAX_PIXELS or max(im.size) > MAX_SIDE:
             raise ValueError("WebP exceeds the 4 megapixel or 4096 pixel side limit.")
         rgba = ImageOps.exif_transpose(im).convert("RGBA")
         rgb = Image.new("RGB", rgba.size, "white")
@@ -37,6 +37,32 @@ def webp_png(data):
         out = BytesIO()
         rgb.save(out, format="PNG")
         return out.getvalue(), rgb.size
+
+
+def profiled_rgb(im):
+    """Convert a tagged opaque RGB scan to the sRGB working space."""
+    if (im.width * im.height > MAX_PIXELS or max(im.size) > MAX_SIDE or im.mode != "RGB"
+            or getattr(im, "n_frames", 1) != 1 or "transparency" in im.info or im.getexif().get(274, 1) != 1):
+        raise ValueError("Choose an opaque, upright RGB page within the image size limit.")
+    try:
+        rgb = ImageCms.profileToProfile(im, BytesIO(im.info["icc_profile"]),
+                                        ImageCms.createProfile("sRGB"), outputMode="RGB")
+    except (ImageCms.PyCMSError, OSError) as exc:
+        raise ValueError("Cannot convert the page’s embedded color profile.") from exc
+    rgb.info.clear()
+    return rgb
+
+
+def working_page(data, mime):
+    if mime == "image/webp":
+        return webp_png(data)[0]
+    with Image.open(BytesIO(data)) as im:
+        if not im.info.get("icc_profile"):
+            return data
+        with profiled_rgb(im) as rgb:
+            out = BytesIO()
+            rgb.save(out, format="PNG")
+            return out.getvalue()
 
 
 def poppler(command, deadline):
@@ -155,7 +181,7 @@ def image_page(name, data):
             _, size = webp_png(data)
             yield name, "image/webp", data, size
         elif im.format in ("PNG", "JPEG"):
-            with source_rgb(im):
+            with (profiled_rgb(im) if im.info.get("icc_profile") else source_rgb(im)):
                 yield name, Image.MIME[im.format], data, im.size
         else:
             raise ValueError("Choose a PNG, JPEG, WebP, or PDF file.")

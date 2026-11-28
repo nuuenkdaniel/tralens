@@ -1,6 +1,6 @@
 # Tralens
 
-Tralens is a self-hosted manga reader that translates Japanese pages into English. Import your own PNG, JPEG, WebP, PDF, CBZ, or ZIP files, read while pages translate, and switch between the original and translated pages.
+Tralens is a self-hosted manga reader that translates Japanese, Chinese, and Korean pages into English. Import your own PNG, JPEG, WebP, PDF, CBZ, or ZIP files, read while pages translate, and switch between the original and translated pages.
 
 ## Quick start
 
@@ -120,6 +120,8 @@ and test installation and reader sign-in before publishing.
 Each reader account has a private library. Only the server owner can connect and use ChatGPT. Other accounts translate with the server’s local model. For a headless HTTPS server, the [OAuth guide](#connect-chatgpt-with-oauth) shows how to complete sign-in from your computer. Use **Disconnect ChatGPT** in Settings to revoke access. See the [privacy notice](PRIVACY.txt).
 
 ## Using the reader
+
+New manga default to **Auto-detect once for this manga**. On the first import Tralens samples up to three available pages locally, saves the result, and reuses it for later chapters and retries. Choosing a language when creating the manga skips detection. Change the shared setting under **Manga actions → Manga language**, or override an individual chapter under **Language**. An inconclusive sample is marked **Japanese (uncertain)**. If you supply your own OCR model directory, include the Korean recognizer listed in the model notices or choose Japanese or Chinese manually.
 
 - Import PNG, JPEG, still WebP, multipage PDFs, or CBZ/ZIP chapter archives, arrange their reading order, and create a manga or append a chapter. Imports are atomic. The current image limits are 32 MiB and 4 megapixels per opaque page, 4096 pixels per side, and 4 GiB per import (up to 256 expanded pages). Archive images (PNG, JPEG, still WebP) are read in natural folder and filename order, so page 2 precedes page 10. Metadata and hidden files are skipped. PDFs use server-side Poppler (pdfinfo and pdftoppm) and util-linux prlimit. Each PDF page becomes a PNG with a 2000-pixel long edge, in document order. Original downloads for PDFs are these rendered pages. WebP originals retain their uploaded bytes; transparency is flattened onto white for translation.
 - Open a chapter while translation is running. The reader shows the original until a translated image becomes available. The queue processes one page at a time on the server and continues when the browser closes.

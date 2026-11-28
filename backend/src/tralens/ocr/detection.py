@@ -224,8 +224,12 @@ class OCR(GroupingMixin, ReviewMixin):
         proposals = []
         for text_boxes in images_text_boxes:
             image = cv2.imread(self.image_path) if text_boxes else None
+            language = getattr(self, "source_language", "ja")
+            if image is not None and language in ("zh", "ko"):
+                from .mixed_script import reread_lettering
+                reread_lettering(image, text_boxes, language, self.paddle_provenance["settings"])
             self.review_boxes(text_boxes, image, media_type=media)
-            if propose_units and identity.get("profile") == "v6_medium":
+            if propose_units and identity.get("profile") == "v6_medium" and getattr(self,"source_language","ja") == "ja":
                 self._short_reading_alternates(image,text_boxes)
             grouping = (self._group_boxes_manga if media == MediaType.MANGA
                         else self._group_boxes_proximity)
@@ -234,7 +238,7 @@ class OCR(GroupingMixin, ReviewMixin):
                 proposals.append(
                     propose_page_from_boxes(text_boxes, self.image_path,
                         complementary_ownership=complementary_ownership,
-                        regroup_companions=regroup_companions) if text_boxes else None)
+                        regroup_companions=regroup_companions, source_language=getattr(self,"source_language","ja")) if text_boxes else None)
         if propose_units:
             self.automatic_unit_proposals = proposals
         return images_text_groups

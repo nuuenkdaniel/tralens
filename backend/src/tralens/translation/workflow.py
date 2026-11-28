@@ -210,7 +210,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 allow_fragment_previews=False, review_ocr=False, review_model="qwen3.8:latest",
                 max_review_attempts=4, review_timeout=90, review_runtime=None, cancelled=lambda:False,
                 translation_policy='coverage-first', ocr_detect=None, ocr_refine=None, translation_context='isolated', source_localization=False,
-                luna_mode=None, related_pages=()):
+                luna_mode=None, related_pages=(), source_language="ja"):
     """Injected OCR factory is workflow-owned; an injected translation runtime is caller-owned.
 
     Invalid arguments/paths are rejected before creating any engine. Runtime/engine
@@ -280,7 +280,11 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
     endpoint = local_endpoint(endpoint)
     options = GenerationOptions(num_ctx=8192 if translation_context == 'nearby' else 4096,
                                 num_predict=num_predict, keep_alive=keep_alive)
-    paddle = resolve_profile(DEFAULT_PROFILE, device=device, model_root=model_root)
+    from ..ocr.chapter_language import LANGUAGES
+    from .contracts import Style
+    style = Style(source_language=LANGUAGES[source_language])
+    ocr_profile = "v6_korean" if source_language == "ko" else DEFAULT_PROFILE
+    paddle = resolve_profile(ocr_profile, device=device, model_root=model_root)
     if ocr_factory is None:
         validate_runtime(paddle.settings())
     image = Path(image).expanduser().resolve(strict=True)
@@ -307,7 +311,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
     output.mkdir(mode=0o700, exist_ok=False)
     state = {"schema_version": 2 if allow_fragment_previews else 1, "preview_only": True, "status": "running", "stage": "ocr",
         "input": {"path": str(image), "sha256": image_hash, "pixels_sha256": pixels_hash, "size": list(size)},
-        "settings": {"ocr_profile": paddle.identity(), "run_local_model": run_local_model, "model": model,
+        "settings": {"source_language": source_language, "ocr_profile": paddle.identity(), "run_local_model": run_local_model, "model": model,
             "profile": profile, "endpoint": endpoint, "model_identity": "configured tag only; weights/digest not authenticated",
             "max_attempts": max_attempts, "timeout": timeout, "generation_options": asdict(options),
             "allow_fragment_previews": allow_fragment_previews, "fragment_policy_revision": FRAGMENT_POLICY_REVISION,
@@ -376,7 +380,9 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 from ..ocr import OCR
                 ocr_factory = OCR
             engine = ocr_factory(str(image), device=device, model_root=str(Path(model_root).expanduser()),
-                                 model_profile=DEFAULT_PROFILE, enable_manga_ocr=False)
+                                 model_profile=ocr_profile, enable_manga_ocr=False)
+            if source_language != "ja":
+                engine.source_language = source_language
             engine.process_images(propose_units=True, complementary_ownership=True, regroup_companions=True)
             if ocr_detect is not None:
                 ocr_detect(engine)
@@ -390,7 +396,8 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 state['attempts'] += 1
                 persist()
                 try:
-                    state['frontier_discovery'] = discovery.extend(engine, image, size, model, timeout)
+                    discovery_options = {} if source_language == "ja" else {"language": style.source_language}
+                    state['frontier_discovery'] = discovery.extend(engine, image, size, model, timeout, **discovery_options)
                 except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as error:
                     state['frontier_discovery'] = dict(model=model, added_ids=[], error=str(error)[:512])
                 assert_source()
@@ -402,7 +409,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                     state['attempts'] += 1
                     persist()
                     try:
-                        detail = discovery.extend(engine, image, size, model, timeout, repeated=repeated)
+                        detail = discovery.extend(engine, image, size, model, timeout, repeated=repeated, **discovery_options)
                         discovery_result['repeated_check'] = detail
                         discovery_result['proposed'] += detail['proposed']
                         discovery_result['added_ids'].extend(detail['added_ids'])
@@ -484,7 +491,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                     reader_presentations.validate_saved(state['ocr'],rgb,output=output)
         records,fragment_requests = {},{}
         for unit in units:
-            request = TranslationRequest((unit,), (unit.unit_id,))
+            request = TranslationRequest((unit,), (unit.unit_id,), style=style)
             status = "blocked" if unit.disposition == "blocked" else "not_selected" if selected_ids and unit.unit_id not in selected_ids else "pending"
             record = {"unit": _snapshot(unit), "unit_revision": unit.revision, "request": _snapshot(request),
                 "request_revision": request.revision, "status": status, "blocking_reasons": list(unit.blocking_reasons),
@@ -507,7 +514,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                     preferred = preferred_reading(unit)
                     reading_revision = preferred.revision if preferred is not None else reading_revision
                 derived = coverage.derive(unit, reading_revision)
-                request = TranslationRequest((derived,), (derived.unit_id,))
+                request = TranslationRequest((derived,), (derived.unit_id,), style=style)
                 record.update(input_kind=coverage.KIND, translation_input=_snapshot(derived),
                     coverage=coverage.provenance(unit, reading_revision), request=_snapshot(request), request_revision=request.revision,
                     status='not_selected' if selected_ids and unit.unit_id not in selected_ids else 'pending',
@@ -518,7 +525,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
                 derived,rejected = fragment_plan(unit,allow_fragment_previews=True)
                 record["fragment_rejection_reasons"] = list(rejected)
                 for fragment in derived:
-                    fragment_request = FragmentRequest(fragment)
+                    fragment_request = FragmentRequest(fragment, style=style)
                     fragment_requests[unit.unit_id].append(fragment_request)
                     record["fragment_previews"].append({"input_kind":"unverified_text_fragment",
                         "input":_snapshot(fragment), "input_revision":fragment.revision,
@@ -532,7 +539,7 @@ def run_preview(image, output, *, device, model_root, run_local_ocr=False, run_l
             state["units"].append(record)
             records[unit.unit_id] = (record, request)
         if translation_context != 'isolated' and units:
-            planned = context.page_plan(units, state['units'], state['ocr']['batches'][0],translation_context)
+            planned = context.page_plan(units, state['units'], state['ocr']['batches'][0],translation_context,style=style)
             for identity, (request, proof) in planned.items():
                 record, _ = records[identity]
                 record.update(request=_snapshot(request), request_revision=request.revision, context_selection=proof)
