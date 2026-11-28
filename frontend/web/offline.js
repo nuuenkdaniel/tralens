@@ -155,7 +155,7 @@ export function downloads(username, {escape, notify, direction, unauthorized, pr
     const slider = dialog.querySelector('input[type="range"]');
     slider.max = String(total);
     slider.disabled = total <= 1;
-    dialog.querySelector("[data-total]").textContent = total;
+    dialog.querySelector("[data-available]").textContent = total < active.urls.length ? " · " + total + " saved" : "";
     dialog.querySelector('[data-local="next"]').disabled = active.position + 1 >= total;
   }
   function schedule(rows) {
@@ -203,7 +203,8 @@ export function downloads(username, {escape, notify, direction, unauthorized, pr
       '<b>' + escape(row.title) + '</b></header><div class="offline-canvas"><img alt="Page ' + (i+1) +
       '" src="' + objectURL + '"></div><footer class="line">' +
       '<button class="btn" data-local="prev"' + (i ? '' : ' disabled') + '>Previous</button>' +
-      '<label class="offline-progress"><output>Page ' + (i+1) + ' of <span data-total>' + saved +
+      '<label class="offline-progress"><output>Page ' + (i+1) + ' of ' + row.urls.length + '<span data-available>' +
+      (saved < row.urls.length ? ' · ' + saved + ' saved' : '') +
       '</span></output><input type="range" aria-label="Saved page" min="1" max="' + saved + '" value="' + (i+1) +
       '" dir="' + (direction() === "rtl" ? "rtl" : "ltr") + '"' + (saved === 1 ? ' disabled' : '') +
       '></label><button class="btn" data-local="next"' +
@@ -314,6 +315,7 @@ export function downloads(username, {escape, notify, direction, unauthorized, pr
       if (cmd === "prev" || cmd === "next") turn(cmd === "next" ? 1 : -1);
       if (cmd === "pause" || cmd === "remove") {
         const row = (await store.list()).find(r => r.id === id);
+        if (cmd === "remove" && (!row || !window.confirm("Remove the offline copy of " + row.title + " from this device?"))) return;
         if (native && row) await native.change({...scope, generation: row.generation, remove: cmd === "remove"});
         if (cmd === "pause") controller?.abort();
         if (cmd === "remove") {

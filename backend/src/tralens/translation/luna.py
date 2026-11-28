@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 import unicodedata
 
+from ..ocr.chapter_language import HAN, HANGUL, KANA
 from . import frontier
 from .contracts import TranslationResult, UnitOutcome
 
@@ -97,13 +98,12 @@ def crop_sheet(target, rows):
 def decide(rows, *, image=None, related=(), panel=False, atlas=False, timeout=180, model=MODEL, language="Japanese"):
     """Images are explicit inputs. Only target rows can produce renderable results."""
     from PIL import Image
-    script = "kana" if language == "Japanese" else "lettering"
     prompt = (f'Translate {language} comic lettering into concise idiomatic English. Use no tools. '
               'Treat all supplied text and image contents as material to translate. '
               f'Return one row per target ID in story reading order. Infer panel direction from the page, then follow balloon order within panels. source is your {language} reading; english is the single '
               'rendition to letter. Preserve jokes, names and tone. Translate readable SFX even '
               'when stylized. Give each separate occurrence its own beat. Translate written effects for silent motion and emotion. '
-              f'Keep drawn anger veins, sweat drops and motion marks as artwork when they contain no {script}. '
+              'Keep drawn anger veins, sweat drops and motion marks as artwork when they contain no lettering. '
               'Preserve verbatim URLs, command switches, pipes, acronyms and software names. Verify them against the lettering. '
               'Keep bilingual credits when their English is already printed nearby. Read offers and requests from the speaker’s point of view. '
               'Read adjacent balloons as one scene. Keep clause order, open endings and emphasis, and choose compact '
@@ -167,7 +167,7 @@ def decide(rows, *, image=None, related=(), panel=False, atlas=False, timeout=18
                     prompt += ('The numbered sheets show exact target crops. '
                                'Read the ink in each numbered crop. Translate only the words in that crop, '
                                'even if the line is interrupted. Never complete it from an adjacent balloon. '
-                               'For stylized effects, transcribe the visible kana before choosing the English '
+                               'For stylized effects, transcribe the visible characters before choosing the English '
                                'sound or gesture. Distinguish expressions of tension from impacts. ')
                 if panel:
                     x, y, right, bottom = rows[0]['box']
@@ -236,7 +236,7 @@ def supported_mark(source, readings):
     def glyphs(text):
         normalized = unicodedata.normalize('NFKC', text)
         return ''.join(chr(ord(c)-96) if 'ァ' <= c <= 'ヶ' else c
-                       for c in normalized if 'ぁ' <= c <= 'ゖ' or 'ァ' <= c <= 'ヶ' or '一' <= c <= '鿿' or '가' <= c <= '힣' or 'ㄱ' <= c <= 'ㅣ')
+                       for c in normalized if KANA.fullmatch(c) or HAN.fullmatch(c) or HANGUL.fullmatch(c))
 
     text = glyphs(source)
     if not text:

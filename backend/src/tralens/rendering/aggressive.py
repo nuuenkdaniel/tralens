@@ -362,6 +362,47 @@ def printed_menu_fill(crop, own, mask):
     return result
 
 
+def repeated_row_donors(crop, mask, protected, stride):
+    """Find masked pixels where two nearby copies agree with the surrounding art."""
+    accepted = np.zeros_like(mask)
+    if crop.shape[1] <= 2 * stride:
+        return accepted
+    center = np.s_[:, stride:-stride]
+    left = np.s_[:, :-2*stride]
+    right = np.s_[:, 2*stride:]
+    known = ~(mask | protected)
+    both_known = known[left] & known[right]
+    copies_agree = (crop[left] == crop[right]).all(axis=2)
+    left_matches = (crop[center] == crop[left]).all(axis=2)
+    right_matches = (crop[center] == crop[right]).all(axis=2)
+    matching_context = known[center] & both_known & copies_agree & left_matches
+    conflicts = (protected[center] | (both_known & ~copies_agree)
+                 | (known[center] & known[left] & ~left_matches)
+                 | (known[center] & known[right] & ~right_matches))
+    window = (9, 5)
+    count = cv2.boxFilter(matching_context.astype(np.uint8), cv2.CV_16U, window,
+                          normalize=False, borderType=cv2.BORDER_CONSTANT)
+    contradicted = cv2.dilate(conflicts.astype(np.uint8), np.ones(window[::-1], np.uint8)).astype(bool)
+    accepted[center] = mask[center] & both_known & copies_agree & (count >= 14) & ~contradicted
+    return accepted
+
+
+def restore_repeated_detail(crop, mask, protected, candidate):
+    # Fine rules crossing lettering can repeat horizontally or vertically.
+    # Require agreement from both sides and keep the fallback at ambiguous crossings.
+    stride = 8
+    horizontal = repeated_row_donors(crop, mask, protected, stride)
+    vertical = repeated_row_donors(crop.transpose(1, 0, 2), mask.T, protected.T, stride).T
+    y, x = np.nonzero(horizontal & ~vertical)
+    candidate[y, x] = crop[y, x - stride]
+    y, x = np.nonzero(vertical & ~horizontal)
+    candidate[y, x] = crop[y - stride, x]
+    y, x = np.nonzero(horizontal & vertical)
+    agree = (crop[y, x - stride] == crop[y - stride, x]).all(axis=1)
+    candidate[y[agree], x[agree]] = crop[y[agree], x[agree] - stride]
+    return candidate
+
+
 def cheap(crop,mask,protected,paper_aside=False):
     ring=p.dilate(mask,4)&~p.dilate(mask,1)&~protected
     samples=crop[ring]
@@ -385,9 +426,34 @@ def cheap(crop,mask,protected,paper_aside=False):
                 and len(interior) and ((np.mean(difference<=3)>=.85 and np.mean(interior<=5)>=.45)
                     or (np.mean(difference<=3)>=.55 and np.mean(interior<=5)>=.7))):
             candidate=crop.copy();candidate[mask]=color
-            return candidate,'dominant_surface_fill'
+            return restore_repeated_detail(crop, mask, protected, candidate), 'dominant_surface_fill'
+        # Use a plane only when every surrounding pixel agrees to rounding
+        # precision. Artwork, shading boundaries and textures keep their normal route.
+        collar = p.dilate(mask, 4) & ~mask
+        if (not mask[0].any() and not mask[-1].any() and not mask[:, 0].any()
+                and not mask[:, -1].any() and not (protected & (collar | mask)).any()):
+            y, x = np.nonzero(collar)
+            basis = np.column_stack((x, y, np.ones_like(x)))
+            step = max(1, len(x) // 512)
+            plane, _, rank, _ = np.linalg.lstsq(basis[::step], crop[y[::step], x[::step]], rcond=None)
+            if rank == 3 and np.abs(basis @ plane - crop[y, x]).max() <= 1:
+                my, mx = np.nonzero(mask)
+                candidate = crop.copy()
+                candidate[mask] = np.rint(mx[:, None]*plane[0] + my[:, None]*plane[1] + plane[2]).clip(0, 255)
+                return candidate, 'measured_gradient_fill'
     candidate=cv2.inpaint(crop,mask.astype(np.uint8)*255,3,cv2.INPAINT_TELEA)
-    return candidate,'classical_telea_unverified'
+    # Telea can introduce speckles next to fine strokes even on solid paper.
+    # Restore the measured color where most of a 5x5 window is visible and
+    # every visible sample agrees in all three channels.
+    kernel = np.ones((5, 5), np.uint8)
+    known = ~mask
+    minimum = cv2.erode(np.where(known[:, :, None], crop, 255), kernel)
+    maximum = cv2.dilate(np.where(known[:, :, None], crop, 0), kernel)
+    count = cv2.boxFilter(known.astype(np.uint8), cv2.CV_16U, (5, 5),
+                          normalize=False, borderType=cv2.BORDER_CONSTANT)
+    flat = mask & (count >= 16) & (minimum == maximum).all(axis=2) & ~p.dilate(protected, 2)
+    candidate[flat] = minimum[flat]
+    return restore_repeated_detail(crop, mask, protected, candidate), 'classical_telea_unverified'
 
 
 def ruled_caption_band(own, rules, blocked):
@@ -1584,7 +1650,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             if context is not None:attempt['inference_context']=context
             cheap_signals=assess(crop,candidate,mask,job['predicted'],protected)
             defer_learned=round_index==0 and cheap_signals['outer_residual_pixels']>0
-            if selected is not None and (method not in ('measured_uniform_fill','dominant_surface_fill')
+            if selected is not None and (method not in ('measured_uniform_fill','dominant_surface_fill','measured_gradient_fill')
                     or entry['mask_evidence'].get('interrupted_ink')):
                 if job['layer'] is None:attempt['learned_skipped']='placement_unavailable_final_surface_cleanup'
                 elif defer_learned:attempt['learned_skipped']='deferred_until_residual_mask_expansion'
@@ -1661,7 +1727,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             signals=assess(crop,candidate,mask,job['predicted'],protected)
             attempt['assessment']=signals;entry['attempts'].append(attempt)
             artifacts[prefix+'-cleanplate.png']=Image.fromarray(candidate)
-            priority={'measured_uniform_fill':0,'dominant_surface_fill':0,'printed_menu_surface':0,'learned_lama':1,'learned_sdxl':1,'local_painted_strokes':1,'outlined_handwriting_fill':1,'classical_shiftmap':1,'classical_telea_unverified':2}[method]
+            priority={'measured_gradient_fill':0,'measured_uniform_fill':0,'dominant_surface_fill':0,'printed_menu_surface':0,'learned_lama':1,'learned_sdxl':1,'local_painted_strokes':1,'outlined_handwriting_fill':1,'classical_shiftmap':1,'classical_telea_unverified':2}[method]
             # Residual evidence precedes footprint cost. Do not optimize smoothness
             # or claim an aesthetic oracle; a valid learned result precedes cheap
             # classical output on equally complete masks.
@@ -2008,7 +2074,7 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             best_effort={'warnings':['Bounded aggressive removal may damage local artwork; reconstructed pixels are speculative.']})
         artifacts[f'recovery-{i:03d}-text.png']=layer
         summary[{'learned_lama':'selected_learned','learned_sdxl':'selected_learned','classical_telea_unverified':'selected_classical','classical_shiftmap':'selected_classical','local_painted_strokes':'selected_classical',
-            'printed_menu_surface':'selected_fill','outlined_handwriting_fill':'selected_fill','measured_uniform_fill':'selected_fill','dominant_surface_fill':'selected_fill'}[method]]+=1
+            'measured_gradient_fill':'selected_fill','printed_menu_surface':'selected_fill','outlined_handwriting_fill':'selected_fill','measured_uniform_fill':'selected_fill','dominant_surface_fill':'selected_fill'}[method]]+=1
     final_clean=Image.fromarray(plate);composite=Image.alpha_composite(final_clean.convert('RGBA'),new_text).convert('RGB')
     rec.require(np.array_equal(plate[initial_reserved],native_plate[initial_reserved]),'recovery overwrote committed cleanup')
     rec.require(np.array_equal(np.asarray(new_text)[initial_reserved],native_text[initial_reserved]),'recovery overwrote accepted English')
