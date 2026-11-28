@@ -25,7 +25,7 @@ RUN HF_HUB_DISABLE_TELEMETRY=1 sh deploy/download-models.sh /opt/tralens/ocr \
 COPY deploy/ deploy/
 RUN python deploy/font-manifest.py \
     && dpkg-query -W -f='${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n' > /app/debian-sources.tsv
-COPY README.md LICENSE THIRD_PARTY_NOTICES.md PRIVACY.md ./
+COPY README.md LICENSE THIRD_PARTY_NOTICES.txt PRIVACY.txt ./
 COPY backend/ backend/
 COPY frontend/web/ frontend/web/
 

@@ -90,7 +90,9 @@ def freeze(root,cases,config):
     write(root/'plan.json',{'authorization':'requires separate explicit user allocation; this file grants none',
         'maximum_forwards':32,'actual_planned_forwards':sum(v['reuse'] is None for v in requests),
         'maximum_seconds_per_forward':30,'automatic_retries':0,'model':spec,'cases':records,'requests':requests,
-        'files':files,'code':code,'criteria_document':'docs/production-best-effort-v2-plan.md',
+        'files':files,'code':code,
+        'criteria_document':('https://github.com/nuuenkdaniel/tralens/blob/'
+                             'b33a1775a1eac1e6e4feef966611969acdaf4755/docs/production-best-effort-v2-plan.md'),
         'scope':'reused local pages and one constructed tone control; no untouched-title claim'})
 
 
