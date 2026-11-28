@@ -134,8 +134,12 @@ public class UploadService extends Service {
 
     private synchronized HttpURLConnection open(String address, String cookie) throws IOException {
         if (stopped || cancelled != null) throw new InterruptedIOException();
+        connection = authenticatedConnection(address, cookie);
+        return connection;
+    }
+
+    static HttpURLConnection authenticatedConnection(String address, String cookie) throws IOException {
         HttpURLConnection c = (HttpURLConnection)new URL(address).openConnection();
-        connection = c;
         c.setConnectTimeout(20000);
         c.setReadTimeout(6 * 60000);
         c.setInstanceFollowRedirects(false);
@@ -149,7 +153,7 @@ public class UploadService extends Service {
         finally { closeConnection(); }
     }
 
-    private static String response(HttpURLConnection c) throws IOException {
+    static String response(HttpURLConnection c) throws IOException {
         int status = c.getResponseCode();
         boolean ok = status >= 200 && status < 300;
         String text = "";

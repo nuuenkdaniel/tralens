@@ -48,6 +48,7 @@ public class MainActivity extends BridgeActivity {
             .setAndroidScheme(scheme).setLoggingEnabled(false).create();
         registerPlugin(ReaderConnection.class);
         registerPlugin(ReaderUploads.class);
+        registerPlugin(ReaderDownloads.class);
         registerPlugin(PhoneSignIn.class);
         super.onCreate(state);
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
@@ -82,7 +83,7 @@ public class MainActivity extends BridgeActivity {
                 super.onPageFinished(view, url);
                 // Login and logout both reload the reader.
                 CookieManager.getInstance().flush();
-                openQueueIfRequested(view);
+                openTransfersIfRequested(view);
             }
 
             @Override
@@ -114,13 +115,14 @@ public class MainActivity extends BridgeActivity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        if (bridge != null && bridge.getWebView().getProgress() == 100) openQueueIfRequested(bridge.getWebView());
+        if (bridge != null && bridge.getWebView().getProgress() == 100) openTransfersIfRequested(bridge.getWebView());
     }
 
-    private void openQueueIfRequested(WebView view) {
-        if ("app.tralens.reader.QUEUE".equals(getIntent().getAction())) {
+    private void openTransfersIfRequested(WebView view) {
+        String action = getIntent().getAction();
+        if ("app.tralens.reader.QUEUE".equals(action) || "app.tralens.reader.DOWNLOADS".equals(action)) {
             getIntent().setAction(null);
-            view.evaluateJavascript("location.hash = 'queue'", null);
+            view.evaluateJavascript("app.tralens.reader.QUEUE".equals(action) ? "location.hash = 'queue'" : "location.hash = 'downloads'", null);
         }
     }
 

@@ -1820,6 +1820,7 @@ addEventListener("hashchange", () => {
   if (sheet.open) closeSheet();
   render();
   if (route()[0] === "queue") poll();
+  if (route()[0] === "downloads") offline?.list().catch(err => toast(err.message));
   window.scrollTo(0, 0);
 });
 function accountChanged() {
@@ -2070,6 +2071,7 @@ async function init() {
       toast("Local translation is selected. Choose a GPT model in Settings to connect.");
     }
     await refresh(true);
+    if (route()[0] === "downloads") await offline?.list();
   } catch (err) {
     if ($("#account-form")) return;
     config = null;

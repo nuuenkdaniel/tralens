@@ -87,17 +87,21 @@ public class ReaderUploads extends Plugin {
         } catch (Exception e) { call.reject("Could not queue these files. Choose them again in Files."); return; }
         try {
             start(getContext());
-            if (android.os.Build.VERSION.SDK_INT >= 33 && !getContext().getSharedPreferences("reader-uploads", 0)
-                    .getBoolean("notification-requested", false)) {
-                getContext().getSharedPreferences("reader-uploads", 0).edit().putBoolean("notification-requested", true).apply();
-                getActivity().runOnUiThread(() -> getActivity().requestPermissions(
-                    new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 701));
-            }
+            requestTransferNotifications(getActivity());
         } catch (RuntimeException e) {
             try { UploadQueue.update(getContext(), id, "failed", "Android paused this upload. Tap Retry."); }
             catch (Exception ignored) {}
         }
         call.resolve();
+    }
+
+    static void requestTransferNotifications(android.app.Activity activity) {
+        if (android.os.Build.VERSION.SDK_INT >= 33 && !activity.getSharedPreferences("reader-uploads", 0)
+                .getBoolean("notification-requested", false)) {
+            activity.getSharedPreferences("reader-uploads", 0).edit().putBoolean("notification-requested", true).apply();
+            activity.runOnUiThread(() -> activity.requestPermissions(
+                new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 701));
+        }
     }
 
     static void start(Context context) {
