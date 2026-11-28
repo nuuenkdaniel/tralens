@@ -143,6 +143,24 @@ class Library:
                                       ("language_uncertain", "INTEGER"), ("position", "TEXT")):
                 if name not in chapter_columns:
                     db.execute(f"ALTER TABLE chapters ADD COLUMN {name} {declaration}")
+            if "source_language" not in {r["name"] for r in db.execute("PRAGMA table_info(books)")}:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("ALTER TABLE books ADD COLUMN source_language TEXT NOT NULL DEFAULT 'auto'")
+                db.execute("ALTER TABLE books ADD COLUMN detected_language TEXT")
+                db.execute("ALTER TABLE books ADD COLUMN detection_seconds REAL")
+                db.execute("ALTER TABLE books ADD COLUMN language_uncertain INTEGER")
+                # Seed the shared result from an existing detection, keeping divergent translations as overrides.
+                db.execute("""UPDATE books SET (detected_language,detection_seconds,language_uncertain) =
+                    (SELECT detected_language,detection_seconds,language_uncertain FROM chapters
+                     WHERE book=books.id AND source_language='auto' AND detected_language IS NOT NULL
+                     ORDER BY language_uncertain, rowid LIMIT 1)""")
+                db.execute("""UPDATE books SET source_language=(
+                    SELECT MIN(source_language) FROM chapters WHERE book=books.id)
+                    WHERE id IN (SELECT book FROM chapters GROUP BY book
+                                 HAVING COUNT(DISTINCT source_language)=1 AND MIN(source_language)!='auto')""")
+                db.execute("""UPDATE chapters SET source_language=detected_language
+                    WHERE source_language='auto' AND detected_language IS NOT NULL AND
+                    detected_language != (SELECT detected_language FROM books WHERE id=chapters.book)""")
             db.execute(
                 "UPDATE pages SET status='failed',error='Translation was interrupted. Try again.' WHERE status='running'"
             )
@@ -195,12 +213,18 @@ class Library:
             db.execute("BEGIN")
             books = {
                 r["id"]: dict(r, chapters=[])
-                for r in db.execute("SELECT id,title,added,last_read,position FROM books WHERE account=? ORDER BY rowid", (account,))
+                for r in db.execute("SELECT id,title,added,last_read,position,source_language,detected_language,detection_seconds,language_uncertain FROM books WHERE account=? ORDER BY rowid", (account,))
             }
             chapters = {}
             for r in db.execute("SELECT * FROM chapters WHERE book IN (SELECT id FROM books WHERE account=?) ORDER BY rowid", (account,)):
                 chap = chapters[r["id"]] = dict(r, pages=[])
-                books[r["book"]]["chapters"].append(chap)
+                book = books[r["book"]]
+                if chap["source_language"] == "auto":
+                    inherited = book["source_language"] == "auto"
+                    chap.update(detected_language=book["detected_language"] if inherited else book["source_language"],
+                                language_uncertain=book["language_uncertain"] if inherited else False,
+                                detection_seconds=book["detection_seconds"] if inherited else None)
+                book["chapters"].append(chap)
             for r in db.execute(
                 "SELECT id,chapter,name,width,height,status,error,reading_width,reading IS NOT NULL AND reading != '[]' AS has_text,updated,final IS NOT NULL AS ready FROM pages WHERE chapter IN (SELECT chapters.id FROM chapters JOIN books ON chapters.book=books.id WHERE account=?) ORDER BY rowid", (account,)
             ):
@@ -294,17 +318,19 @@ class Library:
                     return prior
             require_space(self.path, total)
             self.check_capacity(db, total)
+            language = chapter_language(meta.get("source_language", "auto"))
             if not book:
                 book = uuid.uuid4().hex
                 db.execute(
-                    "INSERT INTO books(id,title,added,last_read,position,account) VALUES(?,?,?,0,NULL,?)",
-                    (book, label(meta.get("title")), time.time(), account),
+                    "INSERT INTO books(id,title,added,last_read,position,account,source_language) VALUES(?,?,?,0,NULL,?,?)",
+                    (book, label(meta.get("title")), time.time(), account, language),
                 )
+                language = "auto"  # The first chapter inherits the new manga’s setting.
             elif not db.execute("SELECT id FROM books WHERE id=? AND account=?", (book, account)).fetchone():
                 raise RequestError("Manga no longer exists.", 404)
             db.execute(
                 "INSERT INTO chapters(id,book,title,source_language) VALUES(?,?,?,?)",
-                (chapter, book, label(meta.get("chapter")), chapter_language(meta.get("source_language", "auto"))),
+                (chapter, book, label(meta.get("chapter")), language),
             )
             db.executemany(
                 "INSERT INTO pages(id,chapter,name,mime,source,width,height,status,options) VALUES(?,?,?,?,?,?,?,'queued',?)",
@@ -321,7 +347,9 @@ class Library:
             raise RequestError("Invalid manga or page identifier.")
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            if not db.execute("SELECT 1 FROM books WHERE id=? AND account=?", (book, account)).fetchone():
+            current = db.execute("SELECT source_language,detected_language FROM books WHERE id=? AND account=?",
+                                 (book, account)).fetchone()
+            if not current:
                 raise RequestError("Manga unavailable.", 404)
             if action == "rename":
                 updated = db.execute(
@@ -352,6 +380,16 @@ class Library:
                         raise RequestError("Page is starting. Try skipping again in a moment.", 409)
                     self.app.cancel(target["job"])
                 updated = db.execute("UPDATE pages SET status='skipped',error=NULL WHERE id=?", (body["page"],))
+            elif action == "book-language":
+                language = chapter_language(body.get("source_language"))
+                updated = db.execute("UPDATE books SET source_language=? WHERE id=?", (language, book))
+                previous = current["source_language"]
+                old_language = current["detected_language"] if previous == "auto" else previous
+                new_language = current["detected_language"] if language == "auto" else language
+                if old_language == new_language:
+                    return {}
+                db.execute("""UPDATE pages SET status='queued',job=NULL,error=NULL WHERE chapter IN
+                              (SELECT id FROM chapters WHERE book=? AND source_language='auto')""", (book,))
             elif action == "chapter-language":
                 language = chapter_language(body.get("source_language"))
                 chapter = body.get("chapter")
@@ -462,16 +500,23 @@ class Library:
 
     def resolve_language(self, chapter):
         with self.db() as db:
-            choice = db.execute("SELECT source_language,detected_language FROM chapters WHERE id=?", (chapter,)).fetchone()
+            choice = db.execute("""SELECT chapters.book, chapters.source_language AS chapter_language,
+                                          books.source_language, books.detected_language
+                                   FROM chapters JOIN books ON books.id=chapters.book WHERE chapters.id=?""",
+                                (chapter,)).fetchone()
             if not choice:
                 raise RequestError("Chapter was removed.")
-            if choice["source_language"] != "auto":
-                return choice["source_language"]
+            for setting in ("chapter_language", "source_language"):
+                if choice[setting] != "auto":
+                    return choice[setting]
             if choice["detected_language"]:
                 return choice["detected_language"]
             started = time.monotonic()
-            pages = db.execute("SELECT id FROM pages WHERE chapter=? ORDER BY rowid", (chapter,)).fetchall()
-            # Start inside the chapter so cover lettering does not dominate the decision.
+            book = choice["book"]
+            pages = db.execute("""SELECT pages.id FROM pages JOIN chapters ON chapters.id=pages.chapter
+                                  WHERE chapters.book=? AND chapters.source_language='auto' ORDER BY pages.rowid""",
+                               (book,)).fetchall()
+            # One interior page and two ends across the manga available at first import.
             indexes = dict.fromkeys((len(pages)//2, 0, len(pages)-1))
             with tempfile.TemporaryDirectory(prefix="tralens-language-") as temp:
                 paths = []
@@ -488,8 +533,8 @@ class Library:
                 report = json.loads(result.stdout.strip().splitlines()[-1])
         language = chapter_language(report["language"])
         with self.db() as db:
-            db.execute("UPDATE chapters SET detected_language=?,detection_seconds=?,language_uncertain=? WHERE id=?",
-                       (language, time.monotonic()-started, int(report["fallback"]), chapter))
+            db.execute("UPDATE books SET detected_language=?,detection_seconds=?,language_uncertain=? WHERE id=?",
+                       (language, time.monotonic()-started, int(report["fallback"]), book))
         return language
 
     def work(self):
