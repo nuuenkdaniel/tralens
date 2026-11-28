@@ -1981,6 +1981,11 @@ def recover(rgb,source,raw,rows,clean,text,erase,layout,font_data,coverage,style
             except ValueError:
                 pass
             else:
+                if (backend is not None and backend.config.get('backend') == 'auto'
+                        and method in ('dominant_surface_fill','measured_uniform_fill') and not row.get('effect_style')):
+                    from . import balloon_expansion
+                    layer,metrics = balloon_expansion.finish(candidate,job['own'],job['protected'] | blocked,
+                                                             layer,metrics,font_data,coverage)
                 local_alpha = np.asarray(layer.getchannel('A'))!=0
                 entry.update(layout=metrics,placement_frame='readable_overflow')
                 job['proof'] = metrics
