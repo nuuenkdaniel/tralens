@@ -7,7 +7,7 @@ import unicodedata
 LANGUAGES = {"ja": "Japanese", "zh": "Chinese", "ko": "Korean"}
 KANA = re.compile(r"[ぁ-ゖァ-ヺｦ-ｯｱ-ﾝ]")
 HAN = re.compile(r"[㐀-䶿一-鿿\U00020000-\U0002a6df\U0002a700-\U0002ebe0\U00030000-\U0003134a]")
-HANGUL = re.compile(r"[가-힣ㄱ-ㅎㅏ-ㅣ]")
+HANGUL = re.compile(r"[가-힣ㄱ-ㅎㅏ-ㅣᄀ-하-ᅵᆨ-ᇂ]")
 
 
 def language_votes(shared, korean):

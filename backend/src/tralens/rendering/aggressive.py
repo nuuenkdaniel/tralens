@@ -362,6 +362,47 @@ def printed_menu_fill(crop, own, mask):
     return result
 
 
+def repeated_row_donors(crop, mask, protected, stride):
+    """Find masked pixels where two nearby copies agree with the surrounding art."""
+    accepted = np.zeros_like(mask)
+    if crop.shape[1] <= 2 * stride:
+        return accepted
+    center = np.s_[:, stride:-stride]
+    left = np.s_[:, :-2*stride]
+    right = np.s_[:, 2*stride:]
+    known = ~(mask | protected)
+    both_known = known[left] & known[right]
+    copies_agree = (crop[left] == crop[right]).all(axis=2)
+    left_matches = (crop[center] == crop[left]).all(axis=2)
+    right_matches = (crop[center] == crop[right]).all(axis=2)
+    matching_context = known[center] & both_known & copies_agree & left_matches
+    conflicts = (protected[center] | (both_known & ~copies_agree)
+                 | (known[center] & known[left] & ~left_matches)
+                 | (known[center] & known[right] & ~right_matches))
+    window = (9, 5)
+    count = cv2.boxFilter(matching_context.astype(np.uint8), cv2.CV_16U, window,
+                          normalize=False, borderType=cv2.BORDER_CONSTANT)
+    contradicted = cv2.dilate(conflicts.astype(np.uint8), np.ones(window[::-1], np.uint8)).astype(bool)
+    accepted[center] = mask[center] & both_known & copies_agree & (count >= 14) & ~contradicted
+    return accepted
+
+
+def restore_repeated_detail(crop, mask, protected, candidate):
+    # Fine rules crossing lettering can repeat horizontally or vertically.
+    # Require agreement from both sides and keep the fallback at ambiguous crossings.
+    stride = 8
+    horizontal = repeated_row_donors(crop, mask, protected, stride)
+    vertical = repeated_row_donors(crop.transpose(1, 0, 2), mask.T, protected.T, stride).T
+    y, x = np.nonzero(horizontal & ~vertical)
+    candidate[y, x] = crop[y, x - stride]
+    y, x = np.nonzero(vertical & ~horizontal)
+    candidate[y, x] = crop[y - stride, x]
+    y, x = np.nonzero(horizontal & vertical)
+    agree = (crop[y, x - stride] == crop[y - stride, x]).all(axis=1)
+    candidate[y[agree], x[agree]] = crop[y[agree], x[agree] - stride]
+    return candidate
+
+
 def cheap(crop,mask,protected,paper_aside=False):
     ring=p.dilate(mask,4)&~p.dilate(mask,1)&~protected
     samples=crop[ring]
@@ -385,7 +426,7 @@ def cheap(crop,mask,protected,paper_aside=False):
                 and len(interior) and ((np.mean(difference<=3)>=.85 and np.mean(interior<=5)>=.45)
                     or (np.mean(difference<=3)>=.55 and np.mean(interior<=5)>=.7))):
             candidate=crop.copy();candidate[mask]=color
-            return candidate,'dominant_surface_fill'
+            return restore_repeated_detail(crop, mask, protected, candidate), 'dominant_surface_fill'
         # Use a plane only when every surrounding pixel agrees to rounding
         # precision. Artwork, shading boundaries and textures keep their normal route.
         collar = p.dilate(mask, 4) & ~mask
@@ -412,7 +453,7 @@ def cheap(crop,mask,protected,paper_aside=False):
                           normalize=False, borderType=cv2.BORDER_CONSTANT)
     flat = mask & (count >= 16) & (minimum == maximum).all(axis=2) & ~p.dilate(protected, 2)
     candidate[flat] = minimum[flat]
-    return candidate,'classical_telea_unverified'
+    return restore_repeated_detail(crop, mask, protected, candidate), 'classical_telea_unverified'
 
 
 def ruled_caption_band(own, rules, blocked):

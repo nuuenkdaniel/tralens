@@ -55,6 +55,33 @@ class FinalReconstruction(unittest.TestCase):
         np.testing.assert_array_equal(result[verified], clean[verified])
         np.testing.assert_array_equal(result[~mask], source[~mask])
 
+    def test_broken_rule_restored_only_with_matching_flanks(self):
+        clean = np.full((31, 60, 3), 190, np.uint8)
+        clean[15] = [25, 50, 80]
+        mask = np.zeros(clean.shape[:2], bool)
+        mask[8:23, 29:31] = True
+        protected = np.zeros_like(mask)
+        crop = clean.copy()
+        crop[mask] = 0
+        self.assertTrue(aggressive.repeated_row_donors(crop, mask, protected, 8)[15, 29])
+        result, _ = aggressive.cheap(crop, mask, protected)
+        np.testing.assert_array_equal(result[15, 29], clean[15, 29])
+        np.testing.assert_array_equal(result[~mask], crop[~mask])
+        white_paper = np.where(crop == 190, 255, crop).astype(np.uint8)
+        # A broader OCR mask includes enough white paper to choose the dominant fill.
+        broad = mask.copy()
+        broad[5:26, 28:33] = True
+        restored, method = aggressive.cheap(white_paper, broad, protected)
+        self.assertEqual(method, "dominant_surface_fill")
+        np.testing.assert_array_equal(restored[15, 30], clean[15, 30])
+        vertical, _ = aggressive.cheap(white_paper.transpose(1, 0, 2), broad.T, protected.T)
+        np.testing.assert_array_equal(vertical.transpose(1, 0, 2), restored)
+        protected[15, 21] = True
+        self.assertFalse(aggressive.repeated_row_donors(crop, mask, protected, 8)[15, 29])
+        protected[:] = False
+        crop[15, 37] = 190
+        self.assertFalse(aggressive.repeated_row_donors(crop, mask, protected, 8)[15, 29])
+
     def test_light_print_on_midtone_panel_respects_border_and_reserved_pixels(self):
         crop = np.full((80,160,3),255,np.uint8)
         crop[5:75,5:150] = 25
