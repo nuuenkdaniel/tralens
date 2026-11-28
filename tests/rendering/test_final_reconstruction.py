@@ -25,6 +25,63 @@ class FinalReconstruction(unittest.TestCase):
         self.font=synthetic_font();self.coverage=n.font_coverage(self.font)
         self.style={'min_size':16,'max_size':26,'outline':0}
 
+    def test_gradient_fill_requires_consistent_surrounding_color(self):
+        y, x = np.indices((40, 80))
+        clean = np.stack((80+x, 100+y, 180-x), axis=-1).astype(np.uint8)
+        mask = (x > 15) & (x < 60) & (y > 8) & (y < 27)
+        source = clean.copy()
+        source[mask] = 0
+        protected = np.zeros_like(mask)
+        result, method = aggressive.cheap(source, mask, protected)
+        self.assertEqual(method, 'measured_gradient_fill')
+        np.testing.assert_array_equal(result, clean)
+        for blocked, disturbed in ((True, False), (False, True)):
+            protected[10, 15] = blocked
+            if disturbed:
+                source[10, 15] = 0
+            result, method = aggressive.cheap(source, mask, protected)
+            self.assertNotEqual(method, 'measured_gradient_fill')
+            np.testing.assert_array_equal(result[~mask], source[~mask])
+
+    def test_telea_keeps_exact_local_paper_color_on_two_tone_panel(self):
+        y, x = np.indices((48, 80))
+        clean = np.where((x < 40)[:, :, None], [92, 150, 101], [195, 110, 52]).astype(np.uint8)
+        mask = (y == 20) & (x > 10) & (x < 70)
+        source = clean.copy()
+        source[mask] = 0
+        result, method = aggressive.cheap(source, mask, np.zeros_like(mask))
+        self.assertEqual(method, 'classical_telea_unverified')
+        verified = mask & (abs(x - 40) > 2)
+        np.testing.assert_array_equal(result[verified], clean[verified])
+        np.testing.assert_array_equal(result[~mask], source[~mask])
+
+    def test_broken_rule_restored_only_with_matching_flanks(self):
+        clean = np.full((31, 60, 3), 190, np.uint8)
+        clean[15] = [25, 50, 80]
+        mask = np.zeros(clean.shape[:2], bool)
+        mask[8:23, 29:31] = True
+        protected = np.zeros_like(mask)
+        crop = clean.copy()
+        crop[mask] = 0
+        self.assertTrue(aggressive.repeated_row_donors(crop, mask, protected, 8)[15, 29])
+        result, _ = aggressive.cheap(crop, mask, protected)
+        np.testing.assert_array_equal(result[15, 29], clean[15, 29])
+        np.testing.assert_array_equal(result[~mask], crop[~mask])
+        white_paper = np.where(crop == 190, 255, crop).astype(np.uint8)
+        # A broader OCR mask includes enough white paper to choose the dominant fill.
+        broad = mask.copy()
+        broad[5:26, 28:33] = True
+        restored, method = aggressive.cheap(white_paper, broad, protected)
+        self.assertEqual(method, "dominant_surface_fill")
+        np.testing.assert_array_equal(restored[15, 30], clean[15, 30])
+        vertical, _ = aggressive.cheap(white_paper.transpose(1, 0, 2), broad.T, protected.T)
+        np.testing.assert_array_equal(vertical.transpose(1, 0, 2), restored)
+        protected[15, 21] = True
+        self.assertFalse(aggressive.repeated_row_donors(crop, mask, protected, 8)[15, 29])
+        protected[:] = False
+        crop[15, 37] = 190
+        self.assertFalse(aggressive.repeated_row_donors(crop, mask, protected, 8)[15, 29])
+
     def test_light_print_on_midtone_panel_respects_border_and_reserved_pixels(self):
         crop = np.full((80,160,3),255,np.uint8)
         crop[5:75,5:150] = 25

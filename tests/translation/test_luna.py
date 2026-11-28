@@ -16,6 +16,10 @@ class LunaTests(unittest.TestCase):
         return self.f.run_flow(model=luna.MODEL, run_local_model=True, max_attempts=1, **kwargs)
 
     def test_overlapping_marks_need_an_independently_read_character(self):
+        self.assertTrue(luna.supported_mark('ㅋㅋ', ['ᄏᄏ']))
+        self.assertFalse(luna.supported_mark('ㅋㅋ', ['ㅎㅎ']))
+        self.assertTrue(luna.supported_mark('𠮷', ['𠮷']))
+        self.assertFalse(luna.supported_mark('𠮷', ['吉']))
         self.assertFalse(luna.supported_mark('っ',['っ2','フハ','フフ','フ']))
         self.assertFalse(luna.supported_mark('つん',['っ2','フハ','フフ','フ']))
         self.assertTrue(luna.supported_mark('コツッ',['?','こつ','…','し']))
